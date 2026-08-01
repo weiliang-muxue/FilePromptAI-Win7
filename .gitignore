@@ -1,0 +1,24 @@
+# Generated application and dependency caches
+dist/
+lib/
+packages/
+redist/
+
+# Offline release staging and archives
+offline-release-*/
+FilePrompt-Win7-Full-v*/
+FilePrompt-Win7-Full-v*.zip
+FilePrompt-Win7-Full-v*.zip.sha256.txt
+FilePrompt-Win7-v*.zip
+
+# Test and tool build outputs
+tests/build-artifacts/
+tests/CreateFixtures.exe
+tools/nuget.exe
+
+# Local IDE and temporary files
+.vs/
+*.suo
+*.user
+*.tmp
+*.bak

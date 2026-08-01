@@ -1,0 +1,218 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Compression;
+using System.Text;
+using System.Xml;
+
+using FilePromptWin7;
+
+internal static class ExportSmokeTest
+{
+    private static int Main()
+    {
+        try
+        {
+            TestMarkdownTableAndCsv();
+            TestRaggedCsvAndInvalidCharacters();
+            TestDocxXmlAndNumbering();
+            Console.WriteLine("PASS | export hardening");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("FAIL | export hardening");
+            Console.Error.WriteLine(ex.ToString());
+            return 1;
+        }
+    }
+
+    private static void TestMarkdownTableAndCsv()
+    {
+        string markdown =
+            "| \u540D\u79F0 | \u5185\u5BB9 | \u8DEF\u5F84 | \u591A\u884C |\n" +
+            "| --- | :--- | ---: | :---: |\n" +
+            "| \u4E2D\u6587 | \u9017\u53F7, \u5F15\u53F7\" & <tag> | " +
+            "C:\\Temp\\file_name.txt | \u7B2C\u4E00\u884C<br>\u7B2C\u4E8C\u884C |\n" +
+            "| pipe | A\\|B | \\\\server\\share\\report_01.docx | `__init__` |";
+
+        MarkdownDocument document = MarkdownDocument.Parse(markdown);
+        AssertEqual(1, document.Tables.Count, "table count");
+        MarkdownTable table = document.Tables[0];
+        AssertEqual(4, table.Headers.Count, "header count");
+        AssertEqual(2, table.Rows.Count, "row count");
+        AssertEqual(
+            "C:\\Temp\\file_name.txt",
+            table.Rows[0][2],
+            "Windows path and underscore preservation");
+        AssertEqual("\u7B2C\u4E00\u884C\n\u7B2C\u4E8C\u884C", table.Rows[0][3], "HTML line break");
+        AssertEqual("A|B", table.Rows[1][1], "escaped pipe");
+        AssertEqual(
+            "\\\\server\\share\\report_01.docx",
+            table.Rows[1][2],
+            "UNC path preservation");
+        AssertEqual("__init__", table.Rows[1][3], "inline code preservation");
+
+        string expected =
+            "\u540D\u79F0,\u5185\u5BB9,\u8DEF\u5F84,\u591A\u884C\r\n" +
+            "\u4E2D\u6587,\"\u9017\u53F7, \u5F15\u53F7\"\" & <tag>\"," +
+            "C:\\Temp\\file_name.txt,\"\u7B2C\u4E00\u884C\n\u7B2C\u4E8C\u884C\"\r\n" +
+            "pipe,A|B,\\\\server\\share\\report_01.docx,__init__";
+        AssertEqual(expected, CsvExporter.ToCsv(document.Tables[0]), "complex CSV");
+
+        MarkdownDocument oneColumn = MarkdownDocument.Parse(
+            "| \u9879\u76EE |\n| --- |\n| \u503C |");
+        AssertEqual(1, oneColumn.Tables.Count, "one-column table count");
+        AssertEqual(
+            "\u9879\u76EE\r\n\u503C",
+            CsvExporter.ToCsv(oneColumn.Tables[0]),
+            "one-column CSV");
+
+        MarkdownDocument mismatchedColumns = MarkdownDocument.Parse(
+            "Not a table | value\n---\nparagraph");
+        AssertEqual(
+            0,
+            mismatchedColumns.Tables.Count,
+            "mismatched delimiter is not a table");
+
+        string outputPath = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "export-hardening.csv");
+        CsvExporter.Export(document, outputPath);
+        byte[] bytes = File.ReadAllBytes(outputPath);
+        AssertTrue(
+            bytes.Length >= 3 &&
+            bytes[0] == 0xEF &&
+            bytes[1] == 0xBB &&
+            bytes[2] == 0xBF,
+            "CSV UTF-8 BOM");
+        AssertEqual(
+            expected,
+            Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3),
+            "CSV file content");
+    }
+
+    private static void TestRaggedCsvAndInvalidCharacters()
+    {
+        MarkdownTable table = new MarkdownTable(
+            new List<string> { "A", "B" });
+        table.Rows.Add(new List<string> { "one" });
+        table.Rows.Add(new List<string>
+        {
+            "two",
+            "line 1\r\nline 2",
+            "quote \"value\""
+        });
+        table.Rows.Add(new List<string>
+        {
+            "bad\u0000control",
+            "bad\uD800surrogate"
+        });
+
+        string csv = CsvExporter.ToCsv(table);
+        string expected =
+            "A,B,\r\n" +
+            "one,,\r\n" +
+            "two,\"line 1\r\nline 2\",\"quote \"\"value\"\"\"\r\n" +
+            "bad\uFFFDcontrol,bad\uFFFDsurrogate,";
+        AssertEqual(expected, csv, "ragged and sanitized CSV");
+    }
+
+    private static void TestDocxXmlAndNumbering()
+    {
+        string markdown =
+            "# \u5BFC\u51FA\u6D4B\u8BD5\n\n" +
+            "A & B <tag> \"quote\" 'apostrophe'\n\n" +
+            "- \u5217\u8868\u9879\u4E00\n" +
+            "- \u5217\u8868\u9879\u4E8C\n\n" +
+            "| \u5217 | \u503C |\n| --- | --- |\n" +
+            "| \u4E2D\u6587 | before\u0000middle\u000Bafter\uD800 \uD83D\uDE00 |";
+
+        byte[] content = DocxExporter.Create(markdown);
+        string outputPath = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "export-hardening.docx");
+        File.WriteAllBytes(outputPath, content);
+
+        using (MemoryStream memory = new MemoryStream(content))
+        using (ZipArchive archive = new ZipArchive(
+            memory,
+            ZipArchiveMode.Read,
+            false,
+            Encoding.UTF8))
+        {
+            AssertTrue(archive.GetEntry("word/document.xml") != null, "document.xml entry");
+            AssertTrue(archive.GetEntry("word/numbering.xml") != null, "numbering.xml entry");
+
+            foreach (ZipArchiveEntry entry in archive.Entries)
+            {
+                if (!entry.FullName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) &&
+                    !entry.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                string xml = ReadEntry(entry);
+                XmlDocument parsed = new XmlDocument();
+                parsed.PreserveWhitespace = true;
+                parsed.LoadXml(xml);
+            }
+
+            string documentXml = ReadEntry(archive.GetEntry("word/document.xml"));
+            AssertContains(documentXml, "A &amp; B &lt;tag&gt;", "XML escaping");
+            AssertTrue(documentXml.IndexOf('\u0000') < 0, "NUL removed from XML");
+            AssertTrue(documentXml.IndexOf('\u000B') < 0, "vertical tab removed from XML");
+            AssertTrue(documentXml.IndexOf('\uD800') < 0, "isolated surrogate removed from XML");
+            AssertContains(documentXml, "before\uFFFDmiddle\uFFFDafter\uFFFD", "invalid XML replacement");
+            AssertContains(documentXml, "\uD83D\uDE00", "supplementary Unicode preservation");
+
+            string numberingXml = ReadEntry(archive.GetEntry("word/numbering.xml"));
+            AssertContains(numberingXml, "w:val=\"&#x2022;\"", "stable bullet character");
+            AssertTrue(
+                numberingXml.IndexOf("Symbol", StringComparison.OrdinalIgnoreCase) < 0,
+                "bullet does not depend on Symbol font remapping");
+        }
+    }
+
+    private static string ReadEntry(ZipArchiveEntry entry)
+    {
+        using (Stream stream = entry.Open())
+        using (StreamReader reader = new StreamReader(
+            stream,
+            Encoding.UTF8,
+            true))
+        {
+            return reader.ReadToEnd();
+        }
+    }
+
+    private static void AssertContains(
+        string actual,
+        string expectedFragment,
+        string name)
+    {
+        if (actual == null ||
+            actual.IndexOf(expectedFragment, StringComparison.Ordinal) < 0)
+        {
+            throw new InvalidOperationException(
+                name + " did not contain the expected value: " + expectedFragment);
+        }
+    }
+
+    private static void AssertEqual<T>(T expected, T actual, string name)
+    {
+        if (!EqualityComparer<T>.Default.Equals(expected, actual))
+        {
+            throw new InvalidOperationException(
+                name + " mismatch. Expected [" + expected + "] but got [" + actual + "].");
+        }
+    }
+
+    private static void AssertTrue(bool condition, string name)
+    {
+        if (!condition)
+        {
+            throw new InvalidOperationException(name + " failed.");
+        }
+    }
+}

@@ -1,0 +1,7 @@
+* text=auto
+
+# Keep binary fixtures and application assets byte-for-byte identical.
+*.docx binary
+*.ico binary
+*.pdf binary
+*.png binary

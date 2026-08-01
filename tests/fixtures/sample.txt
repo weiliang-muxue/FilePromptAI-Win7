@@ -1,0 +1,3 @@
+﻿中文文本测试
+Hello FilePrompt
+第二行内容

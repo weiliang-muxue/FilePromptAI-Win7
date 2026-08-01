@@ -1,0 +1,2493 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.Specialized;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace FilePromptWin7
+{
+    internal sealed class MainForm : Form
+    {
+        private const int MaxCombinedTextCharacters = 4000000;
+        private const int MaxDisplayedUserCharacters = 8000;
+        private const float ExpandedSettingsHeight = 94F;
+
+        private readonly FileContentExtractor extractor;
+        private readonly ModelClient modelClient;
+        private readonly List<InputItem> inputItems;
+        private readonly ConversationStore conversationStore;
+        private readonly Dictionary<string, SessionDraft> sessionDrafts;
+
+        private TableLayoutPanel rootLayout;
+        private TableLayoutPanel workspaceLayout;
+        private RowStyle settingsRowStyle;
+        private Control settingsPanel;
+        private TextBox endpointTextBox;
+        private TextBox apiKeyTextBox;
+        private TextBox modelTextBox;
+        private TextBox sessionSearchTextBox;
+        private ListBox sessionListBox;
+        private Label sessionTitleLabel;
+        private Label connectionStatusLabel;
+        private ListView inputListView;
+        private RichTextBox promptTextBox;
+        private RichTextBox outputTextBox;
+        private Button addFileButton;
+        private Button pasteButton;
+        private Button removeButton;
+        private Button clearButton;
+        private Button generateButton;
+        private Button stopButton;
+        private Button copyOutputButton;
+        private Button saveOutputButton;
+        private Button exportWordButton;
+        private Button exportTableButton;
+        private Button newSessionButton;
+        private Button deleteSessionButton;
+        private Button renameSessionButton;
+        private Button backupSessionsButton;
+        private Button restoreSessionsButton;
+        private Button toggleSettingsButton;
+        private Button testConnectionButton;
+        private ToolStripStatusLabel statusLabel;
+        private ToolStripProgressBar progressBar;
+
+        private CancellationTokenSource generationCancellation;
+        private CancellationTokenSource connectionTestCancellation;
+        private StringBuilder streamedResponse;
+        private bool isAddingFiles;
+        private bool isLoadingSession;
+        private bool settingsExpanded;
+
+        private sealed class SessionDraft
+        {
+            public string Prompt { get; set; }
+            public IList<InputItem> Items { get; set; }
+
+            public SessionDraft()
+            {
+                Prompt = string.Empty;
+                Items = new List<InputItem>();
+            }
+        }
+
+        public MainForm()
+        {
+            extractor = new FileContentExtractor();
+            modelClient = new ModelClient();
+            inputItems = new List<InputItem>();
+            conversationStore = new ConversationStore();
+            sessionDrafts = new Dictionary<string, SessionDraft>(
+                StringComparer.OrdinalIgnoreCase);
+
+            InitializeWindow();
+            BuildInterface();
+            LoadSavedSettings();
+            EnsureInitialSession();
+            RefreshSessionList();
+            LoadCurrentSession();
+            if (!string.IsNullOrEmpty(conversationStore.LoadWarning))
+            {
+                SetStatus(conversationStore.LoadWarning);
+            }
+        }
+
+        private void InitializeWindow()
+        {
+            Text = "FilePrompt  ·  内网模型工作台";
+            StartPosition = FormStartPosition.CenterScreen;
+            MinimumSize = new Size(880, 520);
+            Rectangle workingArea = Screen.PrimaryScreen.WorkingArea;
+            Size = new Size(
+                Math.Max(
+                    MinimumSize.Width,
+                    Math.Min(1120, workingArea.Width - 32)),
+                Math.Max(
+                    MinimumSize.Height,
+                    Math.Min(640, workingArea.Height - 32)));
+            Font = new Font("Microsoft YaHei", 9F, FontStyle.Regular);
+            BackColor = Color.FromArgb(31, 35, 42);
+            AutoScaleMode = AutoScaleMode.None;
+            DoubleBuffered = true;
+            try
+            {
+                Icon = System.Drawing.Icon.ExtractAssociatedIcon(
+                    Application.ExecutablePath);
+            }
+            catch
+            {
+                // The window remains usable if the shell cannot read the icon.
+            }
+            AllowDrop = true;
+            KeyPreview = true;
+
+            DragEnter += OnDragEnter;
+            DragDrop += OnDragDrop;
+            KeyDown += OnMainKeyDown;
+            FormClosing += OnFormClosing;
+        }
+
+        private void BuildInterface()
+        {
+            rootLayout = new TableLayoutPanel();
+            rootLayout.Dock = DockStyle.Fill;
+            rootLayout.Padding = new Padding(8);
+            rootLayout.BackColor = BackColor;
+            rootLayout.ColumnCount = 2;
+            rootLayout.RowCount = 1;
+            rootLayout.ColumnStyles.Add(
+                new ColumnStyle(SizeType.Absolute, 232F));
+            rootLayout.ColumnStyles.Add(
+                new ColumnStyle(SizeType.Percent, 100F));
+            Controls.Add(rootLayout);
+
+            rootLayout.Controls.Add(CreateSessionSidebar(), 0, 0);
+            rootLayout.Controls.Add(CreateWorkspace(), 1, 0);
+            Shown += delegate { ResizeInputColumns(); };
+        }
+
+        private Control CreateSessionSidebar()
+        {
+            Panel panel = new Panel();
+            panel.Dock = DockStyle.Fill;
+            panel.BackColor = Color.FromArgb(23, 27, 33);
+            panel.Padding = new Padding(10);
+
+            TableLayoutPanel layout = new TableLayoutPanel();
+            layout.Dock = DockStyle.Fill;
+            layout.RowCount = 5;
+            layout.ColumnCount = 1;
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
+
+            Label brand = new Label();
+            brand.Text = "FILEPROMPT";
+            brand.ForeColor = Color.FromArgb(233, 238, 245);
+            brand.Font = new Font(Font, FontStyle.Bold);
+            brand.Dock = DockStyle.Fill;
+            brand.TextAlign = ContentAlignment.MiddleLeft;
+            layout.Controls.Add(brand, 0, 0);
+
+            newSessionButton = CreateButton("新会话", 200);
+            newSessionButton.Dock = DockStyle.Fill;
+            newSessionButton.BackColor = Color.FromArgb(45, 121, 218);
+            newSessionButton.ForeColor = Color.White;
+            newSessionButton.FlatStyle = FlatStyle.Flat;
+            newSessionButton.FlatAppearance.BorderSize = 0;
+            newSessionButton.FlatAppearance.MouseOverBackColor =
+                Color.FromArgb(54, 132, 230);
+            newSessionButton.FlatAppearance.MouseDownBackColor =
+                Color.FromArgb(35, 101, 188);
+            newSessionButton.Click += OnNewSessionClick;
+            layout.Controls.Add(newSessionButton, 0, 1);
+
+            TableLayoutPanel searchLayout = new TableLayoutPanel();
+            searchLayout.Dock = DockStyle.Fill;
+            searchLayout.ColumnCount = 2;
+            searchLayout.RowCount = 1;
+            searchLayout.ColumnStyles.Add(
+                new ColumnStyle(SizeType.Absolute, 40F));
+            searchLayout.ColumnStyles.Add(
+                new ColumnStyle(SizeType.Percent, 100F));
+
+            Label searchLabel = new Label();
+            searchLabel.Text = "搜索";
+            searchLabel.Dock = DockStyle.Fill;
+            searchLabel.TextAlign = ContentAlignment.MiddleLeft;
+            searchLabel.ForeColor = Color.FromArgb(171, 183, 198);
+
+            sessionSearchTextBox = CreateInputBox();
+            sessionSearchTextBox.AccessibleName = "搜索会话";
+            sessionSearchTextBox.Margin = new Padding(2, 7, 0, 6);
+            sessionSearchTextBox.TextChanged += delegate
+            {
+                RefreshSessionList();
+            };
+            searchLayout.Controls.Add(searchLabel, 0, 0);
+            searchLayout.Controls.Add(sessionSearchTextBox, 1, 0);
+            layout.Controls.Add(searchLayout, 0, 2);
+
+            sessionListBox = new ListBox();
+            sessionListBox.Dock = DockStyle.Fill;
+            sessionListBox.BorderStyle = BorderStyle.None;
+            sessionListBox.BackColor = Color.FromArgb(23, 27, 33);
+            sessionListBox.ForeColor = Color.FromArgb(220, 226, 235);
+            sessionListBox.IntegralHeight = false;
+            sessionListBox.DrawMode = DrawMode.OwnerDrawFixed;
+            sessionListBox.ItemHeight = 48;
+            sessionListBox.DrawItem += OnSessionDrawItem;
+            sessionListBox.SelectedIndexChanged += OnSessionSelected;
+            layout.Controls.Add(sessionListBox, 0, 3);
+
+            TableLayoutPanel actions = new TableLayoutPanel();
+            actions.Dock = DockStyle.Fill;
+            actions.ColumnCount = 2;
+            actions.RowCount = 2;
+            actions.ColumnStyles.Add(
+                new ColumnStyle(SizeType.Percent, 50F));
+            actions.ColumnStyles.Add(
+                new ColumnStyle(SizeType.Percent, 50F));
+            actions.RowStyles.Add(
+                new RowStyle(SizeType.Percent, 50F));
+            actions.RowStyles.Add(
+                new RowStyle(SizeType.Percent, 50F));
+
+            renameSessionButton = CreateButton("重命名", 96);
+            renameSessionButton.Dock = DockStyle.Fill;
+            renameSessionButton.Click += OnRenameSessionClick;
+
+            deleteSessionButton = CreateButton("删除", 96);
+            deleteSessionButton.Dock = DockStyle.Fill;
+            deleteSessionButton.ForeColor = Color.FromArgb(235, 120, 120);
+            deleteSessionButton.Click += OnDeleteSessionClick;
+
+            backupSessionsButton = CreateButton("备份", 96);
+            backupSessionsButton.Dock = DockStyle.Fill;
+            backupSessionsButton.Click += OnBackupSessionsClick;
+
+            restoreSessionsButton = CreateButton("恢复", 96);
+            restoreSessionsButton.Dock = DockStyle.Fill;
+            restoreSessionsButton.Click += OnRestoreSessionsClick;
+
+            actions.Controls.Add(renameSessionButton, 0, 0);
+            actions.Controls.Add(deleteSessionButton, 1, 0);
+            actions.Controls.Add(backupSessionsButton, 0, 1);
+            actions.Controls.Add(restoreSessionsButton, 1, 1);
+            layout.Controls.Add(actions, 0, 4);
+
+            panel.Controls.Add(layout);
+            return panel;
+        }
+
+        private Control CreateWorkspace()
+        {
+            workspaceLayout = new TableLayoutPanel();
+            workspaceLayout.Dock = DockStyle.Fill;
+            workspaceLayout.Padding = new Padding(10, 0, 0, 0);
+            workspaceLayout.ColumnCount = 1;
+            workspaceLayout.RowCount = 4;
+            workspaceLayout.RowStyles.Add(
+                new RowStyle(SizeType.Absolute, 52F));
+            settingsRowStyle = new RowStyle(
+                SizeType.Absolute,
+                ExpandedSettingsHeight);
+            workspaceLayout.RowStyles.Add(settingsRowStyle);
+            workspaceLayout.RowStyles.Add(
+                new RowStyle(SizeType.Percent, 100F));
+            workspaceLayout.RowStyles.Add(
+                new RowStyle(SizeType.Absolute, 24F));
+
+            settingsPanel = CreateSettingsPanel();
+            settingsExpanded = true;
+            workspaceLayout.Controls.Add(CreateHeader(), 0, 0);
+            workspaceLayout.Controls.Add(settingsPanel, 0, 1);
+            workspaceLayout.Controls.Add(CreateConversationArea(), 0, 2);
+            workspaceLayout.Controls.Add(CreateStatusBar(), 0, 3);
+            return workspaceLayout;
+        }
+
+        private Control CreateHeader()
+        {
+            TableLayoutPanel panel = new TableLayoutPanel();
+            panel.Dock = DockStyle.Fill;
+            panel.BackColor = Color.FromArgb(31, 35, 42);
+            panel.ColumnCount = 2;
+            panel.RowCount = 1;
+            panel.ColumnStyles.Add(
+                new ColumnStyle(SizeType.Percent, 100F));
+            panel.ColumnStyles.Add(
+                new ColumnStyle(SizeType.AutoSize));
+
+            Panel titlePanel = new Panel();
+            titlePanel.Dock = DockStyle.Fill;
+
+            sessionTitleLabel = new Label();
+            sessionTitleLabel.Text = "新会话";
+            sessionTitleLabel.ForeColor = Color.FromArgb(242, 245, 249);
+            sessionTitleLabel.Font = new Font(Font.FontFamily, 13F, FontStyle.Bold);
+            sessionTitleLabel.AutoSize = false;
+            sessionTitleLabel.Location = new Point(4, 4);
+            sessionTitleLabel.Size = new Size(440, 24);
+            sessionTitleLabel.AutoEllipsis = true;
+            sessionTitleLabel.Anchor = AnchorStyles.Left |
+                AnchorStyles.Top | AnchorStyles.Right;
+
+            connectionStatusLabel = new Label();
+            connectionStatusLabel.Text = "未连接";
+            connectionStatusLabel.ForeColor = Color.FromArgb(145, 157, 174);
+            connectionStatusLabel.AutoSize = false;
+            connectionStatusLabel.Location = new Point(5, 29);
+            connectionStatusLabel.Size = new Size(440, 20);
+            connectionStatusLabel.AutoEllipsis = true;
+            connectionStatusLabel.Anchor = AnchorStyles.Left |
+                AnchorStyles.Top | AnchorStyles.Right;
+
+            titlePanel.Resize += delegate
+            {
+                int width = Math.Max(40, titlePanel.ClientSize.Width - 8);
+                sessionTitleLabel.Width = width;
+                connectionStatusLabel.Width = width;
+            };
+
+            titlePanel.Controls.Add(sessionTitleLabel);
+            titlePanel.Controls.Add(connectionStatusLabel);
+
+            FlowLayoutPanel actions = new FlowLayoutPanel();
+            actions.Dock = DockStyle.Fill;
+            actions.FlowDirection = FlowDirection.LeftToRight;
+            actions.WrapContents = false;
+            actions.AutoSize = true;
+            actions.Padding = new Padding(0, 8, 0, 0);
+
+            testConnectionButton = CreateButton("测试连接", 84);
+            testConnectionButton.AccessibleName = "测试模型连接";
+            testConnectionButton.Click += OnTestConnectionClick;
+
+            toggleSettingsButton = CreateButton("收起配置", 84);
+            toggleSettingsButton.AccessibleName = "展开或收起连接配置";
+            toggleSettingsButton.Click += delegate
+            {
+                SetSettingsExpanded(!settingsExpanded);
+            };
+
+            actions.Controls.Add(testConnectionButton);
+            actions.Controls.Add(toggleSettingsButton);
+            panel.Controls.Add(titlePanel, 0, 0);
+            panel.Controls.Add(actions, 1, 0);
+            return panel;
+        }
+
+        private Control CreateSettingsPanel()
+        {
+            GroupBox group = new GroupBox();
+            group.Text = "连接设置  ·  仅保存在本机当前用户";
+            group.Dock = DockStyle.Fill;
+            group.ForeColor = Color.FromArgb(205, 214, 226);
+            group.Padding = new Padding(8, 5, 8, 4);
+
+            TableLayoutPanel layout = new TableLayoutPanel();
+            layout.Dock = DockStyle.Fill;
+            layout.ColumnCount = 8;
+            layout.RowCount = 2;
+            for (int column = 0; column < 8; column++)
+            {
+                layout.ColumnStyles.Add(
+                    new ColumnStyle(SizeType.Percent, 12.5F));
+            }
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+
+            endpointTextBox = CreateInputBox();
+            apiKeyTextBox = CreateInputBox();
+            apiKeyTextBox.UseSystemPasswordChar = true;
+            modelTextBox = CreateInputBox();
+            endpointTextBox.AccessibleName = "完整请求 URL";
+            apiKeyTextBox.AccessibleName = "API Key";
+            modelTextBox.AccessibleName = "模型名称";
+            endpointTextBox.TextChanged += OnConnectionSettingChanged;
+            apiKeyTextBox.TextChanged += OnConnectionSettingChanged;
+            modelTextBox.TextChanged += OnConnectionSettingChanged;
+
+            layout.Controls.Add(CreateLabel("URL"), 0, 0);
+            layout.Controls.Add(endpointTextBox, 1, 0);
+            layout.SetColumnSpan(endpointTextBox, 7);
+
+            layout.Controls.Add(CreateLabel("Key"), 0, 1);
+            layout.Controls.Add(apiKeyTextBox, 1, 1);
+            layout.SetColumnSpan(apiKeyTextBox, 3);
+            layout.Controls.Add(CreateLabel("模型"), 4, 1);
+            layout.Controls.Add(modelTextBox, 5, 1);
+            layout.SetColumnSpan(modelTextBox, 2);
+
+            CheckBox showKey = new CheckBox();
+            showKey.Text = "显示 Key";
+            showKey.AutoSize = true;
+            showKey.ForeColor = Color.FromArgb(205, 214, 226);
+            showKey.Anchor = AnchorStyles.Left;
+            showKey.AccessibleName = "显示或隐藏 API Key";
+            showKey.CheckedChanged += delegate
+            {
+                apiKeyTextBox.UseSystemPasswordChar = !showKey.Checked;
+            };
+            layout.Controls.Add(showKey, 7, 1);
+
+            group.Controls.Add(layout);
+            return group;
+        }
+
+        private Control CreateConversationArea()
+        {
+            TableLayoutPanel area = new TableLayoutPanel();
+            area.Dock = DockStyle.Fill;
+            area.ColumnCount = 1;
+            area.RowCount = 3;
+            area.RowStyles.Add(new RowStyle(SizeType.Percent, 30F));
+            area.RowStyles.Add(new RowStyle(SizeType.Percent, 24F));
+            area.RowStyles.Add(new RowStyle(SizeType.Percent, 46F));
+
+            area.Controls.Add(CreateInputsPanel(), 0, 0);
+            area.Controls.Add(CreatePromptPanel(), 0, 1);
+            area.Controls.Add(CreateOutputPanel(), 0, 2);
+            return area;
+        }
+
+        private Control CreateInputsPanel()
+        {
+            GroupBox group = new GroupBox();
+            group.Text = "输入资料  ·  拖入文件或粘贴内容";
+            group.Dock = DockStyle.Fill;
+            group.ForeColor = Color.FromArgb(205, 214, 226);
+            group.AllowDrop = true;
+            group.DragEnter += OnDragEnter;
+            group.DragDrop += OnDragDrop;
+
+            FlowLayoutPanel buttons = new FlowLayoutPanel();
+            buttons.Dock = DockStyle.Top;
+            buttons.Height = 34;
+            buttons.Padding = new Padding(2, 1, 2, 0);
+            buttons.WrapContents = false;
+
+            addFileButton = CreateButton("添加文件", 84);
+            addFileButton.Click += OnAddFileClick;
+            pasteButton = CreateButton("粘贴内容", 84);
+            pasteButton.Click += OnPasteClick;
+            removeButton = CreateButton("移除选中", 84);
+            removeButton.Click += OnRemoveClick;
+            clearButton = CreateButton("清空", 64);
+            clearButton.Click += OnClearClick;
+
+            Label hint = new Label();
+            hint.Text = "仅发送内容和文件名，不发送本地路径";
+            hint.AutoSize = true;
+            hint.ForeColor = Color.FromArgb(137, 149, 166);
+            hint.Margin = new Padding(12, 7, 3, 3);
+
+            buttons.Controls.Add(addFileButton);
+            buttons.Controls.Add(pasteButton);
+            buttons.Controls.Add(removeButton);
+            buttons.Controls.Add(clearButton);
+            buttons.Controls.Add(hint);
+
+            inputListView = new ListView();
+            inputListView.Dock = DockStyle.Fill;
+            inputListView.View = View.Details;
+            inputListView.FullRowSelect = true;
+            inputListView.HideSelection = false;
+            inputListView.MultiSelect = true;
+            inputListView.AllowDrop = true;
+            inputListView.BackColor = Color.FromArgb(247, 249, 252);
+            inputListView.AccessibleName = "已添加内容";
+            inputListView.Columns.Add("名称", 260);
+            inputListView.Columns.Add("类型", 76);
+            inputListView.Columns.Add("大小", 94);
+            inputListView.Columns.Add("说明", 340);
+            inputListView.Resize += delegate { ResizeInputColumns(); };
+            inputListView.DragEnter += OnDragEnter;
+            inputListView.DragDrop += OnDragDrop;
+            inputListView.DoubleClick += OnPreviewInputItem;
+            inputListView.KeyDown += delegate(object sender, KeyEventArgs args)
+            {
+                if (args.KeyCode == Keys.Delete)
+                {
+                    RemoveSelectedItems();
+                    args.Handled = true;
+                }
+                else if (args.KeyCode == Keys.Enter)
+                {
+                    OnPreviewInputItem(sender, EventArgs.Empty);
+                    args.Handled = true;
+                }
+            };
+
+            group.Controls.Add(inputListView);
+            group.Controls.Add(buttons);
+            return group;
+        }
+
+        private void ResizeInputColumns()
+        {
+            if (inputListView == null || inputListView.Columns.Count < 4)
+            {
+                return;
+            }
+
+            int available = Math.Max(
+                500,
+                inputListView.ClientSize.Width - 32);
+            int typeWidth = 76;
+            int sizeWidth = 94;
+            int nameWidth = Math.Max(170, (int)(available * 0.31F));
+            int noteWidth = Math.Max(
+                160,
+                available - nameWidth - typeWidth - sizeWidth);
+            inputListView.Columns[0].Width = nameWidth;
+            inputListView.Columns[1].Width = typeWidth;
+            inputListView.Columns[2].Width = sizeWidth;
+            inputListView.Columns[3].Width = noteWidth;
+            if (inputListView.IsHandleCreated)
+            {
+                inputListView.Scrollable = false;
+                inputListView.Scrollable = true;
+            }
+        }
+
+        private Control CreatePromptPanel()
+        {
+            GroupBox group = new GroupBox();
+            group.Text = "指令";
+            group.Dock = DockStyle.Fill;
+            group.ForeColor = Color.FromArgb(205, 214, 226);
+
+            promptTextBox = new RichTextBox();
+            promptTextBox.Dock = DockStyle.Fill;
+            promptTextBox.BorderStyle = BorderStyle.FixedSingle;
+            promptTextBox.AcceptsTab = true;
+            promptTextBox.DetectUrls = false;
+            promptTextBox.BackColor = Color.White;
+            promptTextBox.AccessibleName = "文字描述或指令";
+            promptTextBox.KeyDown += delegate(object sender, KeyEventArgs args)
+            {
+                if (args.Control && args.KeyCode == Keys.Enter)
+                {
+                    args.SuppressKeyPress = true;
+                    StartGeneration();
+                }
+            };
+            group.Controls.Add(promptTextBox);
+            return group;
+        }
+
+        private Control CreateOutputPanel()
+        {
+            GroupBox group = new GroupBox();
+            group.Text = "模型输出";
+            group.Dock = DockStyle.Fill;
+            group.ForeColor = Color.FromArgb(205, 214, 226);
+
+            FlowLayoutPanel buttons = new FlowLayoutPanel();
+            buttons.Dock = DockStyle.Top;
+            buttons.Height = 34;
+            buttons.Padding = new Padding(2, 1, 2, 0);
+            buttons.WrapContents = false;
+
+            generateButton = CreateButton("发送", 80);
+            generateButton.BackColor = Color.FromArgb(45, 121, 218);
+            generateButton.ForeColor = Color.White;
+            generateButton.FlatStyle = FlatStyle.Flat;
+            generateButton.FlatAppearance.BorderSize = 0;
+            generateButton.FlatAppearance.MouseOverBackColor =
+                Color.FromArgb(54, 132, 230);
+            generateButton.FlatAppearance.MouseDownBackColor =
+                Color.FromArgb(35, 101, 188);
+            generateButton.Click += delegate { StartGeneration(); };
+
+            stopButton = CreateButton("停止", 64);
+            stopButton.Enabled = false;
+            stopButton.Click += delegate
+            {
+                if (generationCancellation != null)
+                {
+                    generationCancellation.Cancel();
+                }
+            };
+
+            copyOutputButton = CreateButton("复制回复", 76);
+            copyOutputButton.Click += OnCopyOutputClick;
+            saveOutputButton = CreateButton("保存回复", 76);
+            saveOutputButton.Click += OnSaveOutputClick;
+            exportWordButton = CreateButton("导出 Word", 86);
+            exportWordButton.Click += OnExportWordClick;
+            exportTableButton = CreateButton("导出表格", 86);
+            exportTableButton.Click += OnExportTableClick;
+
+            buttons.Controls.Add(generateButton);
+            buttons.Controls.Add(stopButton);
+            buttons.Controls.Add(copyOutputButton);
+            buttons.Controls.Add(saveOutputButton);
+            buttons.Controls.Add(exportWordButton);
+            buttons.Controls.Add(exportTableButton);
+
+            outputTextBox = new RichTextBox();
+            outputTextBox.Dock = DockStyle.Fill;
+            outputTextBox.ReadOnly = true;
+            outputTextBox.BackColor = Color.White;
+            outputTextBox.BorderStyle = BorderStyle.FixedSingle;
+            outputTextBox.DetectUrls = true;
+            outputTextBox.Font = new Font("Microsoft YaHei", 9F);
+            outputTextBox.HideSelection = false;
+            outputTextBox.AccessibleName = "模型输出";
+
+            ContextMenuStrip outputMenu = new ContextMenuStrip();
+            ToolStripMenuItem copySelectionItem =
+                new ToolStripMenuItem("复制选中内容");
+            copySelectionItem.Click += delegate
+            {
+                if (outputTextBox.SelectionLength > 0)
+                {
+                    outputTextBox.Copy();
+                    SetStatus("选中内容已复制到剪贴板");
+                }
+            };
+            ToolStripMenuItem copyLatestItem =
+                new ToolStripMenuItem("复制最新回复");
+            copyLatestItem.Click += OnCopyOutputClick;
+            ToolStripMenuItem selectAllItem =
+                new ToolStripMenuItem("全选");
+            selectAllItem.Click += delegate { outputTextBox.SelectAll(); };
+            outputMenu.Items.Add(copySelectionItem);
+            outputMenu.Items.Add(copyLatestItem);
+            outputMenu.Items.Add(new ToolStripSeparator());
+            outputMenu.Items.Add(selectAllItem);
+            outputMenu.Opening += delegate
+            {
+                copySelectionItem.Enabled = outputTextBox.SelectionLength > 0;
+                copyLatestItem.Enabled =
+                    !string.IsNullOrEmpty(GetLatestAssistantOutput());
+            };
+            outputTextBox.ContextMenuStrip = outputMenu;
+
+            group.Controls.Add(outputTextBox);
+            group.Controls.Add(buttons);
+            return group;
+        }
+
+        private Control CreateStatusBar()
+        {
+            StatusStrip strip = new StatusStrip();
+            strip.Dock = DockStyle.Fill;
+            strip.SizingGrip = false;
+            strip.BackColor = Color.FromArgb(31, 35, 42);
+
+            statusLabel = new ToolStripStatusLabel();
+            statusLabel.Text = "就绪";
+            statusLabel.ForeColor = Color.FromArgb(178, 190, 207);
+            statusLabel.Spring = true;
+            statusLabel.TextAlign = ContentAlignment.MiddleLeft;
+
+            progressBar = new ToolStripProgressBar();
+            progressBar.Style = ProgressBarStyle.Marquee;
+            progressBar.MarqueeAnimationSpeed = 25;
+            progressBar.Visible = false;
+            progressBar.Width = 120;
+
+            strip.Items.Add(statusLabel);
+            strip.Items.Add(progressBar);
+            return strip;
+        }
+
+        private static TextBox CreateInputBox()
+        {
+            TextBox box = new TextBox();
+            box.Dock = DockStyle.Fill;
+            box.Margin = new Padding(3, 3, 3, 3);
+            box.BackColor = Color.White;
+            return box;
+        }
+
+        private static Label CreateLabel(string text)
+        {
+            Label label = new Label();
+            label.Text = text;
+            label.AutoSize = true;
+            label.Anchor = AnchorStyles.Left;
+            label.ForeColor = Color.FromArgb(205, 214, 226);
+            return label;
+        }
+
+        private static Button CreateButton(string text, int width)
+        {
+            Button button = new Button();
+            button.Text = text;
+            button.Width = width;
+            button.Height = 27;
+            button.Margin = new Padding(3);
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderColor = Color.FromArgb(91, 101, 116);
+            button.FlatAppearance.BorderSize = 1;
+            button.FlatAppearance.MouseOverBackColor =
+                Color.FromArgb(58, 65, 76);
+            button.FlatAppearance.MouseDownBackColor =
+                Color.FromArgb(39, 44, 52);
+            button.BackColor = Color.FromArgb(47, 53, 63);
+            button.ForeColor = Color.FromArgb(226, 232, 240);
+            button.UseVisualStyleBackColor = false;
+            return button;
+        }
+
+        private void SetSettingsExpanded(bool expanded)
+        {
+            settingsExpanded = expanded;
+            if (settingsPanel != null)
+            {
+                settingsPanel.Visible = expanded;
+            }
+
+            if (settingsRowStyle != null)
+            {
+                settingsRowStyle.Height = expanded
+                    ? ExpandedSettingsHeight
+                    : 0F;
+            }
+
+            if (toggleSettingsButton != null)
+            {
+                toggleSettingsButton.Text = expanded
+                    ? "收起配置"
+                    : "连接配置";
+            }
+
+            if (workspaceLayout != null)
+            {
+                workspaceLayout.PerformLayout();
+            }
+        }
+
+        private bool HasCompleteConnectionSettings()
+        {
+            return endpointTextBox != null &&
+                apiKeyTextBox != null &&
+                modelTextBox != null &&
+                !string.IsNullOrWhiteSpace(endpointTextBox.Text) &&
+                !string.IsNullOrWhiteSpace(apiKeyTextBox.Text) &&
+                !string.IsNullOrWhiteSpace(modelTextBox.Text);
+        }
+
+        private void OnMainKeyDown(object sender, KeyEventArgs args)
+        {
+            if (args.Control && args.KeyCode == Keys.N &&
+                generationCancellation == null)
+            {
+                OnNewSessionClick(this, EventArgs.Empty);
+                args.SuppressKeyPress = true;
+            }
+            else if (args.Control && args.KeyCode == Keys.F)
+            {
+                if (sessionSearchTextBox != null)
+                {
+                    sessionSearchTextBox.Focus();
+                    sessionSearchTextBox.SelectAll();
+                }
+
+                args.SuppressKeyPress = true;
+            }
+            else if (args.KeyCode == Keys.Escape &&
+                generationCancellation != null)
+            {
+                generationCancellation.Cancel();
+                args.SuppressKeyPress = true;
+            }
+        }
+
+        private void OnSessionDrawItem(object sender, DrawItemEventArgs args)
+        {
+            if (args.Index < 0 || args.Index >= sessionListBox.Items.Count)
+            {
+                return;
+            }
+
+            ConversationSession session =
+                sessionListBox.Items[args.Index] as ConversationSession;
+            if (session == null)
+            {
+                return;
+            }
+
+            bool selected =
+                (args.State & DrawItemState.Selected) == DrawItemState.Selected;
+            Color background = selected
+                ? Color.FromArgb(45, 74, 109)
+                : sessionListBox.BackColor;
+            Color titleColor = selected
+                ? Color.White
+                : Color.FromArgb(226, 232, 240);
+            Color metaColor = selected
+                ? Color.FromArgb(205, 220, 239)
+                : Color.FromArgb(143, 156, 174);
+
+            using (SolidBrush brush = new SolidBrush(background))
+            {
+                args.Graphics.FillRectangle(brush, args.Bounds);
+            }
+
+            Rectangle titleBounds = new Rectangle(
+                args.Bounds.Left + 8,
+                args.Bounds.Top + 5,
+                Math.Max(20, args.Bounds.Width - 16),
+                20);
+            Rectangle metaBounds = new Rectangle(
+                args.Bounds.Left + 8,
+                args.Bounds.Top + 26,
+                Math.Max(20, args.Bounds.Width - 16),
+                16);
+            using (Font titleFont = new Font(Font, FontStyle.Bold))
+            using (Font metaFont = new Font(
+                Font.FontFamily,
+                Math.Max(8F, Font.Size - 1F),
+                FontStyle.Regular))
+            {
+                TextRenderer.DrawText(
+                    args.Graphics,
+                    session.Title ?? "新会话",
+                    titleFont,
+                    titleBounds,
+                    titleColor,
+                    TextFormatFlags.EndEllipsis |
+                    TextFormatFlags.NoPrefix |
+                    TextFormatFlags.VerticalCenter);
+                int messageCount = session.Messages == null
+                    ? 0
+                    : session.Messages.Count;
+                DateTime updated = session.UpdatedAt.Kind == DateTimeKind.Utc
+                    ? session.UpdatedAt.ToLocalTime()
+                    : session.UpdatedAt;
+                string time = updated.Date == DateTime.Today
+                    ? updated.ToString("HH:mm")
+                    : updated.ToString("MM-dd");
+                TextRenderer.DrawText(
+                    args.Graphics,
+                    time + "  ·  " + messageCount + " 条消息",
+                    metaFont,
+                    metaBounds,
+                    metaColor,
+                    TextFormatFlags.EndEllipsis |
+                    TextFormatFlags.NoPrefix |
+                    TextFormatFlags.VerticalCenter);
+            }
+
+            if (selected)
+            {
+                args.DrawFocusRectangle();
+            }
+        }
+
+        private bool SessionMatchesFilter(
+            ConversationSession session,
+            string filter)
+        {
+            if (session == null || string.IsNullOrWhiteSpace(filter))
+            {
+                return session != null;
+            }
+
+            string query = filter.Trim();
+            if ((session.Title ?? string.Empty).IndexOf(
+                query,
+                StringComparison.CurrentCultureIgnoreCase) >= 0)
+            {
+                return true;
+            }
+
+            if (session.Messages == null)
+            {
+                return false;
+            }
+
+            int inspectedCharacters = 0;
+            for (int index = session.Messages.Count - 1;
+                index >= 0 && inspectedCharacters < 20000;
+                index--)
+            {
+                ConversationMessage message = session.Messages[index];
+                string content = message == null
+                    ? string.Empty
+                    : (message.Content ?? string.Empty);
+                inspectedCharacters += content.Length;
+                if (content.IndexOf(
+                    query,
+                    StringComparison.CurrentCultureIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void SaveCurrentDraft()
+        {
+            ConversationSession session = conversationStore.CurrentSession;
+            if (session == null || promptTextBox == null)
+            {
+                return;
+            }
+
+            string prompt = promptTextBox.Text ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(prompt) && inputItems.Count == 0)
+            {
+                sessionDrafts.Remove(session.Id);
+                return;
+            }
+
+            SessionDraft draft = new SessionDraft();
+            draft.Prompt = prompt;
+            draft.Items = new List<InputItem>(inputItems);
+            sessionDrafts[session.Id] = draft;
+        }
+
+        private void RestoreCurrentDraft()
+        {
+            ConversationSession session = conversationStore.CurrentSession;
+            promptTextBox.Clear();
+            inputItems.Clear();
+            inputListView.Items.Clear();
+            if (session != null)
+            {
+                SessionDraft draft;
+                if (sessionDrafts.TryGetValue(session.Id, out draft) &&
+                    draft != null)
+                {
+                    promptTextBox.Text = draft.Prompt ?? string.Empty;
+                    if (draft.Items != null)
+                    {
+                        foreach (InputItem item in draft.Items)
+                        {
+                            AddInputItem(item);
+                        }
+                    }
+                }
+            }
+
+            UpdateInputStatus();
+        }
+
+        private void ClearDraft(string sessionId)
+        {
+            if (!string.IsNullOrWhiteSpace(sessionId))
+            {
+                sessionDrafts.Remove(sessionId);
+            }
+        }
+
+        private void EnsureInitialSession()
+        {
+            if (conversationStore.Sessions.Count == 0)
+            {
+                conversationStore.CreateSession("新会话");
+            }
+            else if (conversationStore.CurrentSession == null)
+            {
+                conversationStore.SelectSession(
+                    conversationStore.Sessions[0].Id);
+            }
+        }
+
+        private void RefreshSessionList()
+        {
+            if (sessionListBox == null)
+            {
+                return;
+            }
+
+            string selectedId = conversationStore.CurrentSessionId;
+            isLoadingSession = true;
+            sessionListBox.BeginUpdate();
+            try
+            {
+                sessionListBox.Items.Clear();
+                string filter = sessionSearchTextBox == null
+                    ? string.Empty
+                    : sessionSearchTextBox.Text;
+                IEnumerable<ConversationSession> visibleSessions =
+                    conversationStore.Sessions
+                        .Where(session => SessionMatchesFilter(session, filter))
+                        .OrderByDescending(session => session.UpdatedAt);
+                foreach (ConversationSession session in visibleSessions)
+                {
+                    sessionListBox.Items.Add(session);
+                }
+
+                for (int i = 0; i < sessionListBox.Items.Count; i++)
+                {
+                    ConversationSession item =
+                        sessionListBox.Items[i] as ConversationSession;
+                    if (item != null && string.Equals(
+                        item.Id,
+                        selectedId,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        sessionListBox.SelectedIndex = i;
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                sessionListBox.EndUpdate();
+                isLoadingSession = false;
+            }
+
+            UpdateSessionButtons();
+        }
+
+        private void LoadCurrentSession()
+        {
+            ConversationSession session = conversationStore.CurrentSession;
+            if (session == null)
+            {
+                return;
+            }
+
+            sessionTitleLabel.Text = session.Title;
+            connectionStatusLabel.Text = BuildConnectionStatus();
+            RenderConversation(session);
+            UpdateSessionButtons();
+        }
+
+        private void RenderConversation(ConversationSession session)
+        {
+            outputTextBox.Clear();
+            if (session == null || session.Messages == null ||
+                session.Messages.Count == 0)
+            {
+                AppendEmptyConversation();
+                UpdateOutputButtons(generationCancellation != null);
+                return;
+            }
+
+            foreach (ConversationMessage message in session.Messages)
+            {
+                if (message == null)
+                {
+                    continue;
+                }
+
+                string role = message.Role == "assistant"
+                    ? "模型"
+                    : (message.Role == "system" ? "系统" : "你");
+                Color roleColor = message.Role == "assistant"
+                    ? Color.FromArgb(29, 105, 178)
+                    : (message.Role == "system"
+                        ? Color.FromArgb(120, 102, 160)
+                        : Color.FromArgb(54, 86, 120));
+                AppendTranscriptMessage(
+                    role,
+                    FormatMessageForDisplay(message),
+                    roleColor,
+                    string.Equals(
+                        message.Role,
+                        "assistant",
+                        StringComparison.OrdinalIgnoreCase));
+            }
+
+            outputTextBox.SelectionStart = outputTextBox.TextLength;
+            outputTextBox.ScrollToCaret();
+            UpdateOutputButtons(generationCancellation != null);
+        }
+
+        private void AppendEmptyConversation()
+        {
+            outputTextBox.SelectionStart = 0;
+            outputTextBox.SelectionColor = Color.FromArgb(126, 137, 151);
+            using (Font emptyFont = new Font(
+                outputTextBox.Font,
+                FontStyle.Italic))
+            {
+                outputTextBox.SelectionFont = emptyFont;
+                outputTextBox.AppendText(
+                    "暂无会话内容。添加资料并输入指令后即可发送。\r\n");
+            }
+
+            outputTextBox.SelectionColor = Color.Black;
+            outputTextBox.SelectionFont = outputTextBox.Font;
+        }
+
+        private void AppendTranscriptMessage(
+            string role,
+            string content,
+            Color roleColor,
+            bool renderMarkdown = false)
+        {
+            AppendTranscriptHeader(role, roleColor);
+            string value = (content ?? string.Empty).TrimEnd();
+            if (renderMarkdown)
+            {
+                MarkdownRichTextRenderer.Append(outputTextBox, value);
+                outputTextBox.AppendText("\r\n");
+            }
+            else
+            {
+                outputTextBox.AppendText(value);
+                outputTextBox.AppendText("\r\n\r\n");
+            }
+        }
+
+        private void AppendTranscriptHeader(string role, Color roleColor)
+        {
+            outputTextBox.SelectionStart = outputTextBox.TextLength;
+            outputTextBox.SelectionColor = roleColor;
+            using (Font headerFont = new Font(
+                outputTextBox.Font,
+                FontStyle.Bold))
+            {
+                outputTextBox.SelectionFont = headerFont;
+                outputTextBox.AppendText("【" + role + "】\r\n");
+            }
+
+            outputTextBox.SelectionColor = Color.FromArgb(32, 37, 43);
+            outputTextBox.SelectionFont = outputTextBox.Font;
+        }
+
+        private static string FormatMessageForDisplay(
+            ConversationMessage message)
+        {
+            if (message == null)
+            {
+                return string.Empty;
+            }
+
+            string content = message.Content ?? string.Empty;
+            if (!string.Equals(
+                message.Role,
+                "user",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return content;
+            }
+
+            const string attachmentMarker =
+                "以下资料由用户主动拖入或粘贴后提取";
+            int markerIndex = content.IndexOf(
+                attachmentMarker,
+                StringComparison.Ordinal);
+            if (markerIndex >= 0)
+            {
+                string visible = content.Substring(0, markerIndex).Trim();
+                return visible +
+                    "\r\n\r\n[本轮包含用户已授权的资料，正文已在会话视图中折叠]";
+            }
+
+            if (content.Length > MaxDisplayedUserCharacters)
+            {
+                return content.Substring(0, MaxDisplayedUserCharacters) +
+                    "\r\n\r\n[较长的用户内容已在会话视图中折叠]";
+            }
+
+            return content;
+        }
+
+        private string GetLatestAssistantOutput()
+        {
+            ConversationSession session = conversationStore.CurrentSession;
+            if (session == null || session.Messages == null)
+            {
+                return string.Empty;
+            }
+
+            ConversationMessage latest = session.Messages
+                .Where(message => message != null &&
+                    string.Equals(
+                        message.Role,
+                        "assistant",
+                        StringComparison.OrdinalIgnoreCase))
+                .LastOrDefault();
+            return latest == null
+                ? string.Empty
+                : (latest.Content ?? string.Empty);
+        }
+
+        private void UpdateOutputButtons(bool generating)
+        {
+            if (copyOutputButton == null)
+            {
+                return;
+            }
+
+            bool hasReply = !string.IsNullOrEmpty(GetLatestAssistantOutput());
+            ConversationSession session = conversationStore.CurrentSession;
+            bool hasConversation = session != null &&
+                session.Messages != null &&
+                session.Messages.Count > 0;
+            copyOutputButton.Enabled = !generating && hasReply;
+            saveOutputButton.Enabled = !generating && hasReply;
+            exportTableButton.Enabled = !generating && hasReply;
+            exportWordButton.Enabled = !generating && hasConversation;
+        }
+
+        private string BuildConnectionStatus()
+        {
+            string endpoint = endpointTextBox == null
+                ? string.Empty
+                : endpointTextBox.Text.Trim();
+            string key = apiKeyTextBox == null
+                ? string.Empty
+                : apiKeyTextBox.Text.Trim();
+            string model = modelTextBox == null
+                ? string.Empty
+                : modelTextBox.Text.Trim();
+            if (string.IsNullOrEmpty(endpoint) ||
+                string.IsNullOrEmpty(key) ||
+                string.IsNullOrEmpty(model))
+            {
+                return "尚未配置完整 · 请填写 URL / Key / 模型";
+            }
+
+            return "配置就绪 · " + model;
+        }
+
+        private void OnConnectionSettingChanged(object sender, EventArgs args)
+        {
+            if (connectionStatusLabel != null &&
+                generationCancellation == null)
+            {
+                connectionStatusLabel.Text = BuildConnectionStatus();
+            }
+
+            if (testConnectionButton != null)
+            {
+                testConnectionButton.Enabled =
+                    generationCancellation == null &&
+                    HasCompleteConnectionSettings();
+            }
+        }
+
+        private void UpdateSessionButtons()
+        {
+            bool hasSession = conversationStore.CurrentSession != null;
+            if (deleteSessionButton != null)
+            {
+                deleteSessionButton.Enabled = hasSession &&
+                    conversationStore.Sessions.Count > 1;
+            }
+
+            if (renameSessionButton != null)
+            {
+                renameSessionButton.Enabled = hasSession;
+            }
+
+            if (backupSessionsButton != null)
+            {
+                backupSessionsButton.Enabled = hasSession &&
+                    generationCancellation == null;
+            }
+
+            if (restoreSessionsButton != null)
+            {
+                restoreSessionsButton.Enabled =
+                    generationCancellation == null;
+            }
+
+            UpdateOutputButtons(generationCancellation != null);
+        }
+
+        private void LoadSavedSettings()
+        {
+            AppSettings settings = AppSettings.Load();
+            endpointTextBox.Text = settings.EndpointUrl;
+            apiKeyTextBox.Text = settings.ApiKey;
+            modelTextBox.Text = settings.ModelName;
+            connectionStatusLabel.Text = BuildConnectionStatus();
+            testConnectionButton.Enabled = HasCompleteConnectionSettings();
+            SetSettingsExpanded(!HasCompleteConnectionSettings());
+        }
+
+        private void SaveSettings()
+        {
+            try
+            {
+                AppSettings settings = new AppSettings();
+                settings.EndpointUrl = endpointTextBox.Text.Trim();
+                settings.ApiKey = apiKeyTextBox.Text.Trim();
+                settings.ModelName = modelTextBox.Text.Trim();
+                settings.Save();
+            }
+            catch (Exception exception)
+            {
+                SetStatus("配置未能保存：" + exception.Message);
+            }
+        }
+
+        private async void OnTestConnectionClick(object sender, EventArgs args)
+        {
+            if (connectionTestCancellation != null ||
+                generationCancellation != null)
+            {
+                return;
+            }
+
+            string endpoint = endpointTextBox.Text.Trim();
+            string key = apiKeyTextBox.Text.Trim();
+            string model = modelTextBox.Text.Trim();
+            if (string.IsNullOrWhiteSpace(endpoint))
+            {
+                SetSettingsExpanded(true);
+                ShowValidation("请先填写完整请求 URL。", endpointTextBox);
+                return;
+            }
+
+            Uri endpointUri;
+            if (!Uri.TryCreate(endpoint, UriKind.Absolute, out endpointUri) ||
+                (endpointUri.Scheme != Uri.UriSchemeHttp &&
+                    endpointUri.Scheme != Uri.UriSchemeHttps))
+            {
+                SetSettingsExpanded(true);
+                ShowValidation(
+                    "请求 URL 必须是完整的 http:// 或 https:// 地址。",
+                    endpointTextBox);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                SetSettingsExpanded(true);
+                ShowValidation("请先填写 API Key。", apiKeyTextBox);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(model))
+            {
+                SetSettingsExpanded(true);
+                ShowValidation("请先填写模型名称。", modelTextBox);
+                return;
+            }
+
+            SaveSettings();
+            CancellationTokenSource cancellation =
+                new CancellationTokenSource();
+            cancellation.CancelAfter(TimeSpan.FromSeconds(30));
+            connectionTestCancellation = cancellation;
+            SetConnectionTestingState(true);
+            connectionStatusLabel.Text = "正在测试 · " + model;
+            SetStatus("正在测试模型连接…");
+            try
+            {
+                await modelClient.TestConnectionAsync(
+                    endpoint,
+                    key,
+                    model,
+                    cancellation.Token);
+                connectionStatusLabel.Text = "连接成功 · " + model;
+                SetStatus("连接测试成功，配置已保存在本机");
+            }
+            catch (OperationCanceledException)
+            {
+                connectionStatusLabel.Text = "连接超时 · 请检查网络或 URL";
+                MessageBox.Show(
+                    this,
+                    "连接测试在 30 秒内没有完成。请检查 URL、内网连通性和模型服务状态。",
+                    "连接测试超时",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+            catch (ModelCallException exception)
+            {
+                connectionStatusLabel.Text = "连接失败 · 请检查配置";
+                MessageBox.Show(
+                    this,
+                    exception.Message,
+                    "连接测试失败",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            catch (Exception exception)
+            {
+                connectionStatusLabel.Text = "连接失败 · 请检查配置";
+                MessageBox.Show(
+                    this,
+                    "连接测试失败：" + exception.Message,
+                    "连接测试失败",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            finally
+            {
+                if (ReferenceEquals(connectionTestCancellation, cancellation))
+                {
+                    connectionTestCancellation = null;
+                }
+
+                cancellation.Dispose();
+                if (!IsDisposed)
+                {
+                    SetConnectionTestingState(false);
+                }
+            }
+        }
+
+        private void SetConnectionTestingState(bool testing)
+        {
+            testConnectionButton.Enabled = !testing &&
+                HasCompleteConnectionSettings();
+            endpointTextBox.Enabled = !testing;
+            apiKeyTextBox.Enabled = !testing;
+            modelTextBox.Enabled = !testing;
+            generateButton.Enabled = !testing &&
+                generationCancellation == null;
+            progressBar.Visible = testing || isAddingFiles ||
+                generationCancellation != null;
+        }
+
+        private void OnNewSessionClick(object sender, EventArgs args)
+        {
+            SaveCurrentDraft();
+            ConversationSession session =
+                conversationStore.CreateSession("新会话");
+            RefreshSessionList();
+            conversationStore.SelectSession(session.Id);
+            LoadCurrentSession();
+            RestoreCurrentDraft();
+            promptTextBox.Focus();
+            SetStatus("已创建新会话");
+        }
+
+        private void OnSessionSelected(object sender, EventArgs args)
+        {
+            if (isLoadingSession || sessionListBox.SelectedItem == null)
+            {
+                return;
+            }
+
+            ConversationSession session =
+                sessionListBox.SelectedItem as ConversationSession;
+            if (session == null)
+            {
+                return;
+            }
+
+            SaveCurrentDraft();
+            if (conversationStore.SelectSession(session.Id))
+            {
+                LoadCurrentSession();
+                RestoreCurrentDraft();
+                SetStatus("已切换到：" + session.Title);
+            }
+        }
+
+        private void OnRenameSessionClick(object sender, EventArgs args)
+        {
+            ConversationSession session = conversationStore.CurrentSession;
+            if (session == null)
+            {
+                return;
+            }
+
+            string title = PromptForText(
+                this,
+                "重命名会话",
+                "会话名称：",
+                session.Title);
+            if (title == null)
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                return;
+            }
+
+            conversationStore.RenameSession(session.Id, title.Trim());
+            RefreshSessionList();
+            LoadCurrentSession();
+        }
+
+        private void OnDeleteSessionClick(object sender, EventArgs args)
+        {
+            ConversationSession session = conversationStore.CurrentSession;
+            if (session == null || conversationStore.Sessions.Count <= 1)
+            {
+                return;
+            }
+
+            DialogResult result = MessageBox.Show(
+                this,
+                "确定删除会话“" + session.Title + "”吗？",
+                "删除会话",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (result != DialogResult.Yes)
+            {
+                return;
+            }
+
+            ClearDraft(session.Id);
+            conversationStore.DeleteSession(session.Id);
+            RefreshSessionList();
+            LoadCurrentSession();
+            RestoreCurrentDraft();
+            SetStatus("会话已删除");
+        }
+
+        private void OnBackupSessionsClick(object sender, EventArgs args)
+        {
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = "备份全部会话";
+                dialog.Filter = "FilePrompt 会话备份|*.fpc";
+                dialog.DefaultExt = "fpc";
+                dialog.AddExtension = true;
+                dialog.FileName = "FilePrompt会话备份_" +
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".fpc";
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                try
+                {
+                    int count = conversationStore.ExportBackup(dialog.FileName);
+                    SetStatus("已备份 " + count + " 个会话；不包含 URL、Key 和模型配置");
+                }
+                catch (Exception exception)
+                {
+                    MessageBox.Show(
+                        this,
+                        "备份失败：" + exception.Message,
+                        "备份会话",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void OnRestoreSessionsClick(object sender, EventArgs args)
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = "恢复会话备份";
+                dialog.Filter = "FilePrompt 会话备份|*.fpc";
+                dialog.CheckFileExists = true;
+                dialog.Multiselect = false;
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                try
+                {
+                    int count = conversationStore.ImportBackup(dialog.FileName);
+                    if (sessionSearchTextBox != null)
+                    {
+                        sessionSearchTextBox.Clear();
+                    }
+
+                    RefreshSessionList();
+                    LoadCurrentSession();
+                    SetStatus(count == 0
+                        ? "备份中没有可恢复的会话"
+                        : "已恢复 " + count + " 个会话；原有会话已保留");
+                }
+                catch (Exception exception)
+                {
+                    MessageBox.Show(
+                        this,
+                        "恢复失败：" + exception.Message,
+                        "恢复会话",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void OnDragEnter(object sender, DragEventArgs args)
+        {
+            args.Effect = args.Data != null &&
+                args.Data.GetDataPresent(DataFormats.FileDrop)
+                ? DragDropEffects.Copy
+                : DragDropEffects.None;
+        }
+
+        private async void OnDragDrop(object sender, DragEventArgs args)
+        {
+            if (args.Data == null ||
+                !args.Data.GetDataPresent(DataFormats.FileDrop))
+            {
+                return;
+            }
+
+            string[] paths = args.Data.GetData(DataFormats.FileDrop) as string[];
+            if (paths != null)
+            {
+                await AddFilesAsync(paths);
+            }
+        }
+
+        private async void OnAddFileClick(object sender, EventArgs args)
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = "选择要交给模型的文件";
+                dialog.Multiselect = true;
+                dialog.CheckFileExists = true;
+                dialog.Filter =
+                    "支持的文件|*.txt;*.md;*.csv;*.json;*.xml;*.yaml;*.yml;*.log;*.sql;*.java;*.cs;*.cpp;*.h;*.py;*.js;*.ts;*.html;*.css;*.pdf;*.doc;*.docx;*.rtf;*.xls;*.xlsx;*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff|" +
+                    "所有文件|*.*";
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                {
+                    await AddFilesAsync(dialog.FileNames);
+                }
+            }
+        }
+
+        private async Task AddFilesAsync(IEnumerable<string> paths)
+        {
+            if (isAddingFiles)
+            {
+                SetStatus("正在处理上一批文件，请稍候。");
+                return;
+            }
+
+            string[] files = paths
+                .Where(path => !string.IsNullOrWhiteSpace(path) &&
+                    File.Exists(path))
+                .ToArray();
+            if (files.Length == 0)
+            {
+                return;
+            }
+
+            isAddingFiles = true;
+            SetInputButtonsEnabled(false);
+            SetSessionNavigationEnabled(false);
+            progressBar.Visible = true;
+            List<string> errors = new List<string>();
+
+            try
+            {
+                foreach (string path in files)
+                {
+                    string displayName = Path.GetFileName(path);
+                    SetStatus("正在提取：" + displayName);
+                    try
+                    {
+                        InputItem item = await Task.Run(
+                            delegate { return extractor.ExtractFile(path); });
+                        AddInputItem(item);
+                    }
+                    catch (Exception exception)
+                    {
+                        errors.Add(displayName + "：" + exception.Message);
+                    }
+                }
+            }
+            finally
+            {
+                isAddingFiles = false;
+                SetInputButtonsEnabled(true);
+                SetSessionNavigationEnabled(
+                    generationCancellation == null);
+                progressBar.Visible = generationCancellation != null ||
+                    connectionTestCancellation != null;
+                UpdateInputStatus();
+            }
+
+            if (errors.Count > 0)
+            {
+                MessageBox.Show(
+                    "以下内容未能添加：\r\n\r\n" +
+                    string.Join("\r\n", errors.ToArray()),
+                    "部分文件处理失败",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        }
+
+        private async void OnPasteClick(object sender, EventArgs args)
+        {
+            try
+            {
+                if (Clipboard.ContainsFileDropList())
+                {
+                    StringCollection collection = Clipboard.GetFileDropList();
+                    await AddFilesAsync(collection.Cast<string>().ToArray());
+                    return;
+                }
+
+                if (Clipboard.ContainsImage())
+                {
+                    using (Image image = Clipboard.GetImage())
+                    {
+                        if (image != null)
+                        {
+                            AddInputItem(extractor.CreateClipboardImage(image));
+                            UpdateInputStatus();
+                            return;
+                        }
+                    }
+                }
+
+                if (Clipboard.ContainsText())
+                {
+                    string text = Clipboard.GetText();
+                    if (!string.IsNullOrEmpty(text))
+                    {
+                        AddInputItem(extractor.CreateClipboardText(text));
+                        UpdateInputStatus();
+                        return;
+                    }
+                }
+
+                MessageBox.Show(
+                    "剪贴板中没有可用的文字、图片或文件。",
+                    "粘贴内容",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception exception)
+            {
+                MessageBox.Show(
+                    "读取剪贴板失败：" + exception.Message,
+                    "粘贴内容",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        }
+
+        private void AddInputItem(InputItem item)
+        {
+            if (item == null)
+            {
+                return;
+            }
+
+            inputItems.Add(item);
+            ListViewItem row = new ListViewItem(item.Name);
+            row.SubItems.Add(item.GetKindText());
+            row.SubItems.Add(item.GetSizeText());
+            row.SubItems.Add(item.Note ?? string.Empty);
+            row.Tag = item;
+            inputListView.Items.Add(row);
+        }
+
+        private void OnRemoveClick(object sender, EventArgs args)
+        {
+            RemoveSelectedItems();
+        }
+
+        private void OnPreviewInputItem(object sender, EventArgs args)
+        {
+            if (inputListView.SelectedItems.Count == 0)
+            {
+                return;
+            }
+
+            InputItem item = inputListView.SelectedItems[0].Tag as InputItem;
+            if (item != null)
+            {
+                InputPreviewDialog.ShowPreview(this, item);
+            }
+        }
+
+        private void RemoveSelectedItems()
+        {
+            ListViewItem[] selected = inputListView.SelectedItems
+                .Cast<ListViewItem>()
+                .ToArray();
+            foreach (ListViewItem row in selected)
+            {
+                InputItem item = row.Tag as InputItem;
+                if (item != null)
+                {
+                    inputItems.Remove(item);
+                }
+
+                inputListView.Items.Remove(row);
+            }
+
+            UpdateInputStatus();
+        }
+
+        private void OnClearClick(object sender, EventArgs args)
+        {
+            inputItems.Clear();
+            inputListView.Items.Clear();
+            UpdateInputStatus();
+        }
+
+        private void UpdateInputStatus()
+        {
+            int textCount = inputItems.Count(item => item.Kind == InputKind.Text);
+            int imageCount = inputItems.Count(item => item.Kind == InputKind.Image);
+            int fileCount = inputItems.Count(item => item.Kind == InputKind.File);
+            SetStatus(
+                "已添加 " + inputItems.Count +
+                " 项（文本 " + textCount +
+                "、图片 " + imageCount +
+                "、文件 " + fileCount + "）");
+        }
+
+        private async void StartGeneration()
+        {
+            if (generationCancellation != null ||
+                connectionTestCancellation != null ||
+                isAddingFiles)
+            {
+                return;
+            }
+
+            string endpoint = endpointTextBox.Text.Trim();
+            string key = apiKeyTextBox.Text.Trim();
+            string model = modelTextBox.Text.Trim();
+            if (string.IsNullOrWhiteSpace(endpoint))
+            {
+                ShowValidation("请先填写完整请求 URL。", endpointTextBox);
+                return;
+            }
+
+            Uri endpointUri;
+            if (!Uri.TryCreate(endpoint, UriKind.Absolute, out endpointUri) ||
+                (endpointUri.Scheme != Uri.UriSchemeHttp &&
+                    endpointUri.Scheme != Uri.UriSchemeHttps))
+            {
+                ShowValidation(
+                    "请求 URL 必须是完整的 http:// 或 https:// 地址。",
+                    endpointTextBox);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                ShowValidation("请先填写 API Key。", apiKeyTextBox);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(model))
+            {
+                ShowValidation("请先填写模型名称。", modelTextBox);
+                return;
+            }
+
+            if (inputItems.Count == 0 &&
+                string.IsNullOrWhiteSpace(promptTextBox.Text))
+            {
+                ShowValidation(
+                    "请拖入或粘贴内容，或者输入文字描述。",
+                    promptTextBox);
+                return;
+            }
+
+            ConversationSession session = conversationStore.CurrentSession;
+            if (session == null)
+            {
+                session = conversationStore.CreateSession("新会话");
+                RefreshSessionList();
+            }
+
+            string instruction = GetCurrentInstruction();
+            string visibleUserMessage = BuildVisibleUserMessage(instruction);
+            string prompt = BuildCombinedPrompt(instruction);
+            List<InputItem> attachments = inputItems
+                .Where(item => item.Kind != InputKind.Text)
+                .ToList();
+            ModelRequest request = new ModelRequest();
+            request.EndpointUrl = endpoint;
+            request.ApiKey = key;
+            request.ModelName = model;
+            request.Prompt = prompt;
+            request.Attachments = attachments;
+            request.ConversationMessages = session.Messages == null
+                ? new List<ConversationMessage>()
+                : session.Messages
+                    .Where(message => message != null)
+                    .Select(message => message.Clone())
+                    .ToList();
+
+            SaveSettings();
+            if (session.Messages == null || session.Messages.Count == 0)
+            {
+                outputTextBox.Clear();
+            }
+            else
+            {
+                RenderConversation(session);
+            }
+
+            AppendTranscriptMessage(
+                "你",
+                visibleUserMessage,
+                Color.FromArgb(54, 86, 120));
+            AppendTranscriptHeader(
+                "模型",
+                Color.FromArgb(29, 105, 178));
+            streamedResponse = new StringBuilder();
+            generationCancellation = new CancellationTokenSource();
+            SetGeneratingState(true);
+            connectionStatusLabel.Text = "正在请求 · " + model;
+
+            try
+            {
+                string result = await modelClient.GenerateAsync(
+                    request,
+                    AppendOutput,
+                    SetStatus,
+                    generationCancellation.Token);
+
+                if (streamedResponse.Length == 0 &&
+                    !string.IsNullOrEmpty(result))
+                {
+                    AppendOutput(result);
+                }
+
+                conversationStore.AddMessage(
+                    session.Id,
+                    new ConversationMessage("user", prompt));
+                conversationStore.AddMessage(
+                    session.Id,
+                    new ConversationMessage(
+                        "assistant",
+                        result ?? streamedResponse.ToString()));
+                AutoTitleSession(session, instruction);
+                RefreshSessionList();
+                sessionTitleLabel.Text = session.Title;
+                ClearDraft(session.Id);
+                promptTextBox.Clear();
+                inputItems.Clear();
+                inputListView.Items.Clear();
+                RenderConversation(session);
+                SetStatus(
+                    "生成完成，共 " +
+                    (result == null ? 0 : result.Length).ToString("N0") +
+                    " 字符");
+                promptTextBox.Focus();
+            }
+            catch (OperationCanceledException)
+            {
+                RenderConversation(session);
+                SetStatus("已停止，本次内容未写入会话。");
+            }
+            catch (ModelCallException exception)
+            {
+                RenderConversation(session);
+                SetStatus("生成失败");
+                MessageBox.Show(
+                    exception.Message,
+                    "模型调用失败",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            catch (Exception exception)
+            {
+                RenderConversation(session);
+                SetStatus("生成失败");
+                MessageBox.Show(
+                    "发生错误：" + exception.Message,
+                    "生成失败",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            finally
+            {
+                if (generationCancellation != null)
+                {
+                    generationCancellation.Dispose();
+                    generationCancellation = null;
+                }
+
+                streamedResponse = null;
+                SetGeneratingState(false);
+                connectionStatusLabel.Text = BuildConnectionStatus();
+            }
+        }
+
+        private void AutoTitleSession(
+            ConversationSession session,
+            string prompt)
+        {
+            if (session == null ||
+                session.Messages == null ||
+                session.Messages.Count > 2 ||
+                !string.Equals(session.Title, "新会话",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            string title = (prompt ?? string.Empty)
+                .Replace("\r", " ")
+                .Replace("\n", " ")
+                .Trim();
+            if (title.Length > 22)
+            {
+                title = title.Substring(0, 22) + "…";
+            }
+
+            if (!string.IsNullOrWhiteSpace(title))
+            {
+                conversationStore.RenameSession(session.Id, title);
+            }
+        }
+
+        private string GetCurrentInstruction()
+        {
+            string instruction = promptTextBox.Text.Trim();
+            if (!string.IsNullOrEmpty(instruction))
+            {
+                return instruction;
+            }
+
+            return inputItems.Count > 0
+                ? "请分析已添加的资料，并给出清晰、有用的结果。"
+                : "请分析以下内容，并给出清晰、有用的结果。";
+        }
+
+        private string BuildVisibleUserMessage(string instruction)
+        {
+            StringBuilder visible = new StringBuilder();
+            visible.Append(string.IsNullOrWhiteSpace(instruction)
+                ? "请分析已添加的资料。"
+                : instruction.Trim());
+            if (inputItems.Count == 0)
+            {
+                return visible.ToString();
+            }
+
+            visible.AppendLine();
+            visible.AppendLine();
+            visible.AppendLine("已授权资料：");
+            int displayed = Math.Min(inputItems.Count, 8);
+            for (int index = 0; index < displayed; index++)
+            {
+                InputItem item = inputItems[index];
+                visible.Append("- ");
+                visible.Append(item.Name);
+                visible.Append("（");
+                visible.Append(item.GetKindText());
+                visible.Append("，");
+                visible.Append(item.GetSizeText());
+                visible.AppendLine("）");
+            }
+
+            if (inputItems.Count > displayed)
+            {
+                visible.Append("- 另有 ");
+                visible.Append(inputItems.Count - displayed);
+                visible.AppendLine(" 项");
+            }
+
+            return visible.ToString().TrimEnd();
+        }
+
+        private string BuildCombinedPrompt(string instruction)
+        {
+            StringBuilder result = new StringBuilder();
+            if (string.IsNullOrEmpty(instruction))
+            {
+                instruction = "请分析以下内容，并根据内容给出清晰、有用的结果。";
+            }
+
+            result.AppendLine("用户要求：");
+            result.AppendLine(instruction);
+
+            IList<InputItem> textItems = inputItems
+                .Where(item => item.Kind == InputKind.Text)
+                .ToList();
+            if (textItems.Count > 0)
+            {
+                result.AppendLine();
+                result.AppendLine(
+                    "以下资料由用户主动拖入或粘贴后提取，" +
+                    "只包含文件名和实际内容，不包含本地路径：");
+            }
+
+            bool truncated = false;
+            foreach (InputItem item in textItems)
+            {
+                string header = "\r\n===== 内容开始：" + item.Name +
+                    " =====\r\n";
+                string footer = "\r\n===== 内容结束：" + item.Name +
+                    " =====\r\n";
+                int remaining = MaxCombinedTextCharacters - result.Length -
+                    header.Length - footer.Length;
+                if (remaining <= 0)
+                {
+                    truncated = true;
+                    break;
+                }
+
+                result.Append(header);
+                string content = item.TextContent ?? string.Empty;
+                if (content.Length > remaining)
+                {
+                    result.Append(content.Substring(0, remaining));
+                    truncated = true;
+                }
+                else
+                {
+                    result.Append(content);
+                }
+
+                result.Append(footer);
+                if (truncated)
+                {
+                    break;
+                }
+            }
+
+            if (truncated)
+            {
+                result.AppendLine();
+                result.AppendLine(
+                    "[全部输入内容超过 4,000,000 字符，后续部分已省略]");
+            }
+
+            return result.ToString();
+        }
+
+        private void SetGeneratingState(bool generating)
+        {
+            generateButton.Enabled = !generating;
+            stopButton.Enabled = generating;
+            addFileButton.Enabled = !generating && !isAddingFiles;
+            pasteButton.Enabled = !generating && !isAddingFiles;
+            removeButton.Enabled = !generating && !isAddingFiles;
+            clearButton.Enabled = !generating && !isAddingFiles;
+            SetSessionNavigationEnabled(!generating && !isAddingFiles);
+            deleteSessionButton.Enabled = !generating &&
+                conversationStore.Sessions.Count > 1;
+            renameSessionButton.Enabled = !generating &&
+                conversationStore.CurrentSession != null;
+            backupSessionsButton.Enabled = !generating &&
+                conversationStore.Sessions.Count > 0;
+            restoreSessionsButton.Enabled = !generating;
+            testConnectionButton.Enabled = !generating &&
+                HasCompleteConnectionSettings();
+            endpointTextBox.Enabled = !generating;
+            apiKeyTextBox.Enabled = !generating;
+            modelTextBox.Enabled = !generating;
+            progressBar.Visible = generating || isAddingFiles;
+            UpdateOutputButtons(generating);
+        }
+
+        private void SetSessionNavigationEnabled(bool enabled)
+        {
+            if (sessionListBox != null)
+            {
+                sessionListBox.Enabled = enabled;
+            }
+
+            if (sessionSearchTextBox != null)
+            {
+                sessionSearchTextBox.Enabled = enabled;
+            }
+
+            if (newSessionButton != null)
+            {
+                newSessionButton.Enabled = enabled;
+            }
+        }
+
+        private void SetInputButtonsEnabled(bool enabled)
+        {
+            bool actual = enabled && generationCancellation == null;
+            addFileButton.Enabled = actual;
+            pasteButton.Enabled = actual;
+            removeButton.Enabled = actual;
+            clearButton.Enabled = actual;
+        }
+
+        private void AppendOutput(string value)
+        {
+            if (string.IsNullOrEmpty(value) || IsDisposed)
+            {
+                return;
+            }
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(new Action<string>(AppendOutput), value);
+                }
+                catch (InvalidOperationException)
+                {
+                    // Window is closing.
+                }
+
+                return;
+            }
+
+            if (streamedResponse != null)
+            {
+                streamedResponse.Append(value);
+            }
+
+            outputTextBox.AppendText(value);
+            outputTextBox.SelectionStart = outputTextBox.TextLength;
+            outputTextBox.ScrollToCaret();
+        }
+
+        private void SetStatus(string value)
+        {
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(new Action<string>(SetStatus), value);
+                }
+                catch (InvalidOperationException)
+                {
+                    // Window is closing.
+                }
+
+                return;
+            }
+
+            statusLabel.Text = string.IsNullOrEmpty(value) ? "就绪" : value;
+        }
+
+        private static void ShowValidation(string message, Control control)
+        {
+            MessageBox.Show(
+                message,
+                "请检查输入",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            if (control != null)
+            {
+                control.Focus();
+            }
+        }
+
+        private void OnCopyOutputClick(object sender, EventArgs args)
+        {
+            string output = GetLatestAssistantOutput();
+            if (string.IsNullOrEmpty(output))
+            {
+                return;
+            }
+
+            try
+            {
+                Clipboard.SetText(output);
+                SetStatus("最新回复已复制到剪贴板");
+            }
+            catch (Exception exception)
+            {
+                MessageBox.Show(
+                    "复制失败：" + exception.Message,
+                    "复制结果",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        }
+
+        private void OnSaveOutputClick(object sender, EventArgs args)
+        {
+            string output = GetLatestAssistantOutput();
+            if (string.IsNullOrEmpty(output))
+            {
+                return;
+            }
+
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = "保存模型输出";
+                dialog.Filter =
+                    "Markdown 文件|*.md|文本文件|*.txt|所有文件|*.*";
+                dialog.FileName = "模型输出_" +
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".md";
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                try
+                {
+                    File.WriteAllText(
+                        dialog.FileName,
+                        output,
+                        new UTF8Encoding(true));
+                    SetStatus("最新回复已保存");
+                }
+                catch (Exception exception)
+                {
+                    ShowSaveError(exception);
+                }
+            }
+        }
+
+        private void OnExportWordClick(object sender, EventArgs args)
+        {
+            string conversation = BuildConversationMarkdown();
+            if (string.IsNullOrEmpty(conversation))
+            {
+                return;
+            }
+
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = "导出 Word 文档";
+                dialog.Filter = "Word 文档|*.docx";
+                dialog.FileName = "FilePrompt会话_" +
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".docx";
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                try
+                {
+                    DocxExporter.Export(
+                        conversation,
+                        dialog.FileName);
+                    SetStatus("Word 文档已导出");
+                }
+                catch (Exception exception)
+                {
+                    ShowSaveError(exception);
+                }
+            }
+        }
+
+        private void OnExportTableClick(object sender, EventArgs args)
+        {
+            string output = GetLatestAssistantOutput();
+            if (string.IsNullOrEmpty(output))
+            {
+                return;
+            }
+
+            MarkdownDocument document =
+                MarkdownDocument.Parse(output);
+            if (document.Tables == null || document.Tables.Count == 0)
+            {
+                MessageBox.Show(
+                    "当前输出中没有识别到 Markdown 表格。",
+                    "导出表格",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = "导出表格";
+                dialog.Filter = "CSV 表格|*.csv";
+                dialog.FileName = "FilePrompt表格_" +
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv";
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                try
+                {
+                    CsvExporter.Export(document, dialog.FileName);
+                    SetStatus("表格已导出为 CSV");
+                }
+                catch (Exception exception)
+                {
+                    ShowSaveError(exception);
+                }
+            }
+        }
+
+        private string BuildConversationMarkdown()
+        {
+            ConversationSession session = conversationStore.CurrentSession;
+            if (session == null || session.Messages == null ||
+                session.Messages.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            StringBuilder markdown = new StringBuilder();
+            markdown.AppendLine("# " + session.Title);
+            markdown.AppendLine();
+            foreach (ConversationMessage message in session.Messages)
+            {
+                if (message == null)
+                {
+                    continue;
+                }
+
+                markdown.AppendLine(
+                    message.Role == "assistant" ? "## 模型" : "## 你");
+                markdown.AppendLine();
+                markdown.AppendLine(FormatMessageForDisplay(message));
+                markdown.AppendLine();
+            }
+
+            return markdown.ToString();
+        }
+
+        private void ShowSaveError(Exception exception)
+        {
+            MessageBox.Show(
+                "保存失败：" + exception.Message,
+                "保存结果",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+
+        private void OnFormClosing(object sender, FormClosingEventArgs args)
+        {
+            if (generationCancellation != null)
+            {
+                generationCancellation.Cancel();
+            }
+
+            if (connectionTestCancellation != null)
+            {
+                connectionTestCancellation.Cancel();
+            }
+
+            SaveSettings();
+            conversationStore.Save();
+            modelClient.Dispose();
+        }
+
+        private static string PromptForText(
+            IWin32Window owner,
+            string title,
+            string labelText,
+            string initialValue)
+        {
+            using (Form dialog = new Form())
+            {
+                dialog.Text = title;
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.MinimizeBox = false;
+                dialog.MaximizeBox = false;
+                dialog.ShowInTaskbar = false;
+                dialog.ClientSize = new Size(360, 116);
+
+                Label label = new Label();
+                label.Text = labelText;
+                label.AutoSize = true;
+                label.Location = new Point(12, 14);
+
+                TextBox input = new TextBox();
+                input.Text = initialValue ?? string.Empty;
+                input.Location = new Point(12, 38);
+                input.Width = 336;
+
+                Button ok = new Button();
+                ok.Text = "确定";
+                ok.DialogResult = DialogResult.OK;
+                ok.Location = new Point(188, 76);
+                ok.Width = 74;
+
+                Button cancel = new Button();
+                cancel.Text = "取消";
+                cancel.DialogResult = DialogResult.Cancel;
+                cancel.Location = new Point(274, 76);
+                cancel.Width = 74;
+
+                dialog.Controls.Add(label);
+                dialog.Controls.Add(input);
+                dialog.Controls.Add(ok);
+                dialog.Controls.Add(cancel);
+                dialog.AcceptButton = ok;
+                dialog.CancelButton = cancel;
+
+                return dialog.ShowDialog(owner) == DialogResult.OK
+                    ? input.Text
+                    : null;
+            }
+        }
+    }
+}

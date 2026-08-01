@@ -1,0 +1,36 @@
+FilePrompt third-party notices
+================================
+
+PdfPig
+Copyright (c) PdfPig contributors
+License: Apache License 2.0
+https://github.com/UglyToad/PdfPig
+
+NPOI
+Copyright (c) NPOI contributors
+License: Apache License 2.0 (version 2.7.4)
+https://github.com/nissl-lab/npoi
+
+Additional runtime dependencies
+--------------------------------
+
+BouncyCastle.Cryptography 2.4.0 - MIT
+Enums.NET 5.0.0 - MIT
+ExtendedNumerics.BigDecimal 2025.1001.2.129 - MIT
+ICSharpCode.SharpZipLib 1.4.2 - MIT
+MathNet.Numerics 5.0.0 - MIT
+Microsoft.Bcl.HashCode 6.0.0 - MIT
+Microsoft.IO.RecyclableMemoryStream 3.0.1 - MIT
+SixLabors.Fonts 1.0.1 - Apache License 2.0
+SixLabors.ImageSharp 2.1.10 - Apache License 2.0
+System.Buffers 4.6.0 - MIT
+System.Memory 4.6.0 - MIT
+System.Numerics.Vectors 4.6.0 - MIT
+System.Runtime.CompilerServices.Unsafe 6.1.0 - MIT
+System.Security.Cryptography.Xml 8.0.2 - MIT
+System.Text.Encoding.CodePages 5.0.0 - MIT
+System.Threading.Tasks.Extensions 4.5.2 - MIT
+ZString 2.6.0 - MIT
+
+The license terms supplied by each upstream package remain applicable to its
+redistributed binary files.
