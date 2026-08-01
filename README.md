@@ -5,6 +5,11 @@
 ## 当前功能
 
 - 配置完整请求 URL、API Key、模型名称。
+- 可从剪贴板安装本地技能；技能是离线保存的 system 指令，可独立启用或停用。
+- 支持本地 stdio 和 Streamable HTTP 两种 MCP；可粘贴标准 `mcpServers` JSON、
+  测试连接、发现工具并完成多轮工具调用。
+- 剪贴板导入的 MCP 一律保持停用；stdio 每次启动前先核对完整命令和参数，
+  工具调用默认也逐次确认。
 - 拖入或选择多个本地文件。
 - 从剪贴板粘贴文字、图片或资源管理器中复制的文件。
 - 本地提取文本/代码、PDF、DOC/DOCX、RTF、XLS/XLSX。
@@ -19,6 +24,8 @@
 - 全部会话可备份为 `.fpc` 并合并恢复；备份不包含 URL、API Key 或模型配置。
 - 可把回答导出为 Word（`.docx`）；回答包含 Markdown 表格时可导出为 CSV 表格。
 - API Key 使用 Windows DPAPI 加密后保存在当前用户的本地配置目录。
+- MCP 的命令、参数、工作目录、环境变量、URL 和请求头整体使用 Windows DPAPI
+  加密保存；不会把这些连接配置作为提示词发给模型。
 - 完整请求 URL 不跟随 3xx 重定向，避免把用户资料转发到其他地址。
 - 会话按完整问答轮次原子保存；保存失败会回滚，重复启动会切回现有窗口。
 - 对异常 Office XML、极端 Excel 列号和 CSV 公式内容进行安全限制与转义。
@@ -49,6 +56,64 @@ Content-Type: application/json
 ```
 
 有图片时，`content` 使用 `text` + `image_url` 的多模态数组格式。
+启用技能后，程序会在最前面增加 `system` 消息。启用并成功连接 MCP 后，程序
+使用 Chat Completions 的 `tools`、`tool_choice: "auto"`、assistant
+`tool_calls` 和 `tool` 结果消息完成最多 8 轮调用；自定义模型接口需兼容这些字段。
+
+## 离线技能与 MCP
+
+主窗口右上角的“技能 / MCP”入口完全在本机工作，不访问扩展商店，也不会下载
+依赖。
+
+技能只能手工新建或从剪贴板安装，不会扫描技能目录。剪贴板可直接放普通文本、
+带 `name`/`description` YAML 头部的 `SKILL.md`，也可使用下面的 JSON。程序只把
+技能正文作为模型指令保存，不执行其中的脚本、命令或网络操作：
+
+```json
+{
+  "name": "合同审阅",
+  "description": "单位内部审阅规则",
+  "instructions": "先列风险，再逐条引用依据。",
+  "enabled": true
+}
+```
+
+MCP 可手工填写，也可把标准配置复制到剪贴板后选择“粘贴 JSON”：
+
+```json
+{
+  "mcpServers": {
+    "local-tools": {
+      "command": "D:\\MCP\\server.exe",
+      "args": ["--stdio"],
+      "cwd": "D:\\MCP",
+      "env": { "TOKEN": "内网令牌" }
+    },
+    "intranet-tools": {
+      "url": "http://10.0.0.8:8080/mcp",
+      "headers": { "Authorization": "Bearer 内网令牌" }
+    }
+  }
+}
+```
+
+粘贴导入的 MCP 即使 JSON 中写了 `"enabled": true` 也不会自动启用。请先在界面
+逐项核对，再手工开启需要的服务。
+
+stdio MCP 所需的 EXE 及其运行环境必须由管理员提前离线放到电脑上；FilePrompt
+只负责启动已配置的命令，不会在线安装 Node.js、Python、Java 或 MCP 服务。
+每次生成中首次连接 stdio MCP 前，程序会展示服务名、完整命令、工作目录、全部
+参数和环境变量名称；默认按钮为“拒绝”，只有选择“允许本次启动”后才会创建进程。
+Streamable HTTP MCP 只连接用户填写的 URL，不跟随 3xx 重定向。模型只会看到
+已发现工具的公开名称、说明和参数结构，看不到 stdio 命令、本地路径、环境变量、
+HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行后才会交给模型。
+如果 MCP 结果回显了较长的已知命令、参数、工作目录、环境变量值、URL 或请求头
+值，程序会在回传模型前把它们替换为脱敏标记。
+
+“每次调用前确认”默认开启。只有在完全信任对应 MCP 服务和模型时才应关闭。
+本地 MCP 自身能访问哪些文件或系统资源，取决于该 MCP 的实现和当前 Windows
+用户权限，不是 FilePrompt 自动授予的能力。字符串脱敏无法阻止恶意 MCP 对内容
+编码、拆分或转发；只能启用来源可信且已由管理员审查的 MCP。
 
 ## 系统要求
 
@@ -58,7 +123,7 @@ Content-Type: application/json
 
 ## Windows 7 离线完整版
 
-优先使用 `FilePrompt-Win7-Full-v1.5.zip`。完整解压后运行
+优先使用 `FilePrompt-Win7-Full-v1.6.zip`。完整解压后运行
 `Start-FilePrompt.exe`，启动器会检测 .NET Framework 4.8；缺少时会调用包内
 经过微软数字签名的官方完整离线安装程序。安装过程不下载文件，也不需要访问
 互联网。不要只复制 `app` 目录中的 EXE。
@@ -98,7 +163,7 @@ Microsoft Authenticode 签名，并生成 `PACKAGE-CHECKSUMS-SHA256.txt`。仅�
 
 ## 测试
 
-构建并运行全部 10 组自动回归测试：
+构建并运行全部 13 组自动回归测试：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1

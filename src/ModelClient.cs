@@ -16,6 +16,23 @@ namespace FilePromptWin7
 {
     internal sealed class ModelClient : IDisposable
     {
+        private const int MaximumToolRounds = 8;
+        private const int MaximumTools = 128;
+        private const int MaximumToolCallsPerRound = 32;
+        private const int MaximumTotalToolCalls = 64;
+        private const int MaximumToolNameCharacters = 64;
+        private const int MaximumToolCallIdCharacters = 256;
+        private const int MaximumToolDescriptionCharacters = 2000;
+        private const int MaximumToolSchemaCharacters = 200000;
+        private const int MaximumCombinedToolDefinitionCharacters =
+            4 * 1024 * 1024;
+        private const int MaximumToolArgumentsCharacters = 1024 * 1024;
+        private const int MaximumToolResultCharacters = 1024 * 1024;
+        private const int MaximumToolTranscriptCharacters = 8 * 1024 * 1024;
+        private const int MaximumRequestCharacters = 32 * 1024 * 1024;
+        private const int MaximumResponseCharacters = 8 * 1024 * 1024;
+        private const long MaximumResponseBytes = 16L * 1024L * 1024L;
+
         private readonly HttpClient client;
         private readonly JavaScriptSerializer json;
 
@@ -138,6 +155,158 @@ namespace FilePromptWin7
             throw CreateUserFacingException(secondError);
         }
 
+        public async Task<string> GenerateWithToolsAsync(
+            ModelRequest request,
+            IList<McpToolDefinition> tools,
+            Func<ModelToolCall, CancellationToken, Task<McpToolResult>>
+                executeTool,
+            Action<string> onDelta,
+            Action<string> onStatus,
+            CancellationToken cancellationToken)
+        {
+            ValidateRequest(request);
+            if (tools == null || tools.Count == 0)
+            {
+                return await GenerateAsync(
+                    request,
+                    onDelta,
+                    onStatus,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            if (executeTool == null)
+            {
+                throw new ArgumentNullException("executeTool");
+            }
+
+            EndpointAttempt attempt = BuildExactAttempt(request.EndpointUrl);
+            ToolSet toolSet = BuildToolSet(tools);
+            List<object> messages = BuildInitialMessages(request, true);
+            HashSet<string> toolCallIds = new HashSet<string>(
+                StringComparer.Ordinal);
+            int toolRounds = 0;
+            int totalToolCalls = 0;
+            int toolTranscriptCharacters = 0;
+
+            try
+            {
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    Notify(
+                        onStatus,
+                        toolRounds == 0
+                            ? "正在请求模型并准备工具…"
+                            : "正在把工具结果交给模型…");
+
+                    string payload = BuildToolPayload(
+                        request,
+                        messages,
+                        toolSet.Payload);
+                    object parsed = await SendToolAttemptAsync(
+                        attempt,
+                        request,
+                        payload,
+                        cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    ToolRoundResponse response = ParseToolRoundResponse(
+                        parsed,
+                        toolSet.Names,
+                        toolCallIds);
+
+                    if (response.ToolCalls.Count == 0)
+                    {
+                        if (string.IsNullOrEmpty(response.Text))
+                        {
+                            throw new ModelCallException(
+                                "模型没有返回可显示文本，也没有请求工具。");
+                        }
+
+                        Notify(onDelta, response.Text);
+                        return response.Text;
+                    }
+
+                    if (toolRounds >= MaximumToolRounds)
+                    {
+                        throw new ModelCallException(
+                            "模型连续请求工具超过 8 轮，已停止以避免无限循环。");
+                    }
+
+                    if (totalToolCalls + response.ToolCalls.Count >
+                        MaximumTotalToolCalls)
+                    {
+                        throw new ModelCallException(
+                            "本次生成请求的工具调用总数超过 64 个，已停止。");
+                    }
+
+                    messages.Add(response.AssistantMessage);
+                    foreach (ModelToolCall toolCall in response.ToolCalls)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        int remaining = MaximumToolTranscriptCharacters -
+                            toolTranscriptCharacters;
+                        if (remaining <= 0)
+                        {
+                            throw new ModelCallException(
+                                "工具结果累计超过 8 MB，已停止继续调用。");
+                        }
+
+                        Notify(onStatus, "正在调用工具 · " + toolCall.Name);
+                        McpToolResult toolResult = await ExecuteToolAsync(
+                            executeTool,
+                            toolCall,
+                            cancellationToken).ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        string toolContent = FormatToolResult(
+                            toolResult,
+                            Math.Min(MaximumToolResultCharacters, remaining));
+                        toolTranscriptCharacters += toolContent.Length;
+                        messages.Add(new Dictionary<string, object>
+                        {
+                            { "role", "tool" },
+                            { "tool_call_id", toolCall.Id },
+                            { "content", toolContent }
+                        });
+                        Notify(onStatus, "工具已完成 · " + toolCall.Name);
+                    }
+
+                    totalToolCalls += response.ToolCalls.Count;
+                    toolRounds++;
+                }
+            }
+            catch (AttemptException exception)
+            {
+                throw CreateUserFacingException(exception);
+            }
+            catch (HttpRequestException exception)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                throw CreateNetworkException(exception);
+            }
+            catch (IOException exception)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                throw new ModelCallException("连接中断：" + exception.Message);
+            }
+            catch (ObjectDisposedException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                throw;
+            }
+        }
+
         public async Task TestConnectionAsync(
             string endpointUrl,
             string apiKey,
@@ -207,6 +376,12 @@ namespace FilePromptWin7
             CancellationToken cancellationToken)
         {
             string payload = BuildPayload(request, stream);
+            if (payload.Length > MaximumRequestCharacters)
+            {
+                throw new ModelCallException(
+                    "模型请求内容超过 32 MB 安全限制，请减少资料或会话内容。");
+            }
+
             using (HttpRequestMessage message = new HttpRequestMessage(
                 HttpMethod.Post,
                 attempt.Url))
@@ -238,9 +413,9 @@ namespace FilePromptWin7
                         string requestId = GetRequestId(response);
                         if (!response.IsSuccessStatusCode)
                         {
-                            string errorBody = await response.Content
-                            .ReadAsStringAsync()
-                            .ConfigureAwait(false);
+                            string errorBody = await ReadBoundedResponseAsync(
+                                response.Content,
+                                cancellationToken).ConfigureAwait(false);
                             throw new AttemptException(
                                 (int)response.StatusCode,
                                 errorBody,
@@ -266,9 +441,9 @@ namespace FilePromptWin7
                             }
                         }
 
-                        string body = await response.Content
-                            .ReadAsStringAsync()
-                            .ConfigureAwait(false);
+                        string body = await ReadBoundedResponseAsync(
+                            response.Content,
+                            cancellationToken).ConfigureAwait(false);
                         string result = ExtractText(Deserialize(body));
                         if (string.IsNullOrEmpty(result))
                         {
@@ -316,6 +491,167 @@ namespace FilePromptWin7
             }
         }
 
+        private async Task<object> SendToolAttemptAsync(
+            EndpointAttempt attempt,
+            ModelRequest request,
+            string payload,
+            CancellationToken cancellationToken)
+        {
+            using (HttpRequestMessage message = new HttpRequestMessage(
+                HttpMethod.Post,
+                attempt.Url))
+            {
+                string key = (request.ApiKey ?? string.Empty).Trim();
+                if (!string.IsNullOrEmpty(key))
+                {
+                    message.Headers.Authorization =
+                        new AuthenticationHeaderValue("Bearer", key);
+                }
+
+                message.Headers.Accept.Add(
+                    new MediaTypeWithQualityHeaderValue("application/json"));
+                message.Content = new StringContent(
+                    payload,
+                    Encoding.UTF8,
+                    "application/json");
+
+                HttpResponseMessage response = await client.SendAsync(
+                    message,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken).ConfigureAwait(false);
+                using (response)
+                using (CancellationTokenRegistration registration =
+                    cancellationToken.Register(
+                        delegate { response.Dispose(); }))
+                {
+                    try
+                    {
+                        string requestId = GetRequestId(response);
+                        string body = await ReadBoundedResponseAsync(
+                            response.Content,
+                            cancellationToken).ConfigureAwait(false);
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            throw new AttemptException(
+                                (int)response.StatusCode,
+                                body,
+                                requestId);
+                        }
+
+                        object parsed;
+                        try
+                        {
+                            parsed = Deserialize(body);
+                        }
+                        catch (Exception exception)
+                        {
+                            throw new ModelCallException(
+                                "模型接口返回了无法解析的 JSON：" +
+                                exception.Message);
+                        }
+
+                        if (parsed == null)
+                        {
+                            throw new ModelCallException(
+                                "模型接口返回了空响应。");
+                        }
+
+                        string error = ExtractErrorMessage(parsed);
+                        if (!string.IsNullOrEmpty(error))
+                        {
+                            throw new ModelCallException(error);
+                        }
+
+                        return parsed;
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            throw new OperationCanceledException(
+                                cancellationToken);
+                        }
+
+                        throw;
+                    }
+                    catch (IOException)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            throw new OperationCanceledException(
+                                cancellationToken);
+                        }
+
+                        throw;
+                    }
+                    catch (HttpRequestException)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            throw new OperationCanceledException(
+                                cancellationToken);
+                        }
+
+                        throw;
+                    }
+                }
+            }
+        }
+
+        private static async Task<string> ReadBoundedResponseAsync(
+            HttpContent content,
+            CancellationToken cancellationToken)
+        {
+            if (content == null)
+            {
+                return string.Empty;
+            }
+
+            long? contentLength = content.Headers.ContentLength;
+            if (contentLength.HasValue &&
+                contentLength.Value > MaximumResponseBytes)
+            {
+                throw new ModelCallException(
+                    "模型接口响应超过 16 MB 安全限制。");
+            }
+
+            StringBuilder result = new StringBuilder();
+            char[] buffer = new char[4096];
+            using (Stream stream = await content.ReadAsStreamAsync()
+                .ConfigureAwait(false))
+            using (StreamReader reader = new StreamReader(
+                stream,
+                Encoding.UTF8,
+                true,
+                4096,
+                true))
+            {
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    int read = await reader.ReadAsync(
+                        buffer,
+                        0,
+                        buffer.Length).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        break;
+                    }
+
+                    if (result.Length >
+                        MaximumResponseCharacters - read)
+                    {
+                        throw new ModelCallException(
+                            "模型接口响应超过 8 MB 字符安全限制。");
+                    }
+
+                    result.Append(buffer, 0, read);
+                }
+            }
+
+            return result.ToString();
+        }
+
         private async Task<string> ReadServerSentEventsAsync(
             Stream stream,
             Action<string> onDelta,
@@ -354,6 +690,12 @@ namespace FilePromptWin7
                         break;
                     }
 
+                    if (line.Length > MaximumResponseCharacters)
+                    {
+                        throw new ModelCallException(
+                            "模型接口响应超过 8 MB 字符安全限制。");
+                    }
+
                     if (line.Length == 0)
                     {
                         bool completed = ProcessEventData(eventData, result, onDelta);
@@ -369,10 +711,24 @@ namespace FilePromptWin7
                     {
                         if (eventData.Length > 0)
                         {
+                            if (eventData.Length >= MaximumResponseCharacters)
+                            {
+                                throw new ModelCallException(
+                                    "模型接口响应超过 8 MB 字符安全限制。");
+                            }
+
                             eventData.Append('\n');
                         }
 
-                        eventData.Append(line.Substring(5).TrimStart());
+                        string eventLine = line.Substring(5).TrimStart();
+                        if (eventData.Length >
+                            MaximumResponseCharacters - eventLine.Length)
+                        {
+                            throw new ModelCallException(
+                                "模型接口响应超过 8 MB 字符安全限制。");
+                        }
+
+                        eventData.Append(eventLine);
                     }
                 }
             }
@@ -440,6 +796,7 @@ namespace FilePromptWin7
             string delta = ExtractDelta(parsed);
             if (!string.IsNullOrEmpty(delta))
             {
+                EnsureResponseCapacity(result.Length, delta.Length);
                 result.Append(delta);
                 Notify(onDelta, delta);
             }
@@ -448,6 +805,7 @@ namespace FilePromptWin7
                 string fullText = ExtractText(parsed);
                 if (!string.IsNullOrEmpty(fullText))
                 {
+                    EnsureResponseCapacity(result.Length, fullText.Length);
                     result.Append(fullText);
                     Notify(onDelta, fullText);
                 }
@@ -456,11 +814,67 @@ namespace FilePromptWin7
             return false;
         }
 
+        private static void EnsureResponseCapacity(
+            int currentLength,
+            int additionalLength)
+        {
+            if (additionalLength < 0 ||
+                currentLength > MaximumResponseCharacters - additionalLength)
+            {
+                throw new ModelCallException(
+                    "模型接口响应超过 8 MB 字符安全限制。");
+            }
+        }
+
         private string BuildPayload(ModelRequest request, bool stream)
         {
             Dictionary<string, object> root = new Dictionary<string, object>();
             root["model"] = request.ModelName;
             root["stream"] = stream;
+            root["messages"] = BuildInitialMessages(request, true).ToArray();
+            return json.Serialize(root);
+        }
+
+        private List<object> BuildInitialMessages(
+            ModelRequest request,
+            bool includeSystemPrompt)
+        {
+            List<object> messages = new List<object>();
+            if (includeSystemPrompt &&
+                !string.IsNullOrWhiteSpace(request.SystemPrompt))
+            {
+                messages.Add(new Dictionary<string, object>
+                {
+                    { "role", "system" },
+                    { "content", request.SystemPrompt.Trim() }
+                });
+            }
+
+            IList<ConversationMessage> history =
+                request.ConversationMessages;
+            if (history != null)
+            {
+                foreach (ConversationMessage historyMessage in history)
+                {
+                    if (historyMessage == null)
+                    {
+                        continue;
+                    }
+
+                    messages.Add(new Dictionary<string, object>
+                    {
+                        {
+                            "role",
+                            ConversationMessage.NormalizeRole(
+                                historyMessage.Role)
+                        },
+                        {
+                            "content",
+                            historyMessage.Content ?? string.Empty
+                        }
+                    });
+                }
+            }
 
             IList<InputItem> attachments = request.Attachments ??
                 new List<InputItem>();
@@ -481,39 +895,481 @@ namespace FilePromptWin7
                 content = parts.ToArray();
             }
 
-            List<object> messages = new List<object>();
-            IList<ConversationMessage> history =
-                request.ConversationMessages;
-            if (history != null)
-            {
-                foreach (ConversationMessage historyMessage in history)
-                {
-                    if (historyMessage == null)
-                    {
-                        continue;
-                    }
-
-                    messages.Add(new Dictionary<string, object>
-                    {
-                        {
-                            "role",
-                            ConversationMessage.NormalizeRole(historyMessage.Role)
-                        },
-                        {
-                            "content",
-                            historyMessage.Content ?? string.Empty
-                        }
-                    });
-                }
-            }
-
             messages.Add(new Dictionary<string, object>
             {
                 { "role", "user" },
                 { "content", content }
             });
+            return messages;
+        }
+
+        private string BuildToolPayload(
+            ModelRequest request,
+            IList<object> messages,
+            object[] tools)
+        {
+            Dictionary<string, object> root =
+                new Dictionary<string, object>();
+            root["model"] = request.ModelName;
+            root["stream"] = false;
             root["messages"] = messages.ToArray();
-            return json.Serialize(root);
+            root["tools"] = tools;
+            root["tool_choice"] = "auto";
+            string payload = json.Serialize(root);
+            if (payload.Length > MaximumRequestCharacters)
+            {
+                throw new ModelCallException(
+                    "包含工具和会话历史的请求超过 32 MB 安全限制，" +
+                    "请新建会话或减少附件。");
+            }
+
+            return payload;
+        }
+
+        private ToolSet BuildToolSet(IList<McpToolDefinition> tools)
+        {
+            if (tools.Count > MaximumTools)
+            {
+                throw new ModelCallException(
+                    "一次最多可向模型提供 128 个工具。");
+            }
+
+            List<object> payload = new List<object>();
+            Dictionary<string, McpToolDefinition> names =
+                new Dictionary<string, McpToolDefinition>(
+                    StringComparer.OrdinalIgnoreCase);
+            int combinedCharacters = 0;
+            foreach (McpToolDefinition tool in tools)
+            {
+                if (tool == null)
+                {
+                    throw new ModelCallException("工具定义不能为空。");
+                }
+
+                string name = tool.PublicName ?? string.Empty;
+                if (!IsValidToolName(name))
+                {
+                    throw new ModelCallException(
+                        "工具名称必须为 1 到 64 位字母、数字、下划线或连字符。");
+                }
+
+                if (names.ContainsKey(name))
+                {
+                    throw new ModelCallException(
+                        "工具名称重复：“" + name + "”。");
+                }
+
+                string description = (tool.Description ?? string.Empty).Trim();
+                if (description.Length > MaximumToolDescriptionCharacters)
+                {
+                    throw new ModelCallException(
+                        "工具“" + name + "”的描述超过 2,000 字符。");
+                }
+
+                object schema = tool.InputSchema ?? CreateEmptyToolSchema();
+                if (AsDictionary(schema) == null)
+                {
+                    throw new ModelCallException(
+                        "工具“" + name + "”的输入结构必须是 JSON 对象。");
+                }
+
+                string serializedSchema;
+                try
+                {
+                    serializedSchema = json.Serialize(schema);
+                }
+                catch (Exception exception)
+                {
+                    throw new ModelCallException(
+                        "工具“" + name + "”的输入结构无法序列化：" +
+                        exception.Message);
+                }
+
+                if (serializedSchema.Length > MaximumToolSchemaCharacters)
+                {
+                    throw new ModelCallException(
+                        "工具“" + name + "”的输入结构超过 200,000 字符。");
+                }
+
+                object safeSchema;
+                try
+                {
+                    safeSchema = Deserialize(serializedSchema);
+                }
+                catch (Exception exception)
+                {
+                    throw new ModelCallException(
+                        "工具“" + name + "”的输入结构无法读取：" +
+                        exception.Message);
+                }
+
+                combinedCharacters += name.Length + description.Length +
+                    serializedSchema.Length;
+                if (combinedCharacters >
+                    MaximumCombinedToolDefinitionCharacters)
+                {
+                    throw new ModelCallException(
+                        "全部工具定义合计超过 4 MB 安全限制。");
+                }
+
+                names.Add(name, tool);
+                payload.Add(new Dictionary<string, object>
+                {
+                    { "type", "function" },
+                    {
+                        "function",
+                        new Dictionary<string, object>
+                        {
+                            { "name", name },
+                            { "description", description },
+                            { "parameters", safeSchema }
+                        }
+                    }
+                });
+            }
+
+            return new ToolSet
+            {
+                Payload = payload.ToArray(),
+                Names = names
+            };
+        }
+
+        private static IDictionary<string, object> CreateEmptyToolSchema()
+        {
+            return new Dictionary<string, object>
+            {
+                { "type", "object" },
+                { "properties", new Dictionary<string, object>() }
+            };
+        }
+
+        private static bool IsValidToolName(string name)
+        {
+            if (string.IsNullOrEmpty(name) ||
+                name.Length > MaximumToolNameCharacters)
+            {
+                return false;
+            }
+
+            foreach (char character in name)
+            {
+                bool valid = (character >= 'a' && character <= 'z') ||
+                    (character >= 'A' && character <= 'Z') ||
+                    (character >= '0' && character <= '9') ||
+                    character == '_' || character == '-';
+                if (!valid)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private ToolRoundResponse ParseToolRoundResponse(
+            object parsed,
+            IDictionary<string, McpToolDefinition> availableTools,
+            ISet<string> seenToolCallIds)
+        {
+            IDictionary<string, object> root = AsDictionary(parsed);
+            IList choices = AsList(GetValue(root, "choices"));
+            if (root == null || choices == null || choices.Count == 0)
+            {
+                throw new ModelCallException(
+                    "模型工具响应中没有找到 choices。");
+            }
+
+            IDictionary<string, object> choice = AsDictionary(choices[0]);
+            IDictionary<string, object> message =
+                AsDictionary(GetValue(choice, "message"));
+            if (choice == null || message == null)
+            {
+                throw new ModelCallException(
+                    "模型工具响应中没有找到 assistant message。");
+            }
+
+            ToolRoundResponse response = new ToolRoundResponse();
+            response.Text = ExtractContent(GetValue(message, "content"));
+            if (string.IsNullOrEmpty(response.Text))
+            {
+                response.Text = GetString(message, "refusal");
+            }
+
+            object toolCallsValue = GetValue(message, "tool_calls");
+            if (toolCallsValue == null)
+            {
+                return response;
+            }
+
+            IList toolCalls = AsList(toolCallsValue);
+            if (toolCalls == null)
+            {
+                throw new ModelCallException(
+                    "模型返回的 tool_calls 必须是数组。");
+            }
+
+            if (toolCalls.Count == 0)
+            {
+                return response;
+            }
+
+            if (toolCalls.Count > MaximumToolCallsPerRound)
+            {
+                throw new ModelCallException(
+                    "模型单轮请求的工具数量超过 32 个。");
+            }
+
+            List<object> normalizedCalls = new List<object>();
+            foreach (object value in toolCalls)
+            {
+                IDictionary<string, object> call = AsDictionary(value);
+                if (call == null)
+                {
+                    throw new ModelCallException(
+                        "模型返回了无效的工具调用对象。");
+                }
+
+                string type = GetString(call, "type");
+                if (!string.IsNullOrEmpty(type) &&
+                    !string.Equals(
+                        type,
+                        "function",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ModelCallException(
+                        "当前仅支持 function 类型的模型工具调用。");
+                }
+
+                string id = GetString(call, "id");
+                if (string.IsNullOrWhiteSpace(id) ||
+                    id.Length > MaximumToolCallIdCharacters)
+                {
+                    throw new ModelCallException(
+                        "模型返回了缺失或过长的工具调用 ID。");
+                }
+
+                if (!seenToolCallIds.Add(id))
+                {
+                    throw new ModelCallException(
+                        "模型重复使用了工具调用 ID：“" + id + "”。");
+                }
+
+                IDictionary<string, object> function =
+                    AsDictionary(GetValue(call, "function"));
+                string name = GetString(function, "name");
+                if (!IsValidToolName(name) ||
+                    !availableTools.ContainsKey(name))
+                {
+                    throw new ModelCallException(
+                        "模型请求了未授权工具：“" +
+                        (string.IsNullOrWhiteSpace(name) ? "未知" : name) +
+                        "”。");
+                }
+
+                string argumentsJson = NormalizeToolArguments(function, name);
+                ModelToolCall parsedCall = new ModelToolCall
+                {
+                    Id = id,
+                    Name = name,
+                    ArgumentsJson = argumentsJson
+                };
+                response.ToolCalls.Add(parsedCall);
+                normalizedCalls.Add(new Dictionary<string, object>
+                {
+                    { "id", id },
+                    { "type", "function" },
+                    {
+                        "function",
+                        new Dictionary<string, object>
+                        {
+                            { "name", name },
+                            { "arguments", argumentsJson }
+                        }
+                    }
+                });
+            }
+
+            response.AssistantMessage = new Dictionary<string, object>
+            {
+                { "role", "assistant" },
+                {
+                    "content",
+                    string.IsNullOrEmpty(response.Text)
+                        ? null
+                        : response.Text
+                },
+                { "tool_calls", normalizedCalls.ToArray() }
+            };
+            return response;
+        }
+
+        private string NormalizeToolArguments(
+            IDictionary<string, object> function,
+            string toolName)
+        {
+            if (function == null)
+            {
+                throw new ModelCallException(
+                    "工具“" + toolName + "”缺少 function 对象。");
+            }
+
+            object argumentsValue = GetValue(function, "arguments");
+            string argumentsJson = argumentsValue as string;
+            if (argumentsJson == null)
+            {
+                if (argumentsValue == null)
+                {
+                    argumentsJson = "{}";
+                }
+                else
+                {
+                    try
+                    {
+                        argumentsJson = json.Serialize(argumentsValue);
+                    }
+                    catch (Exception exception)
+                    {
+                        throw new ModelCallException(
+                            "工具“" + toolName + "”的参数无法序列化：" +
+                            exception.Message);
+                    }
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(argumentsJson))
+            {
+                argumentsJson = "{}";
+            }
+
+            if (argumentsJson.Length > MaximumToolArgumentsCharacters)
+            {
+                throw new ModelCallException(
+                    "工具“" + toolName + "”的参数超过 1 MB 安全限制。");
+            }
+
+            object parsedArguments;
+            try
+            {
+                parsedArguments = Deserialize(argumentsJson);
+            }
+            catch (Exception exception)
+            {
+                throw new ModelCallException(
+                    "模型为工具“" + toolName + "”生成了无效 JSON 参数：" +
+                    exception.Message);
+            }
+
+            if (AsDictionary(parsedArguments) == null)
+            {
+                throw new ModelCallException(
+                    "工具“" + toolName + "”的参数必须是 JSON 对象。");
+            }
+
+            return argumentsJson;
+        }
+
+        private static async Task<McpToolResult> ExecuteToolAsync(
+            Func<ModelToolCall, CancellationToken, Task<McpToolResult>>
+                executeTool,
+            ModelToolCall toolCall,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                Task<McpToolResult> task = executeTool(
+                    toolCall,
+                    cancellationToken);
+                if (task == null)
+                {
+                    throw new InvalidOperationException(
+                        "工具执行回调没有返回任务。");
+                }
+
+                McpToolResult result = await task.ConfigureAwait(false);
+                if (result == null)
+                {
+                    throw new InvalidOperationException(
+                        "工具执行回调没有返回结果。");
+                }
+
+                return result;
+            }
+            catch (OperationCanceledException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+
+                throw new ModelCallException(
+                    "工具“" + toolCall.Name + "”执行超时或被取消。");
+            }
+            catch (ModelCallException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                throw new ModelCallException(
+                    "工具“" + toolCall.Name + "”执行失败：" +
+                    exception.Message);
+            }
+        }
+
+        private static string FormatToolResult(
+            McpToolResult result,
+            int maximumCharacters)
+        {
+            string content = result.Content ?? string.Empty;
+            if (result.IsError)
+            {
+                content = string.IsNullOrWhiteSpace(content)
+                    ? "[工具执行失败，未返回错误详情]"
+                    : "[工具执行失败]\r\n" + content;
+            }
+            else if (string.IsNullOrEmpty(content))
+            {
+                content = "[工具执行成功，未返回文本内容]";
+            }
+
+            return TruncateWithNotice(
+                content,
+                maximumCharacters,
+                "\r\n[工具结果过长，已截断]");
+        }
+
+        private static string TruncateWithNotice(
+            string value,
+            int maximumCharacters,
+            string notice)
+        {
+            value = value ?? string.Empty;
+            if (maximumCharacters <= 0)
+            {
+                return string.Empty;
+            }
+
+            if (value.Length <= maximumCharacters)
+            {
+                return value;
+            }
+
+            notice = notice ?? string.Empty;
+            if (notice.Length >= maximumCharacters)
+            {
+                return notice.Substring(0, maximumCharacters);
+            }
+
+            int cutoff = maximumCharacters - notice.Length;
+            if (cutoff > 0 && cutoff < value.Length &&
+                char.IsHighSurrogate(value[cutoff - 1]) &&
+                char.IsLowSurrogate(value[cutoff]))
+            {
+                cutoff--;
+            }
+
+            return value.Substring(0, cutoff) + notice;
         }
 
         private static void AddChatAttachments(
@@ -990,6 +1846,25 @@ namespace FilePromptWin7
         public void Dispose()
         {
             client.Dispose();
+        }
+
+        private sealed class ToolSet
+        {
+            public object[] Payload { get; set; }
+            public IDictionary<string, McpToolDefinition> Names { get; set; }
+        }
+
+        private sealed class ToolRoundResponse
+        {
+            public string Text { get; set; }
+            public IList<ModelToolCall> ToolCalls { get; private set; }
+            public object AssistantMessage { get; set; }
+
+            public ToolRoundResponse()
+            {
+                Text = string.Empty;
+                ToolCalls = new List<ModelToolCall>();
+            }
         }
 
         private sealed class EndpointAttempt

@@ -12,6 +12,8 @@ using System.Web.Script.Serialization;
 
 internal static class ApiSmokeTest
 {
+    private const string SystemPrompt =
+        "Follow the installed skill instructions for this request.";
     private const string HistoryUser = "Previous user question";
     private const string HistoryAssistant = "Previous assistant answer";
     private const string CurrentPrompt =
@@ -84,6 +86,10 @@ internal static class ApiSmokeTest
             requestType.GetProperty("ModelName").SetValue(
                 request,
                 "custom-model",
+                null);
+            requestType.GetProperty("SystemPrompt").SetValue(
+                request,
+                SystemPrompt,
                 null);
             requestType.GetProperty("Prompt").SetValue(
                 request,
@@ -296,6 +302,7 @@ internal static class ApiSmokeTest
         results.Stream = root != null &&
             root.ContainsKey("stream") &&
             Convert.ToBoolean(root["stream"]);
+        results.SystemPromptOrder = HasSystemPromptFirst(messages);
         results.HistoryOrder = HasHistoryInOrder(messages);
         results.CurrentContent = HasCurrentContent(messages);
         results.InlineImage = HasInlineImage(messages);
@@ -377,17 +384,27 @@ internal static class ApiSmokeTest
 
     private static bool HasHistoryInOrder(IList messages)
     {
-        if (messages == null || messages.Count != 3)
+        if (messages == null || messages.Count != 4)
         {
             return false;
         }
 
         IDictionary<string, object> first =
-            messages[0] as IDictionary<string, object>;
-        IDictionary<string, object> second =
             messages[1] as IDictionary<string, object>;
+        IDictionary<string, object> second =
+            messages[2] as IDictionary<string, object>;
         return HasMessage(first, "user", HistoryUser) &&
             HasMessage(second, "assistant", HistoryAssistant);
+    }
+
+    private static bool HasSystemPromptFirst(IList messages)
+    {
+        return messages != null &&
+            messages.Count == 4 &&
+            HasMessage(
+                messages[0] as IDictionary<string, object>,
+                "system",
+                SystemPrompt);
     }
 
     private static bool HasMessage(
@@ -409,7 +426,7 @@ internal static class ApiSmokeTest
         }
 
         IDictionary<string, object> current =
-            messages[2] as IDictionary<string, object>;
+            messages[3] as IDictionary<string, object>;
         IDictionary<string, object> textPart =
             parts[0] as IDictionary<string, object>;
         return current != null &&
@@ -444,13 +461,13 @@ internal static class ApiSmokeTest
 
     private static IList GetCurrentParts(IList messages)
     {
-        if (messages == null || messages.Count < 3)
+        if (messages == null || messages.Count < 4)
         {
             return null;
         }
 
         IDictionary<string, object> current =
-            messages[2] as IDictionary<string, object>;
+            messages[3] as IDictionary<string, object>;
         return current == null ? null : current["content"] as IList;
     }
 
@@ -643,6 +660,7 @@ internal static class ApiSmokeTest
         public bool BearerKey { get; set; }
         public bool Model { get; set; }
         public bool Stream { get; set; }
+        public bool SystemPromptOrder { get; set; }
         public bool HistoryOrder { get; set; }
         public bool CurrentContent { get; set; }
         public bool InlineImage { get; set; }
@@ -655,8 +673,8 @@ internal static class ApiSmokeTest
             get
             {
                 return ExactUrl && BearerKey && Model && Stream &&
-                    HistoryOrder && CurrentContent && InlineImage &&
-                    NoLocalPath && SingleProtocol && SseOutput;
+                    SystemPromptOrder && HistoryOrder && CurrentContent &&
+                    InlineImage && NoLocalPath && SingleProtocol && SseOutput;
             }
         }
 
@@ -666,6 +684,7 @@ internal static class ApiSmokeTest
             PrintResult("Bearer key", BearerKey);
             PrintResult("Model field", Model);
             PrintResult("Streaming request", Stream);
+            PrintResult("System prompt ordering", SystemPromptOrder);
             PrintResult("History order", HistoryOrder);
             PrintResult("Current authorized content", CurrentContent);
             PrintResult("Inline pasted image", InlineImage);

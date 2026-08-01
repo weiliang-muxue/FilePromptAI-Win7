@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Threading;
@@ -40,6 +41,13 @@ internal static class UiStateSmokeTest
             TestCtrlNBusyGuard(formType, form);
             TestDragBusyGuard(formType, form, dataRoot);
             TestSearchCharacterBudget(application, formType, form);
+            TestExtensionsDialog(application, formType, form);
+            TestMcpApprovalArguments(application, formType, form);
+            TestStdioStartupApproval(application, formType, form);
+            TestRejectedStdioStartupCancelsGeneration(
+                application,
+                formType,
+                form);
             Console.WriteLine("PASS | UI state hardening");
             return 0;
         }
@@ -165,6 +173,413 @@ internal static class UiStateSmokeTest
             "aaaaa");
         AssertTrue(!hiddenTail, "Search does not scan beyond its budget");
         AssertTrue(visibleHead, "Search still scans recent content");
+    }
+
+    private static void TestExtensionsDialog(
+        Assembly application,
+        Type formType,
+        object form)
+    {
+        Button extensionsButton = GetField(
+            formType,
+            form,
+            "extensionsButton") as Button;
+        AssertTrue(extensionsButton != null, "Extensions button exists");
+        AssertTrue(extensionsButton.Enabled, "Extensions button enabled when idle");
+
+        Type settingsType = application.GetType(
+            "FilePromptWin7.ExtensionSettings",
+            true);
+        Type dialogType = application.GetType(
+            "FilePromptWin7.ExtensionsDialog",
+            true);
+        object settings = Activator.CreateInstance(settingsType, true);
+        Form dialog = Activator.CreateInstance(
+            dialogType,
+            new object[] { settings }) as Form;
+        AssertTrue(dialog != null, "Extensions dialog can be created");
+        try
+        {
+            dialog.CreateControl();
+            dialog.PerformLayout();
+            AssertTrue(
+                dialog.MinimumSize.Width <= 800 &&
+                dialog.MinimumSize.Height <= 600,
+                "Extensions dialog minimum size");
+            TabControl tabs = FindControl<TabControl>(dialog, null);
+            AssertTrue(
+                tabs != null && tabs.TabPages.Count == 2,
+                "Skills and MCP tabs exist");
+            SplitContainer split = FindControl<SplitContainer>(dialog, null);
+            AssertTrue(
+                split != null && split.SplitterDistance >= 250,
+                "Extensions navigation width is stable");
+            AssertTrue(
+                FindControl<Button>(dialog, "从剪贴板安装") != null,
+                "Skill clipboard install exists");
+            AssertTrue(
+                FindControl<Button>(dialog, "粘贴 JSON") != null,
+                "MCP JSON import exists");
+            AssertTrue(
+                FindControl<Button>(dialog, "测试所选") != null,
+                "MCP connection test exists");
+            CheckBox confirmation = FindControl<CheckBox>(
+                dialog,
+                "每次调用前确认");
+            AssertTrue(
+                confirmation != null && confirmation.Checked,
+                "MCP confirmation defaults on in UI");
+            AssertTrue(
+                FindControl<Button>(dialog, "选择技能文件") == null,
+                "Skill install does not scan local files");
+        }
+        finally
+        {
+            dialog.Dispose();
+        }
+    }
+
+    private static T FindControl<T>(
+        Control root,
+        string text) where T : Control
+    {
+        foreach (Control child in root.Controls)
+        {
+            T match = child as T;
+            if (match != null &&
+                (text == null || string.Equals(
+                    match.Text,
+                    text,
+                    StringComparison.Ordinal)))
+            {
+                return match;
+            }
+
+            T nested = FindControl<T>(child, text);
+            if (nested != null)
+            {
+                return nested;
+            }
+        }
+
+        return null;
+    }
+
+    private static void TestMcpApprovalArguments(
+        Assembly application,
+        Type formType,
+        object form)
+    {
+        Type toolType = application.GetType(
+            "FilePromptWin7.McpToolDefinition",
+            true);
+        object tool = Activator.CreateInstance(toolType, true);
+        toolType.GetProperty("ServerName").SetValue(
+            tool,
+            "approval-test",
+            null);
+        toolType.GetProperty("ToolName").SetValue(
+            tool,
+            "inspect",
+            null);
+        string arguments = "{\"value\":\"" +
+            new string('x', 6000) + "\"}";
+        int displayedCharacters = -1;
+        bool noDefaultApproval = false;
+        System.Windows.Forms.Timer closeTimer =
+            new System.Windows.Forms.Timer();
+        closeTimer.Interval = 100;
+        closeTimer.Tick += delegate
+        {
+            foreach (Form open in Application.OpenForms)
+            {
+                if (!string.Equals(
+                    open.Text,
+                    "确认 MCP 工具调用",
+                    StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                TextBox argumentsBox = FindControl<TextBox>(open, null);
+                displayedCharacters = argumentsBox == null
+                    ? -1
+                    : argumentsBox.Text.Length;
+                noDefaultApproval = open.AcceptButton == null;
+                open.DialogResult = DialogResult.No;
+                open.Close();
+                closeTimer.Stop();
+                break;
+            }
+        };
+
+        try
+        {
+            closeTimer.Start();
+            bool approved = (bool)InvokePrivate(
+                formType,
+                form,
+                "ShowMcpApproval",
+                tool,
+                arguments);
+            AssertTrue(!approved, "MCP approval can be rejected");
+            AssertTrue(
+                displayedCharacters == arguments.Length,
+                "MCP approval shows complete arguments");
+            AssertTrue(
+                noDefaultApproval,
+                "MCP approval has no Enter-to-approve default");
+        }
+        finally
+        {
+            closeTimer.Stop();
+            closeTimer.Dispose();
+        }
+    }
+
+    private static void TestStdioStartupApproval(
+        Assembly application,
+        Type formType,
+        object form)
+    {
+        Type serverType = application.GetType(
+            "FilePromptWin7.McpServerDefinition",
+            true);
+        Type serverListType = typeof(List<>).MakeGenericType(serverType);
+        IList servers = (IList)Activator.CreateInstance(serverListType);
+        string longArgument = "--payload=" + new string('z', 6000);
+        const string multilineArgument =
+            "line-one\r\n服务名称：spoofed-service";
+        const string environmentName = "PRIVATE_TOKEN_NAME";
+        const string environmentValue = "secret-must-not-be-displayed";
+
+        object stdio = Activator.CreateInstance(serverType, true);
+        serverType.GetProperty("Name").SetValue(
+            stdio,
+            "local-review-server",
+            null);
+        serverType.GetProperty("Transport").SetValue(
+            stdio,
+            "stdio",
+            null);
+        serverType.GetProperty("Command").SetValue(
+            stdio,
+            "C:\\Tools\\review-mcp.exe",
+            null);
+        serverType.GetProperty("WorkingDirectory").SetValue(
+            stdio,
+            "C:\\Internal Work",
+            null);
+        serverType.GetProperty("Arguments").SetValue(
+            stdio,
+            new List<string>
+            {
+                "--stdio",
+                longArgument,
+                multilineArgument
+            },
+            null);
+        serverType.GetProperty("Environment").SetValue(
+            stdio,
+            new Dictionary<string, string>
+            {
+                { environmentName, environmentValue }
+            },
+            null);
+        serverType.GetProperty("Enabled").SetValue(stdio, true, null);
+        servers.Add(stdio);
+
+        object http = Activator.CreateInstance(serverType, true);
+        serverType.GetProperty("Name").SetValue(
+            http,
+            "http-must-not-be-shown",
+            null);
+        serverType.GetProperty("Transport").SetValue(http, "http", null);
+        serverType.GetProperty("Enabled").SetValue(http, true, null);
+        servers.Add(http);
+
+        string displayed = string.Empty;
+        bool enterDefaultsToReject = false;
+        bool rejectHasInitialFocus = false;
+        System.Windows.Forms.Timer closeTimer =
+            new System.Windows.Forms.Timer();
+        closeTimer.Interval = 100;
+        closeTimer.Tick += delegate
+        {
+            foreach (Form open in Application.OpenForms)
+            {
+                if (!string.Equals(
+                    open.Text,
+                    "确认启动本地 MCP 服务",
+                    StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                TextBox detailsBox = FindControl<TextBox>(open, null);
+                displayed = detailsBox == null
+                    ? string.Empty
+                    : detailsBox.Text;
+                Button reject = FindControl<Button>(open, "拒绝");
+                enterDefaultsToReject = reject != null &&
+                    ReferenceEquals(open.AcceptButton, reject);
+                rejectHasInitialFocus = reject != null && reject.Focused;
+                open.DialogResult = DialogResult.No;
+                open.Close();
+                closeTimer.Stop();
+                break;
+            }
+        };
+
+        try
+        {
+            closeTimer.Start();
+            bool approved = (bool)InvokePrivate(
+                formType,
+                form,
+                "ShowStdioMcpStartupApproval",
+                servers);
+            AssertTrue(!approved, "stdio startup can be rejected");
+            AssertTrue(
+                displayed.IndexOf(
+                    "local-review-server",
+                    StringComparison.Ordinal) >= 0 &&
+                displayed.IndexOf(
+                    "\"C:\\\\Tools\\\\review-mcp.exe\"",
+                    StringComparison.Ordinal) >= 0 &&
+                displayed.IndexOf(
+                    "\"C:\\\\Internal Work\"",
+                    StringComparison.Ordinal) >= 0,
+                "stdio startup shows identity and paths");
+            AssertTrue(
+                displayed.IndexOf(longArgument, StringComparison.Ordinal) >= 0,
+                "stdio startup shows complete arguments");
+            AssertTrue(
+                displayed.IndexOf(
+                    "line-one\\r\\n服务名称：spoofed-service",
+                    StringComparison.Ordinal) >= 0 &&
+                displayed.IndexOf(
+                    multilineArgument,
+                    StringComparison.Ordinal) < 0,
+                "stdio startup escapes argument line injection");
+            AssertTrue(
+                displayed.IndexOf(
+                    environmentName,
+                    StringComparison.Ordinal) >= 0 &&
+                displayed.IndexOf(
+                    environmentValue,
+                    StringComparison.Ordinal) < 0,
+                "stdio startup hides environment values");
+            AssertTrue(
+                displayed.IndexOf(
+                    "http-must-not-be-shown",
+                    StringComparison.Ordinal) < 0,
+                "HTTP MCP skips startup approval");
+            AssertTrue(
+                enterDefaultsToReject,
+                "stdio startup Enter defaults to reject");
+            AssertTrue(
+                rejectHasInitialFocus,
+                "stdio startup focuses reject");
+        }
+        finally
+        {
+            closeTimer.Stop();
+            closeTimer.Dispose();
+        }
+    }
+
+    private static void TestRejectedStdioStartupCancelsGeneration(
+        Assembly application,
+        Type formType,
+        object form)
+    {
+        Type settingsType = application.GetType(
+            "FilePromptWin7.ExtensionSettings",
+            true);
+        Type serverType = application.GetType(
+            "FilePromptWin7.McpServerDefinition",
+            true);
+        object settings = Activator.CreateInstance(settingsType, true);
+        object server = Activator.CreateInstance(serverType, true);
+        serverType.GetProperty("Name").SetValue(
+            server,
+            "must-not-start",
+            null);
+        serverType.GetProperty("Transport").SetValue(
+            server,
+            "stdio",
+            null);
+        serverType.GetProperty("Command").SetValue(
+            server,
+            "must-not-start.exe",
+            null);
+        serverType.GetProperty("Enabled").SetValue(server, true, null);
+        IList configuredServers = (IList)settingsType
+            .GetProperty("McpServers")
+            .GetValue(settings, null);
+        configuredServers.Add(server);
+        SetField(formType, form, "extensionSettings", settings);
+
+        ((TextBox)GetField(formType, form, "endpointTextBox")).Text =
+            "http://127.0.0.1:1/v1/chat/completions";
+        ((TextBox)GetField(formType, form, "apiKeyTextBox")).Text =
+            "ui-test-key";
+        ((TextBox)GetField(formType, form, "modelTextBox")).Text =
+            "ui-test-model";
+        ((RichTextBox)GetField(formType, form, "promptTextBox")).Text =
+            "拒绝本地 MCP 启动测试";
+
+        bool startupDialogSeen = false;
+        System.Windows.Forms.Timer rejectTimer =
+            new System.Windows.Forms.Timer();
+        rejectTimer.Interval = 100;
+        rejectTimer.Tick += delegate
+        {
+            foreach (Form open in Application.OpenForms)
+            {
+                if (!string.Equals(
+                    open.Text,
+                    "确认启动本地 MCP 服务",
+                    StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                startupDialogSeen = true;
+                open.DialogResult = DialogResult.No;
+                open.Close();
+                rejectTimer.Stop();
+                break;
+            }
+        };
+
+        try
+        {
+            rejectTimer.Start();
+            InvokePrivate(formType, form, "StartGeneration");
+            ToolStripStatusLabel status = GetField(
+                formType,
+                form,
+                "statusLabel") as ToolStripStatusLabel;
+            AssertTrue(
+                startupDialogSeen,
+                "generation shows stdio startup approval");
+            AssertTrue(
+                GetField(formType, form, "generationCancellation") == null,
+                "rejected stdio startup clears generation state");
+            AssertTrue(
+                status != null && string.Equals(
+                    status.Text,
+                    "已拒绝启动本地 MCP，本次生成已取消。",
+                    StringComparison.Ordinal),
+                "rejected stdio startup cancels generation");
+        }
+        finally
+        {
+            rejectTimer.Stop();
+            rejectTimer.Dispose();
+        }
     }
 
     private static object GetField(

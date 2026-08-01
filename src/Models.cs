@@ -58,6 +58,7 @@ namespace FilePromptWin7
         public string EndpointUrl { get; set; }
         public string ApiKey { get; set; }
         public string ModelName { get; set; }
+        public string SystemPrompt { get; set; }
         public string Prompt { get; set; }
         public IList<InputItem> Attachments { get; set; }
         public IList<ConversationMessage> ConversationMessages { get; set; }

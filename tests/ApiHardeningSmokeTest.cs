@@ -29,6 +29,7 @@ internal static class ApiHardeningSmokeTest
                 clientType,
                 500,
                 "Internal Server Error");
+            TestOversizedResponseIsRejected(clientType, requestType);
             TestMalformedStreamIsRejected(clientType, requestType);
             Console.WriteLine("PASS | API hardening");
             return 0;
@@ -231,6 +232,47 @@ internal static class ApiHardeningSmokeTest
         }
     }
 
+    private static void TestOversizedResponseIsRejected(
+        Type clientType,
+        Type requestType)
+    {
+        TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        Task server = Task.Factory.StartNew(
+            delegate { HandleOversizedResponse(listener); });
+        object client = Activator.CreateInstance(clientType, true);
+        try
+        {
+            object request = CreateRequest(
+                requestType,
+                "http://127.0.0.1:" + port + "/oversized-response");
+            Task task = InvokeGenerate(
+                clientType,
+                client,
+                request,
+                CancellationToken.None);
+            Exception failure = WaitForFailure(
+                task,
+                TimeSpan.FromSeconds(5));
+            AssertTrue(
+                failure != null &&
+                failure.GetType().FullName ==
+                    "FilePromptWin7.ModelCallException",
+                "Oversized response returned ModelCallException");
+            AssertContains(
+                failure == null ? string.Empty : failure.Message,
+                "16 MB",
+                "Oversized response guidance");
+            server.Wait(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
     private static object CreateRequest(Type requestType, string endpoint)
     {
         object request = Activator.CreateInstance(requestType, true);
@@ -332,6 +374,23 @@ internal static class ApiHardeningSmokeTest
             stream.Flush();
             headersSent.Set();
             releaseServer.Wait(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private static void HandleOversizedResponse(TcpListener listener)
+    {
+        using (TcpClient connection = listener.AcceptTcpClient())
+        using (NetworkStream stream = connection.GetStream())
+        {
+            ReadRequest(stream);
+            string response =
+                "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: application/json\r\n" +
+                "Content-Length: 16777217\r\n" +
+                "Connection: close\r\n\r\n";
+            byte[] bytes = Encoding.ASCII.GetBytes(response);
+            stream.Write(bytes, 0, bytes.Length);
+            stream.Flush();
         }
     }
 

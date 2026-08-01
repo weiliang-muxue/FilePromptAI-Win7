@@ -23,6 +23,8 @@ namespace FilePromptWin7
         private readonly List<InputItem> inputItems;
         private readonly ConversationStore conversationStore;
         private readonly Dictionary<string, SessionDraft> sessionDrafts;
+        private readonly ExtensionStore extensionStore;
+        private ExtensionSettings extensionSettings;
 
         private TableLayoutPanel rootLayout;
         private TableLayoutPanel workspaceLayout;
@@ -55,6 +57,7 @@ namespace FilePromptWin7
         private Button restoreSessionsButton;
         private Button toggleSettingsButton;
         private Button testConnectionButton;
+        private Button extensionsButton;
         private ToolStripStatusLabel statusLabel;
         private ToolStripProgressBar progressBar;
         private System.Windows.Forms.Timer sessionSearchTimer;
@@ -84,6 +87,8 @@ namespace FilePromptWin7
             modelClient = new ModelClient();
             inputItems = new List<InputItem>();
             conversationStore = new ConversationStore();
+            extensionStore = new ExtensionStore();
+            extensionSettings = extensionStore.Load();
             sessionDrafts = new Dictionary<string, SessionDraft>(
                 StringComparer.OrdinalIgnoreCase);
 
@@ -96,6 +101,10 @@ namespace FilePromptWin7
             if (!string.IsNullOrEmpty(conversationStore.LoadWarning))
             {
                 SetStatus(conversationStore.LoadWarning);
+            }
+            else if (!string.IsNullOrEmpty(extensionStore.LoadWarning))
+            {
+                SetStatus(extensionStore.LoadWarning);
             }
         }
 
@@ -361,6 +370,10 @@ namespace FilePromptWin7
             testConnectionButton.AccessibleName = "测试模型连接";
             testConnectionButton.Click += OnTestConnectionClick;
 
+            extensionsButton = CreateButton("技能 / MCP", 92);
+            extensionsButton.AccessibleName = "管理离线技能和 MCP 服务";
+            extensionsButton.Click += OnExtensionsClick;
+
             toggleSettingsButton = CreateButton("收起配置", 84);
             toggleSettingsButton.AccessibleName = "展开或收起连接配置";
             toggleSettingsButton.Click += delegate
@@ -368,6 +381,7 @@ namespace FilePromptWin7
                 SetSettingsExpanded(!settingsExpanded);
             };
 
+            actions.Controls.Add(extensionsButton);
             actions.Controls.Add(testConnectionButton);
             actions.Controls.Add(toggleSettingsButton);
             panel.Controls.Add(titlePanel, 0, 0);
@@ -559,7 +573,7 @@ namespace FilePromptWin7
             promptTextBox = new RichTextBox();
             promptTextBox.Dock = DockStyle.Fill;
             promptTextBox.BorderStyle = BorderStyle.FixedSingle;
-            promptTextBox.AcceptsTab = true;
+            promptTextBox.AcceptsTab = false;
             promptTextBox.DetectUrls = false;
             promptTextBox.BackColor = Color.White;
             promptTextBox.AccessibleName = "文字描述或指令";
@@ -1332,6 +1346,63 @@ namespace FilePromptWin7
             }
         }
 
+        private void OnExtensionsClick(object sender, EventArgs args)
+        {
+            if (IsBusy)
+            {
+                return;
+            }
+
+            ExtensionSettings candidate = (extensionSettings ??
+                new ExtensionSettings()).Clone();
+            while (true)
+            {
+                using (ExtensionsDialog dialog = new ExtensionsDialog(
+                    candidate))
+                {
+                    if (dialog.ShowDialog(this) != DialogResult.OK ||
+                        dialog.Settings == null)
+                    {
+                        return;
+                    }
+
+                    candidate = dialog.Settings.Clone();
+                    try
+                    {
+                        extensionStore.Save(candidate);
+                        extensionSettings = candidate.Clone();
+                        SetStatus(
+                            "新建或导入的 MCP 默认停用，需手动勾选启用 · " +
+                            "扩展已保存 · " + BuildExtensionSummary());
+                        return;
+                    }
+                    catch (Exception exception)
+                    {
+                        MessageBox.Show(
+                            this,
+                            "扩展配置保存失败：" + exception.Message +
+                            "\r\n\r\n编辑内容已保留，可以重试或取消。",
+                            "技能 / MCP",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                    }
+                }
+            }
+        }
+
+        private string BuildExtensionSummary()
+        {
+            ExtensionSettings current = extensionSettings ??
+                new ExtensionSettings();
+            int skills = (current.Skills ??
+                new List<SkillDefinition>()).Count(skill =>
+                    skill != null && skill.Enabled);
+            int servers = (current.McpServers ??
+                new List<McpServerDefinition>()).Count(server =>
+                server != null && server.Enabled);
+            return "技能 " + skills + " · MCP " + servers;
+        }
+
         private async void OnTestConnectionClick(object sender, EventArgs args)
         {
             if (connectionTestCancellation != null ||
@@ -1449,6 +1520,12 @@ namespace FilePromptWin7
             endpointTextBox.Enabled = !testing;
             apiKeyTextBox.Enabled = !testing;
             modelTextBox.Enabled = !testing;
+            if (extensionsButton != null)
+            {
+                extensionsButton.Enabled = !testing &&
+                    generationCancellation == null &&
+                    !isAddingFiles;
+            }
             generateButton.Enabled = !testing &&
                 generationCancellation == null &&
                 !isAddingFiles;
@@ -1730,6 +1807,7 @@ namespace FilePromptWin7
             SetInputButtonsEnabled(false);
             SetSessionNavigationEnabled(false);
             testConnectionButton.Enabled = false;
+            extensionsButton.Enabled = false;
             progressBar.Visible = true;
             List<string> errors = new List<string>();
 
@@ -1762,6 +1840,8 @@ namespace FilePromptWin7
                     generationCancellation == null &&
                     connectionTestCancellation == null &&
                     HasCompleteConnectionSettings();
+                extensionsButton.Enabled = generationCancellation == null &&
+                    connectionTestCancellation == null;
                 progressBar.Visible = generationCancellation != null ||
                     connectionTestCancellation != null;
                 UpdateInputStatus();
@@ -1978,6 +2058,9 @@ namespace FilePromptWin7
             request.ApiKey = key;
             request.ModelName = model;
             request.Prompt = prompt;
+            request.SystemPrompt = extensionSettings == null
+                ? string.Empty
+                : extensionSettings.BuildSystemPrompt();
             request.Attachments = attachments;
             request.ConversationMessages = session.Messages == null
                 ? new List<ConversationMessage>()
@@ -2007,14 +2090,69 @@ namespace FilePromptWin7
             generationCancellation = new CancellationTokenSource();
             SetGeneratingState(true);
             connectionStatusLabel.Text = "正在请求 · " + model;
+            McpRuntime mcpRuntime = null;
+            bool stdioStartupRejected = false;
 
             try
             {
-                string result = await modelClient.GenerateAsync(
-                    request,
-                    AppendOutput,
-                    SetStatus,
-                    generationCancellation.Token);
+                IList<McpServerDefinition> enabledServers =
+                    (extensionSettings == null ||
+                        extensionSettings.McpServers == null)
+                    ? new List<McpServerDefinition>()
+                    : extensionSettings.McpServers
+                        .Where(server => server != null && server.Enabled)
+                        .Select(server => server.Clone())
+                        .ToList();
+                string result;
+                if (enabledServers.Count > 0)
+                {
+                    generationCancellation.Token.ThrowIfCancellationRequested();
+                    if (!ShowStdioMcpStartupApproval(enabledServers))
+                    {
+                        stdioStartupRejected = true;
+                        throw new OperationCanceledException();
+                    }
+
+                    mcpRuntime = await McpRuntime.ConnectAsync(
+                        enabledServers,
+                        SetStatus,
+                        generationCancellation.Token);
+                    if (mcpRuntime.Tools.Count > 0)
+                    {
+                        McpRuntime activeRuntime = mcpRuntime;
+                        result = await modelClient.GenerateWithToolsAsync(
+                            request,
+                            activeRuntime.Tools,
+                            delegate(
+                                ModelToolCall toolCall,
+                                CancellationToken cancellationToken)
+                            {
+                                return ExecuteMcpToolAsync(
+                                    activeRuntime,
+                                    toolCall,
+                                    cancellationToken);
+                            },
+                            AppendOutput,
+                            SetStatus,
+                            generationCancellation.Token);
+                    }
+                    else
+                    {
+                        result = await modelClient.GenerateAsync(
+                            request,
+                            AppendOutput,
+                            SetStatus,
+                            generationCancellation.Token);
+                    }
+                }
+                else
+                {
+                    result = await modelClient.GenerateAsync(
+                        request,
+                        AppendOutput,
+                        SetStatus,
+                        generationCancellation.Token);
+                }
 
                 if (streamedResponse.Length == 0 &&
                     !string.IsNullOrEmpty(result))
@@ -2063,7 +2201,9 @@ namespace FilePromptWin7
             catch (OperationCanceledException)
             {
                 RenderConversation(session);
-                SetStatus("已停止，本次内容未写入会话。");
+                SetStatus(stdioStartupRejected
+                    ? "已拒绝启动本地 MCP，本次生成已取消。"
+                    : "已停止，本次内容未写入会话。");
             }
             catch (ModelCallException exception)
             {
@@ -2072,6 +2212,17 @@ namespace FilePromptWin7
                 MessageBox.Show(
                     exception.Message,
                     "模型调用失败",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            catch (McpException exception)
+            {
+                RenderConversation(session);
+                SetStatus("MCP 调用失败");
+                MessageBox.Show(
+                    this,
+                    exception.Message,
+                    "MCP 调用失败",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -2087,6 +2238,11 @@ namespace FilePromptWin7
             }
             finally
             {
+                if (mcpRuntime != null)
+                {
+                    mcpRuntime.Dispose();
+                }
+
                 if (generationCancellation != null)
                 {
                     generationCancellation.Dispose();
@@ -2124,6 +2280,415 @@ namespace FilePromptWin7
             return string.IsNullOrWhiteSpace(title)
                 ? string.Empty
                 : title;
+        }
+
+        private bool ShowStdioMcpStartupApproval(
+            IList<McpServerDefinition> servers)
+        {
+            IList<McpServerDefinition> stdioServers = (servers ??
+                new List<McpServerDefinition>())
+                .Where(server => server != null && server.Enabled &&
+                    string.Equals(
+                        server.Transport,
+                        "stdio",
+                        StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (stdioServers.Count == 0)
+            {
+                return true;
+            }
+
+            string details = BuildStdioMcpStartupDetails(stdioServers);
+            using (Form dialog = new Form())
+            {
+                Rectangle workingArea = Screen.FromControl(this).WorkingArea;
+                int width = Math.Min(
+                    780,
+                    Math.Max(360, workingArea.Width - 48));
+                int height = Math.Min(
+                    600,
+                    Math.Max(300, workingArea.Height - 48));
+                dialog.Text = "确认启动本地 MCP 服务";
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.MinimumSize = new Size(
+                    Math.Min(520, width),
+                    Math.Min(360, height));
+                dialog.Size = new Size(width, height);
+                dialog.Font = Font;
+                dialog.BackColor = Color.FromArgb(31, 35, 42);
+                dialog.ForeColor = Color.FromArgb(226, 232, 240);
+                dialog.AutoScaleMode = AutoScaleMode.None;
+                dialog.ShowInTaskbar = false;
+                dialog.MinimizeBox = false;
+                dialog.MaximizeBox = false;
+
+                TableLayoutPanel layout = new TableLayoutPanel();
+                layout.Dock = DockStyle.Fill;
+                layout.Padding = new Padding(12);
+                layout.ColumnCount = 1;
+                layout.RowCount = 4;
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 68F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44F));
+
+                Label warning = new Label();
+                warning.Dock = DockStyle.Fill;
+                warning.TextAlign = ContentAlignment.MiddleLeft;
+                warning.ForeColor = Color.FromArgb(226, 232, 240);
+                warning.Text =
+                    "本地 stdio MCP 会在工具调用确认之前启动，并以当前用户权限运行。" +
+                    "请完整核对下面的命令；仅在信任配置时允许。";
+                warning.AccessibleName = "本地 MCP 启动安全提示";
+
+                Label detailsLabel = new Label();
+                detailsLabel.Dock = DockStyle.Fill;
+                detailsLabel.TextAlign = ContentAlignment.MiddleLeft;
+                detailsLabel.ForeColor = Color.FromArgb(174, 187, 204);
+                detailsLabel.Text =
+                    "即将启动 " + stdioServers.Count +
+                    " 个服务（完整启动配置）";
+
+                TextBox detailsBox = new TextBox();
+                detailsBox.Dock = DockStyle.Fill;
+                detailsBox.Multiline = true;
+                detailsBox.ReadOnly = true;
+                detailsBox.AcceptsReturn = true;
+                detailsBox.WordWrap = false;
+                detailsBox.ScrollBars = ScrollBars.Both;
+                detailsBox.MaxLength = int.MaxValue;
+                detailsBox.BackColor = Color.White;
+                detailsBox.ForeColor = Color.FromArgb(30, 35, 42);
+                detailsBox.Text = details;
+                detailsBox.AccessibleName = "本地 MCP 完整启动配置";
+
+                FlowLayoutPanel actions = new FlowLayoutPanel();
+                actions.Dock = DockStyle.Fill;
+                actions.FlowDirection = FlowDirection.RightToLeft;
+                actions.WrapContents = false;
+                Button reject = CreateButton("拒绝", 88);
+                reject.DialogResult = DialogResult.No;
+                reject.BackColor = Color.FromArgb(45, 121, 218);
+                reject.FlatAppearance.BorderSize = 0;
+                reject.AccessibleName = "拒绝启动本地 MCP 服务";
+                Button approve = CreateButton("允许本次启动", 120);
+                approve.DialogResult = DialogResult.Yes;
+                approve.AccessibleName = "仅允许本次启动本地 MCP 服务";
+                actions.Controls.Add(reject);
+                actions.Controls.Add(approve);
+
+                layout.Controls.Add(warning, 0, 0);
+                layout.Controls.Add(detailsLabel, 0, 1);
+                layout.Controls.Add(detailsBox, 0, 2);
+                layout.Controls.Add(actions, 0, 3);
+                dialog.Controls.Add(layout);
+                dialog.AcceptButton = reject;
+                dialog.CancelButton = reject;
+                dialog.Shown += delegate { reject.Select(); };
+
+                return dialog.ShowDialog(this) == DialogResult.Yes;
+            }
+        }
+
+        private static string BuildStdioMcpStartupDetails(
+            IList<McpServerDefinition> servers)
+        {
+            StringBuilder details = new StringBuilder();
+            foreach (McpServerDefinition server in servers ??
+                new List<McpServerDefinition>())
+            {
+                if (server == null)
+                {
+                    continue;
+                }
+
+                if (details.Length > 0)
+                {
+                    details.AppendLine();
+                    details.AppendLine(
+                        "------------------------------------------------------------");
+                    details.AppendLine();
+                }
+
+                details.Append("服务名称：");
+                details.AppendLine(FormatMcpStartupValue(server.Name));
+                details.Append("启动命令：");
+                details.AppendLine(FormatMcpStartupValue(server.Command));
+                details.Append("工作目录：");
+                details.AppendLine(string.IsNullOrWhiteSpace(
+                    server.WorkingDirectory)
+                    ? "（未设置，继承当前工作目录）"
+                    : FormatMcpStartupValue(server.WorkingDirectory));
+                details.AppendLine(
+                    "完整参数（控制字符以转义形式显示）：");
+                IList<string> arguments = server.Arguments ??
+                    new List<string>();
+                if (arguments.Count == 0)
+                {
+                    details.AppendLine("  （无）");
+                }
+                else
+                {
+                    for (int index = 0; index < arguments.Count; index++)
+                    {
+                        details.Append("  [");
+                        details.Append(index + 1);
+                        details.Append("] ");
+                        details.AppendLine(
+                            FormatMcpStartupValue(arguments[index]));
+                    }
+                }
+
+                details.AppendLine("环境变量名称（值不显示）：");
+                IList<string> environmentNames = (server.Environment ??
+                    new Dictionary<string, string>())
+                    .Keys
+                    .OrderBy(
+                        name => name,
+                        StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                if (environmentNames.Count == 0)
+                {
+                    details.AppendLine("  （无）");
+                }
+                else
+                {
+                    foreach (string name in environmentNames)
+                    {
+                        details.Append("  ");
+                        details.AppendLine(FormatMcpStartupValue(name));
+                    }
+                }
+            }
+
+            return details.ToString();
+        }
+
+        private static string FormatMcpStartupValue(string value)
+        {
+            StringBuilder formatted = new StringBuilder();
+            formatted.Append('"');
+            foreach (char current in value ?? string.Empty)
+            {
+                switch (current)
+                {
+                    case '\\':
+                        formatted.Append("\\\\");
+                        break;
+                    case '"':
+                        formatted.Append("\\\"");
+                        break;
+                    case '\r':
+                        formatted.Append("\\r");
+                        break;
+                    case '\n':
+                        formatted.Append("\\n");
+                        break;
+                    case '\t':
+                        formatted.Append("\\t");
+                        break;
+                    default:
+                        if (char.IsControl(current) ||
+                            current == '\u2028' ||
+                            current == '\u2029')
+                        {
+                            formatted.Append("\\u");
+                            formatted.Append(((int)current).ToString("x4"));
+                        }
+                        else
+                        {
+                            formatted.Append(current);
+                        }
+
+                        break;
+                }
+            }
+
+            formatted.Append('"');
+            return formatted.ToString();
+        }
+
+        private async Task<McpToolResult> ExecuteMcpToolAsync(
+            McpRuntime runtime,
+            ModelToolCall call,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            McpToolDefinition tool = runtime.GetTool(call.Name);
+            if (tool == null)
+            {
+                throw new McpException(
+                    "模型请求了未知 MCP 工具：“" + call.Name + "”。");
+            }
+
+            if (tool.RequireConfirmation)
+            {
+                bool approved = await ConfirmMcpToolCallAsync(
+                    tool,
+                    call.ArgumentsJson,
+                    cancellationToken);
+                if (!approved)
+                {
+                    return new McpToolResult
+                    {
+                        IsError = true,
+                        Content = "用户拒绝了本次工具调用。"
+                    };
+                }
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            return await runtime.CallToolAsync(
+                call.Name,
+                call.ArgumentsJson,
+                cancellationToken);
+        }
+
+        private Task<bool> ConfirmMcpToolCallAsync(
+            McpToolDefinition tool,
+            string argumentsJson,
+            CancellationToken cancellationToken)
+        {
+            if (!InvokeRequired)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Task.FromResult(ShowMcpApproval(tool, argumentsJson));
+            }
+
+            TaskCompletionSource<bool> completion =
+                new TaskCompletionSource<bool>();
+            CancellationTokenRegistration registration =
+                cancellationToken.Register(delegate
+                {
+                    completion.TrySetCanceled();
+                });
+            try
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    if (cancellationToken.IsCancellationRequested ||
+                        IsDisposed)
+                    {
+                        completion.TrySetCanceled();
+                        return;
+                    }
+
+                    try
+                    {
+                        completion.TrySetResult(
+                            ShowMcpApproval(tool, argumentsJson));
+                    }
+                    catch (Exception exception)
+                    {
+                        completion.TrySetException(exception);
+                    }
+                });
+            }
+            catch (Exception exception)
+            {
+                completion.TrySetException(exception);
+            }
+
+            return DisposeRegistrationAfterAsync(
+                completion.Task,
+                registration);
+        }
+
+        private static async Task<bool> DisposeRegistrationAfterAsync(
+            Task<bool> task,
+            CancellationTokenRegistration registration)
+        {
+            try
+            {
+                return await task.ConfigureAwait(false);
+            }
+            finally
+            {
+                registration.Dispose();
+            }
+        }
+
+        private bool ShowMcpApproval(
+            McpToolDefinition tool,
+            string argumentsJson)
+        {
+            string arguments = string.IsNullOrWhiteSpace(argumentsJson)
+                ? "{}"
+                : argumentsJson.Trim();
+
+            using (Form dialog = new Form())
+            {
+                dialog.Text = "确认 MCP 工具调用";
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.MinimumSize = new Size(620, 400);
+                dialog.Size = new Size(760, 540);
+                dialog.Font = Font;
+                dialog.BackColor = Color.FromArgb(31, 35, 42);
+                dialog.ForeColor = Color.FromArgb(226, 232, 240);
+                dialog.AutoScaleMode = AutoScaleMode.None;
+                dialog.ShowInTaskbar = false;
+                dialog.MinimizeBox = false;
+
+                TableLayoutPanel layout = new TableLayoutPanel();
+                layout.Dock = DockStyle.Fill;
+                layout.Padding = new Padding(12);
+                layout.ColumnCount = 1;
+                layout.RowCount = 4;
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44F));
+
+                Label identity = new Label();
+                identity.Dock = DockStyle.Fill;
+                identity.TextAlign = ContentAlignment.MiddleLeft;
+                identity.AutoEllipsis = true;
+                identity.ForeColor = Color.FromArgb(226, 232, 240);
+                identity.Text =
+                    "服务：" + (tool.ServerName ?? string.Empty) +
+                    "\r\n工具：" + (tool.ToolName ?? tool.PublicName);
+
+                Label argumentsLabel = new Label();
+                argumentsLabel.Dock = DockStyle.Fill;
+                argumentsLabel.TextAlign = ContentAlignment.MiddleLeft;
+                argumentsLabel.ForeColor = Color.FromArgb(174, 187, 204);
+                argumentsLabel.Text = "调用参数（完整内容）";
+
+                TextBox argumentsBox = new TextBox();
+                argumentsBox.Dock = DockStyle.Fill;
+                argumentsBox.Multiline = true;
+                argumentsBox.ReadOnly = true;
+                argumentsBox.AcceptsReturn = true;
+                argumentsBox.WordWrap = false;
+                argumentsBox.ScrollBars = ScrollBars.Both;
+                argumentsBox.BackColor = Color.White;
+                argumentsBox.ForeColor = Color.FromArgb(30, 35, 42);
+                argumentsBox.Text = arguments;
+                argumentsBox.AccessibleName = "MCP 工具完整调用参数";
+
+                FlowLayoutPanel actions = new FlowLayoutPanel();
+                actions.Dock = DockStyle.Fill;
+                actions.FlowDirection = FlowDirection.RightToLeft;
+                actions.WrapContents = false;
+                Button reject = CreateButton("拒绝", 88);
+                reject.DialogResult = DialogResult.No;
+                Button approve = CreateButton("仅允许本次", 104);
+                approve.DialogResult = DialogResult.Yes;
+                approve.BackColor = Color.FromArgb(45, 121, 218);
+                approve.FlatAppearance.BorderSize = 0;
+                actions.Controls.Add(reject);
+                actions.Controls.Add(approve);
+
+                layout.Controls.Add(identity, 0, 0);
+                layout.Controls.Add(argumentsLabel, 0, 1);
+                layout.Controls.Add(argumentsBox, 0, 2);
+                layout.Controls.Add(actions, 0, 3);
+                dialog.Controls.Add(layout);
+                dialog.CancelButton = reject;
+                dialog.Shown += delegate { reject.Focus(); };
+
+                return dialog.ShowDialog(this) == DialogResult.Yes;
+            }
         }
 
         private string GetCurrentInstruction()
@@ -2260,6 +2825,12 @@ namespace FilePromptWin7
             endpointTextBox.Enabled = !generating;
             apiKeyTextBox.Enabled = !generating;
             modelTextBox.Enabled = !generating;
+            if (extensionsButton != null)
+            {
+                extensionsButton.Enabled = !generating &&
+                    connectionTestCancellation == null &&
+                    !isAddingFiles;
+            }
             progressBar.Visible = generating || isAddingFiles;
             UpdateOutputButtons(generating);
         }
