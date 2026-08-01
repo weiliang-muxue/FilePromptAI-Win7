@@ -40,14 +40,7 @@ namespace FilePromptWin7
             }
 
             byte[] content = Create(document);
-            using (FileStream stream = new FileStream(
-                path,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None))
-            {
-                stream.Write(content, 0, content.Length);
-            }
+            AtomicFile.WriteAllBytes(path, content);
         }
 
         public static byte[] Create(string markdown)
@@ -88,7 +81,7 @@ namespace FilePromptWin7
                 AddTextEntry(
                     archive,
                     "word/numbering.xml",
-                    BuildNumbering());
+                    BuildNumbering(document));
                 AddTextEntry(
                     archive,
                     "word/_rels/document.xml.rels",
@@ -128,6 +121,7 @@ namespace FilePromptWin7
             xml.Append("\"><w:body>");
 
             bool hasBody = false;
+            int listNumberId = 0;
             if (document.Blocks != null)
             {
                 foreach (MarkdownBlock block in document.Blocks)
@@ -138,7 +132,12 @@ namespace FilePromptWin7
                     }
 
                     hasBody = true;
-                    AppendBlock(xml, block);
+                    if (block.Kind == MarkdownBlockKind.List)
+                    {
+                        listNumberId++;
+                    }
+
+                    AppendBlock(xml, block, listNumberId);
                 }
             }
 
@@ -160,7 +159,8 @@ namespace FilePromptWin7
 
         private static void AppendBlock(
             StringBuilder xml,
-            MarkdownBlock block)
+            MarkdownBlock block,
+            int listNumberId)
         {
             switch (block.Kind)
             {
@@ -177,7 +177,7 @@ namespace FilePromptWin7
                         "Code");
                     break;
                 case MarkdownBlockKind.List:
-                    AppendList(xml, block);
+                    AppendList(xml, block, listNumberId);
                     break;
                 case MarkdownBlockKind.Quote:
                     AppendParagraph(xml, block.Text, "Quote");
@@ -243,7 +243,8 @@ namespace FilePromptWin7
 
         private static void AppendList(
             StringBuilder xml,
-            MarkdownBlock block)
+            MarkdownBlock block,
+            int numberId)
         {
             if (block.Items == null || block.Items.Count == 0)
             {
@@ -256,7 +257,7 @@ namespace FilePromptWin7
                 xml.Append("<w:p><w:pPr><w:numPr>");
                 xml.Append("<w:ilvl w:val=\"0\"/>");
                 xml.Append("<w:numId w:val=\"");
-                xml.Append(block.Ordered ? "2" : "1");
+                xml.Append(numberId);
                 xml.Append("\"/></w:numPr></w:pPr>");
                 AppendTextRuns(xml, item ?? string.Empty);
                 xml.Append("</w:p>");
@@ -482,11 +483,15 @@ namespace FilePromptWin7
             return value.ToString();
         }
 
-        private static string BuildNumbering()
+        private static string BuildNumbering(MarkdownDocument document)
         {
-            return
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
-                "<w:numbering xmlns:w=\"" + WordNamespace + "\">" +
+            StringBuilder xml = new StringBuilder();
+            xml.Append(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>");
+            xml.Append("<w:numbering xmlns:w=\"");
+            xml.Append(WordNamespace);
+            xml.Append("\">");
+            xml.Append(
                 "<w:abstractNum w:abstractNumId=\"0\">" +
                 "<w:multiLevelType w:val=\"singleLevel\"/>" +
                 "<w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/>" +
@@ -499,10 +504,29 @@ namespace FilePromptWin7
                 "<w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/>" +
                 "<w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.\"/>" +
                 "<w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"720\" " +
-                "w:hanging=\"360\"/></w:pPr></w:lvl></w:abstractNum>" +
-                "<w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>" +
-                "<w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/></w:num>" +
-                "</w:numbering>";
+                "w:hanging=\"360\"/></w:pPr></w:lvl></w:abstractNum>");
+
+            int numberId = 0;
+            if (document != null && document.Blocks != null)
+            {
+                foreach (MarkdownBlock block in document.Blocks)
+                {
+                    if (block == null || block.Kind != MarkdownBlockKind.List)
+                    {
+                        continue;
+                    }
+
+                    numberId++;
+                    xml.Append("<w:num w:numId=\"");
+                    xml.Append(numberId);
+                    xml.Append("\"><w:abstractNumId w:val=\"");
+                    xml.Append(block.Ordered ? "1" : "0");
+                    xml.Append("\"/></w:num>");
+                }
+            }
+
+            xml.Append("</w:numbering>");
+            return xml.ToString();
         }
 
         private static string EscapeXml(string value)

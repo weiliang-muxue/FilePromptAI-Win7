@@ -57,13 +57,10 @@ namespace FilePromptWin7
             }
 
             // UTF-8 with BOM keeps Chinese text readable in older Excel versions.
-            using (StreamWriter writer = new StreamWriter(
+            AtomicFile.WriteAllText(
                 path,
-                false,
-                new UTF8Encoding(true)))
-            {
-                writer.Write(ToCsv(table));
-            }
+                ToCsv(table),
+                new UTF8Encoding(true));
         }
 
         public static string ToCsv(string markdown)
@@ -124,7 +121,8 @@ namespace FilePromptWin7
 
         private static string EscapeCell(string value)
         {
-            string text = SanitizeText(value);
+            string text = NeutralizeSpreadsheetFormula(
+                SanitizeText(value));
             bool quote = text.IndexOf(',') >= 0 ||
                 text.IndexOf('"') >= 0 ||
                 text.IndexOf('\r') >= 0 ||
@@ -135,6 +133,43 @@ namespace FilePromptWin7
             }
 
             return quote ? "\"" + text + "\"" : text;
+        }
+
+        private static string NeutralizeSpreadsheetFormula(string value)
+        {
+            string text = value ?? string.Empty;
+            int index = 0;
+            while (index < text.Length && text[index] == ' ')
+            {
+                index++;
+            }
+
+            if (index >= text.Length)
+            {
+                return text;
+            }
+
+            char marker = text[index];
+            bool dangerous = marker == '=' || marker == '+' ||
+                marker == '@' || marker == '\t' || marker == '\r' ||
+                marker == '\n';
+            if (marker == '-' && !IsPlainNumber(text.Substring(index)))
+            {
+                dangerous = true;
+            }
+
+            return dangerous ? "'" + text : text;
+        }
+
+        private static bool IsPlainNumber(string value)
+        {
+            decimal parsed;
+            return decimal.TryParse(
+                value,
+                System.Globalization.NumberStyles.Float |
+                    System.Globalization.NumberStyles.AllowThousands,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out parsed);
         }
 
         private static string SanitizeText(string value)

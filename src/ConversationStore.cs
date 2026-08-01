@@ -14,10 +14,12 @@ namespace FilePromptWin7
 {
     internal sealed class ConversationStore
     {
+        private const string StoreRootName = "ConversationStore";
+        private const string StoreVersion = "1";
         private const string BackupRootName =
             "FilePromptConversationBackup";
         private const string BackupVersion = "1";
-        private const long MaximumBackupCharacters = 128L * 1024L * 1024L;
+        private const long MaximumConversationBytes = 128L * 1024L * 1024L;
         private const int MaximumBackupSessions = 10000;
         private const int MaximumMessagesPerSession = 100000;
         private const int MoveFileReplaceExisting = 0x1;
@@ -116,20 +118,15 @@ namespace FilePromptWin7
 
                 try
                 {
-                    XDocument document = XDocument.Load(storagePath);
+                    XDocument document = ReadActiveDocument(storagePath);
                     XElement root = document.Root;
-                    if (root == null)
-                    {
-                        return;
-                    }
-
                     currentSessionId = GetAttribute(root, "currentSessionId");
                     HashSet<string> ids = new HashSet<string>(
                         StringComparer.OrdinalIgnoreCase);
                     foreach (XElement sessionElement in root.Elements("Session"))
                     {
                         ConversationSession session =
-                            ReadSession(sessionElement);
+                            ReadBackupSession(sessionElement);
                         session.EnsureIdentity();
                         if (ids.Contains(session.Id))
                         {
@@ -157,6 +154,67 @@ namespace FilePromptWin7
                     currentSessionId = string.Empty;
                 }
             }
+        }
+
+        private static XDocument ReadActiveDocument(string path)
+        {
+            FileInfo file = new FileInfo(path);
+            if (!file.Exists)
+            {
+                throw new FileNotFoundException(
+                    "The conversation store was not found.",
+                    path);
+            }
+
+            if (file.Length == 0 || file.Length > MaximumConversationBytes)
+            {
+                throw new InvalidDataException(
+                    "The conversation store has an invalid size.");
+            }
+
+            XmlReaderSettings settings = new XmlReaderSettings();
+            settings.DtdProcessing = DtdProcessing.Prohibit;
+            settings.XmlResolver = null;
+            settings.MaxCharactersInDocument = MaximumConversationBytes;
+            settings.MaxCharactersFromEntities = 0;
+            XDocument document;
+            using (FileStream stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read))
+            using (XmlReader reader = XmlReader.Create(stream, settings))
+            {
+                document = XDocument.Load(reader, LoadOptions.None);
+            }
+
+            XElement root = document.Root;
+            if (root == null || root.Name != StoreRootName)
+            {
+                throw new InvalidDataException(
+                    "This is not a FilePrompt conversation store.");
+            }
+
+            ValidateAttributes(root, "version", "currentSessionId");
+            if (!string.Equals(
+                RequireAttribute(root, "version"),
+                StoreVersion,
+                StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "The conversation store version is not supported.");
+            }
+
+            ValidateContainerText(root);
+            IList<XElement> children = root.Elements().ToList();
+            if (children.Count > MaximumBackupSessions ||
+                children.Any(element => element.Name != "Session"))
+            {
+                throw new InvalidDataException(
+                    "The conversation store has an invalid structure.");
+            }
+
+            return document;
         }
 
         private static string PreserveDamagedStore(string path)
@@ -204,7 +262,10 @@ namespace FilePromptWin7
                 document = BuildBackupDocumentUnlocked(out exportedCount);
             }
 
-            WriteDocumentAtomic(document, outputPath);
+            WriteDocumentAtomic(
+                document,
+                outputPath,
+                MaximumConversationBytes);
             return exportedCount;
         }
 
@@ -270,10 +331,20 @@ namespace FilePromptWin7
             ConversationSession session;
             lock (syncRoot)
             {
+                string previousCurrentSessionId = currentSessionId;
                 session = new ConversationSession(title);
                 sessions.Add(session);
                 currentSessionId = session.Id;
-                SaveUnlocked();
+                try
+                {
+                    SaveUnlocked();
+                }
+                catch
+                {
+                    sessions.Remove(session);
+                    currentSessionId = previousCurrentSessionId;
+                    throw;
+                }
             }
 
             return session;
@@ -294,8 +365,18 @@ namespace FilePromptWin7
                     return false;
                 }
 
+                string previousCurrentSessionId = currentSessionId;
                 currentSessionId = session.Id;
-                SaveUnlocked();
+                try
+                {
+                    SaveUnlocked();
+                }
+                catch
+                {
+                    currentSessionId = previousCurrentSessionId;
+                    throw;
+                }
+
                 return true;
             }
         }
@@ -332,6 +413,8 @@ namespace FilePromptWin7
                     currentSessionId,
                     session.Id,
                     StringComparison.OrdinalIgnoreCase);
+                int sessionIndex = sessions.IndexOf(session);
+                string previousCurrentSessionId = currentSessionId;
                 sessions.Remove(session);
                 if (wasCurrent)
                 {
@@ -340,7 +423,17 @@ namespace FilePromptWin7
                         : sessions[sessions.Count - 1].Id;
                 }
 
-                SaveUnlocked();
+                try
+                {
+                    SaveUnlocked();
+                }
+                catch
+                {
+                    sessions.Insert(sessionIndex, session);
+                    currentSessionId = previousCurrentSessionId;
+                    throw;
+                }
+
                 return true;
             }
         }
@@ -360,13 +453,25 @@ namespace FilePromptWin7
                     return false;
                 }
 
+                string previousTitle = session.Title;
+                DateTime previousUpdatedAt = session.UpdatedAt;
                 if (!string.IsNullOrWhiteSpace(title))
                 {
                     session.Title = title.Trim();
                 }
 
                 session.Touch();
-                SaveUnlocked();
+                try
+                {
+                    SaveUnlocked();
+                }
+                catch
+                {
+                    session.Title = previousTitle;
+                    session.UpdatedAt = previousUpdatedAt;
+                    throw;
+                }
+
                 return true;
             }
         }
@@ -384,9 +489,9 @@ namespace FilePromptWin7
                     return false;
                 }
 
-                session.AddMessage(role, content);
-                SaveUnlocked();
-                return true;
+                return AddMessageUnlocked(
+                    session,
+                    new ConversationMessage(role, content));
             }
         }
 
@@ -407,9 +512,99 @@ namespace FilePromptWin7
                     return false;
                 }
 
-                session.AddMessage(message);
+                return AddMessageUnlocked(session, message);
+            }
+        }
+
+        public bool AddTurn(
+            string sessionId,
+            ConversationMessage userMessage,
+            ConversationMessage assistantMessage,
+            string updatedTitle)
+        {
+            if (userMessage == null || assistantMessage == null)
+            {
+                return false;
+            }
+
+            lock (syncRoot)
+            {
+                ConversationSession session = FindSessionUnlocked(sessionId);
+                if (session == null)
+                {
+                    return false;
+                }
+
+                IList<ConversationMessage> previousMessages = session.Messages;
+                int previousCount = previousMessages == null
+                    ? 0
+                    : previousMessages.Count;
+                string previousTitle = session.Title;
+                DateTime previousUpdatedAt = session.UpdatedAt;
+                session.AddMessage(userMessage);
+                session.AddMessage(assistantMessage);
+                if (!string.IsNullOrWhiteSpace(updatedTitle))
+                {
+                    session.Title = updatedTitle.Trim();
+                }
+
+                try
+                {
+                    SaveUnlocked();
+                    return true;
+                }
+                catch
+                {
+                    RestoreMessages(
+                        session,
+                        previousMessages,
+                        previousCount);
+                    session.Title = previousTitle;
+                    session.UpdatedAt = previousUpdatedAt;
+                    throw;
+                }
+            }
+        }
+
+        private bool AddMessageUnlocked(
+            ConversationSession session,
+            ConversationMessage message)
+        {
+            IList<ConversationMessage> previousMessages = session.Messages;
+            int previousCount = previousMessages == null
+                ? 0
+                : previousMessages.Count;
+            DateTime previousUpdatedAt = session.UpdatedAt;
+            session.AddMessage(message);
+            try
+            {
                 SaveUnlocked();
                 return true;
+            }
+            catch
+            {
+                RestoreMessages(session, previousMessages, previousCount);
+                session.UpdatedAt = previousUpdatedAt;
+                throw;
+            }
+        }
+
+        private static void RestoreMessages(
+            ConversationSession session,
+            IList<ConversationMessage> previousMessages,
+            int previousCount)
+        {
+            if (ReferenceEquals(session.Messages, previousMessages) &&
+                session.Messages != null)
+            {
+                while (session.Messages.Count > previousCount)
+                {
+                    session.Messages.RemoveAt(session.Messages.Count - 1);
+                }
+            }
+            else
+            {
+                session.Messages = previousMessages;
             }
         }
 
@@ -423,8 +618,8 @@ namespace FilePromptWin7
             }
 
             XElement root = new XElement(
-                "ConversationStore",
-                new XAttribute("version", "1"),
+                StoreRootName,
+                new XAttribute("version", StoreVersion),
                 new XAttribute(
                     "currentSessionId",
                     currentSessionId ?? string.Empty));
@@ -443,7 +638,10 @@ namespace FilePromptWin7
             XDocument document = new XDocument(
                 new XDeclaration("1.0", "utf-8", "yes"),
                 root);
-            WriteDocumentAtomic(document, storagePath);
+            WriteDocumentAtomic(
+                document,
+                storagePath,
+                MaximumConversationBytes);
         }
 
         private XDocument BuildBackupDocumentUnlocked(out int exportedCount)
@@ -505,10 +703,16 @@ namespace FilePromptWin7
         private static XElement CreateSessionElement(
             ConversationSession session)
         {
+            string safeTitle = SanitizeXmlText(session.Title);
+            if (string.IsNullOrWhiteSpace(safeTitle))
+            {
+                safeTitle = "新会话";
+            }
+
             XElement sessionElement = new XElement(
                 "Session",
                 new XAttribute("id", SanitizeXmlText(session.Id)),
-                new XAttribute("title", SanitizeXmlText(session.Title)),
+                new XAttribute("title", safeTitle),
                 new XAttribute("createdAt", FormatDate(session.CreatedAt)),
                 new XAttribute("updatedAt", FormatDate(session.UpdatedAt)));
             XElement messagesElement = new XElement("Messages");
@@ -548,7 +752,7 @@ namespace FilePromptWin7
                     path);
             }
 
-            if (file.Length == 0 || file.Length > MaximumBackupCharacters)
+            if (file.Length == 0 || file.Length > MaximumConversationBytes)
             {
                 throw new InvalidDataException(
                     "The conversation backup file has an invalid size.");
@@ -560,7 +764,7 @@ namespace FilePromptWin7
                 XmlReaderSettings settings = new XmlReaderSettings();
                 settings.DtdProcessing = DtdProcessing.Prohibit;
                 settings.XmlResolver = null;
-                settings.MaxCharactersInDocument = MaximumBackupCharacters;
+                settings.MaxCharactersInDocument = MaximumConversationBytes;
                 settings.MaxCharactersFromEntities = 0;
                 using (FileStream stream = new FileStream(
                     path,
@@ -832,7 +1036,8 @@ namespace FilePromptWin7
 
         private static void WriteDocumentAtomic(
             XDocument document,
-            string path)
+            string path,
+            long maximumBytes = long.MaxValue)
         {
             if (document == null)
             {
@@ -873,6 +1078,13 @@ namespace FilePromptWin7
                     stream.Flush(true);
                 }
 
+                long writtenBytes = new FileInfo(temporaryPath).Length;
+                if (writtenBytes == 0 || writtenBytes > maximumBytes)
+                {
+                    throw new InvalidOperationException(
+                        "The conversation file is too large to save or restore safely.");
+                }
+
                 if (!MoveFileEx(
                     temporaryPath,
                     outputPath,
@@ -909,39 +1121,6 @@ namespace FilePromptWin7
             string existingFileName,
             string newFileName,
             int flags);
-
-        private static ConversationSession ReadSession(XElement element)
-        {
-            ConversationSession session = new ConversationSession();
-            session.Id = GetAttribute(element, "id");
-            session.Title = GetAttribute(element, "title");
-            session.CreatedAt = ParseDate(
-                GetAttribute(element, "createdAt"),
-                DateTime.UtcNow);
-            session.UpdatedAt = ParseDate(
-                GetAttribute(element, "updatedAt"),
-                session.CreatedAt);
-            session.Messages = new List<ConversationMessage>();
-
-            XElement messagesElement = element.Element("Messages");
-            if (messagesElement != null)
-            {
-                foreach (XElement messageElement in
-                    messagesElement.Elements("Message"))
-                {
-                    DateTime createdAt = ParseDate(
-                        GetAttribute(messageElement, "createdAt"),
-                        DateTime.UtcNow);
-                    session.Messages.Add(
-                        new ConversationMessage(
-                            GetAttribute(messageElement, "role"),
-                            messageElement.Value,
-                            createdAt));
-                }
-            }
-
-            return session;
-        }
 
         private ConversationSession FindSessionUnlocked(string id)
         {
@@ -1033,19 +1212,5 @@ namespace FilePromptWin7
                 CultureInfo.InvariantCulture);
         }
 
-        private static DateTime ParseDate(string value, DateTime fallback)
-        {
-            DateTime result;
-            if (DateTime.TryParse(
-                value,
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.RoundtripKind,
-                out result))
-            {
-                return result;
-            }
-
-            return fallback;
-        }
     }
 }

@@ -19,6 +19,9 @@
 - 全部会话可备份为 `.fpc` 并合并恢复；备份不包含 URL、API Key 或模型配置。
 - 可把回答导出为 Word（`.docx`）；回答包含 Markdown 表格时可导出为 CSV 表格。
 - API Key 使用 Windows DPAPI 加密后保存在当前用户的本地配置目录。
+- 完整请求 URL 不跟随 3xx 重定向，避免把用户资料转发到其他地址。
+- 会话按完整问答轮次原子保存；保存失败会回滚，重复启动会切回现有窗口。
+- 对异常 Office XML、极端 Excel 列号和 CSV 公式内容进行安全限制与转义。
 
 ## 固定接口格式
 
@@ -55,7 +58,7 @@ Content-Type: application/json
 
 ## Windows 7 离线完整版
 
-优先使用 `FilePrompt-Win7-Full-v1.4.zip`。完整解压后运行
+优先使用 `FilePrompt-Win7-Full-v1.5.zip`。完整解压后运行
 `Start-FilePrompt.exe`，启动器会检测 .NET Framework 4.8；缺少时会调用包内
 经过微软数字签名的官方完整离线安装程序。安装过程不下载文件，也不需要访问
 互联网。不要只复制 `app` 目录中的 EXE。
@@ -92,3 +95,14 @@ powershell -ExecutionPolicy Bypass -File .\build-offline-package.ps1
 它会重建依赖、核对 28 个应用 DLL、验证 .NET 4.8 安装包的固定 SHA-256 与
 Microsoft Authenticode 签名，并生成 `PACKAGE-CHECKSUMS-SHA256.txt`。仅准备和
 检查发布目录而不生成 ZIP 时，可加 `-StageOnly`。
+
+## 测试
+
+构建并运行全部 10 组自动回归测试：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1
+```
+
+界面截图测试单独运行 `tests\CaptureUiSmokeTest.ps1`，支持正常窗口、最小窗口和
+125% 物理尺寸预览。

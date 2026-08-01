@@ -24,6 +24,7 @@ namespace FilePromptWin7
             HttpClientHandler handler = new HttpClientHandler();
             handler.AutomaticDecompression =
                 DecompressionMethods.GZip | DecompressionMethods.Deflate;
+            handler.AllowAutoRedirect = false;
             handler.UseProxy = true;
             handler.Proxy = WebRequest.DefaultWebProxy;
 
@@ -51,7 +52,6 @@ namespace FilePromptWin7
                     attempt,
                     request,
                     true,
-                    false,
                     onDelta,
                     cancellationToken).ConfigureAwait(false);
             }
@@ -61,6 +61,11 @@ namespace FilePromptWin7
             }
             catch (HttpRequestException exception)
             {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
                 throw CreateNetworkException(exception);
             }
             catch (IOException exception)
@@ -95,7 +100,6 @@ namespace FilePromptWin7
                     attempt,
                     request,
                     false,
-                    false,
                     onDelta,
                     cancellationToken).ConfigureAwait(false);
             }
@@ -105,7 +109,30 @@ namespace FilePromptWin7
             }
             catch (HttpRequestException exception)
             {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
                 throw CreateNetworkException(exception);
+            }
+            catch (IOException exception)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                throw new ModelCallException("连接中断：" + exception.Message);
+            }
+            catch (ObjectDisposedException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                throw;
             }
 
             throw CreateUserFacingException(secondError);
@@ -135,7 +162,6 @@ namespace FilePromptWin7
                     attempt,
                     request,
                     false,
-                    false,
                     null,
                     cancellationToken).ConfigureAwait(false);
             }
@@ -145,6 +171,11 @@ namespace FilePromptWin7
             }
             catch (HttpRequestException exception)
             {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
                 throw CreateNetworkException(exception);
             }
             catch (IOException exception)
@@ -172,7 +203,6 @@ namespace FilePromptWin7
             EndpointAttempt attempt,
             ModelRequest request,
             bool stream,
-            bool useXApiKey,
             Action<string> onDelta,
             CancellationToken cancellationToken)
         {
@@ -200,58 +230,88 @@ namespace FilePromptWin7
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
                 using (response)
+                using (CancellationTokenRegistration registration =
+                    cancellationToken.Register(delegate { response.Dispose(); }))
                 {
-                    string requestId = GetRequestId(response);
-                    if (!response.IsSuccessStatusCode)
+                    try
                     {
-                        string errorBody = await response.Content
+                        string requestId = GetRequestId(response);
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            string errorBody = await response.Content
                             .ReadAsStringAsync()
                             .ConfigureAwait(false);
-                        throw new AttemptException(
-                            (int)response.StatusCode,
-                            errorBody,
-                            requestId);
-                    }
-
-                    string mediaType = response.Content.Headers.ContentType == null
-                        ? string.Empty
-                        : response.Content.Headers.ContentType.MediaType;
-
-                    if (mediaType.IndexOf(
-                        "text/event-stream",
-                        StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        using (Stream streamBody = await response.Content
-                            .ReadAsStreamAsync()
-                            .ConfigureAwait(false))
-                        using (CancellationTokenRegistration registration =
-                            cancellationToken.Register(delegate { response.Dispose(); }))
-                        {
-                            return await ReadServerSentEventsAsync(
-                                streamBody,
-                                onDelta,
-                                cancellationToken).ConfigureAwait(false);
-                        }
-                    }
-
-                    string body = await response.Content
-                        .ReadAsStringAsync()
-                        .ConfigureAwait(false);
-                    string result = ExtractText(Deserialize(body));
-                    if (string.IsNullOrEmpty(result))
-                    {
-                        string error = ExtractErrorMessage(Deserialize(body));
-                        if (!string.IsNullOrEmpty(error))
-                        {
-                            throw new ModelCallException(error);
+                            throw new AttemptException(
+                                (int)response.StatusCode,
+                                errorBody,
+                                requestId);
                         }
 
-                        throw new ModelCallException(
-                            "接口请求成功，但响应中没有找到可显示的文本。");
-                    }
+                        string mediaType = response.Content.Headers.ContentType == null
+                            ? string.Empty
+                            : response.Content.Headers.ContentType.MediaType;
 
-                    Notify(onDelta, result);
-                    return result;
+                        if (mediaType.IndexOf(
+                            "text/event-stream",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            using (Stream streamBody = await response.Content
+                                .ReadAsStreamAsync()
+                                .ConfigureAwait(false))
+                            {
+                                return await ReadServerSentEventsAsync(
+                                    streamBody,
+                                    onDelta,
+                                    cancellationToken).ConfigureAwait(false);
+                            }
+                        }
+
+                        string body = await response.Content
+                            .ReadAsStringAsync()
+                            .ConfigureAwait(false);
+                        string result = ExtractText(Deserialize(body));
+                        if (string.IsNullOrEmpty(result))
+                        {
+                            string error = ExtractErrorMessage(Deserialize(body));
+                            if (!string.IsNullOrEmpty(error))
+                            {
+                                throw new ModelCallException(error);
+                            }
+
+                            throw new ModelCallException(
+                                "接口请求成功，但响应中没有找到可显示的文本。");
+                        }
+
+                        Notify(onDelta, result);
+                        return result;
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            throw new OperationCanceledException(cancellationToken);
+                        }
+
+                        throw;
+                    }
+                    catch (IOException)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            throw new OperationCanceledException(cancellationToken);
+                        }
+
+                        throw;
+                    }
+                    catch (HttpRequestException)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            throw new OperationCanceledException(cancellationToken);
+                        }
+
+                        throw;
+                    }
                 }
             }
         }
@@ -350,8 +410,25 @@ namespace FilePromptWin7
             }
             catch
             {
-                // A non-JSON keepalive/event should not terminate an otherwise valid stream.
-                return false;
+                string keepalive = data.Trim();
+                if (string.Equals(
+                    keepalive,
+                    "ping",
+                    StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(
+                        keepalive,
+                        "keepalive",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(
+                        keepalive,
+                        "[KEEPALIVE]",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                throw new ModelCallException(
+                    "流式响应包含无法解析的数据，请检查接口兼容性。");
             }
 
             string error = ExtractErrorMessage(parsed);
@@ -800,9 +877,17 @@ namespace FilePromptWin7
                     prefix = "请求过于频繁，或账户额度不足。";
                     break;
                 default:
-                    prefix = exception.StatusCode >= 500
-                        ? "模型服务暂时异常。"
-                        : "模型接口返回错误。";
+                    if (exception.StatusCode >= 300 &&
+                        exception.StatusCode < 400)
+                    {
+                        prefix = "接口返回了重定向，请填写最终的完整请求 URL。";
+                    }
+                    else
+                    {
+                        prefix = exception.StatusCode >= 500
+                            ? "模型服务暂时异常。"
+                            : "模型接口返回错误。";
+                    }
                     break;
             }
 
@@ -825,7 +910,24 @@ namespace FilePromptWin7
 
         private static ModelCallException CreateNetworkException(HttpRequestException exception)
         {
-            string message = exception.Message ?? string.Empty;
+            StringBuilder details = new StringBuilder();
+            Exception current = exception;
+            while (current != null)
+            {
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                {
+                    if (details.Length > 0)
+                    {
+                        details.Append(" ");
+                    }
+
+                    details.Append(current.Message);
+                }
+
+                current = current.InnerException;
+            }
+
+            string message = details.ToString();
             if (message.IndexOf("SSL", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 message.IndexOf("TLS", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 message.IndexOf("secure channel", StringComparison.OrdinalIgnoreCase) >= 0 ||

@@ -15,7 +15,7 @@ $profileRoot = Join-Path $artifactRoot ('ui-profile-' + $Mode.ToLowerInvariant()
 $applicationData = Join-Path $profileRoot 'FilePromptWin7'
 $sizeSuffix = if ($MinimumWindow) { '-minimum' } else { '' }
 $outputPath = Join-Path $artifactRoot (
-    'FilePrompt-ui-v1.4-' + $Mode.ToLowerInvariant() + $sizeSuffix + '.png'
+    'FilePrompt-ui-v1.5-' + $Mode.ToLowerInvariant() + $sizeSuffix + '.png'
 )
 
 if (-not (Test-Path -LiteralPath $artifactRoot)) {

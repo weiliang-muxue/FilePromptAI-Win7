@@ -10,6 +10,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Windows.Forms;
+using System.Xml;
 using System.Xml.Linq;
 
 namespace FilePromptWin7
@@ -19,7 +20,9 @@ namespace FilePromptWin7
         private const int MaxTextCharacters = 2000000;
         private const long MaxSourceBytes = 100L * 1024L * 1024L;
         private const long MaxInlineFileBytes = 20L * 1024L * 1024L;
+        private const long MaxOfficeXmlBytes = 32L * 1024L * 1024L;
         private const int MaxImageSide = 2048;
+        private const int MaxWorksheetColumns = 16384;
 
         private static readonly HashSet<string> ImageExtensions =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -127,7 +130,16 @@ namespace FilePromptWin7
             bool truncated = text != null && text.Length > MaxTextCharacters;
             if (truncated)
             {
-                text = text.Substring(0, MaxTextCharacters)
+                int cutoff = MaxTextCharacters;
+                if (cutoff > 0 &&
+                    cutoff < text.Length &&
+                    char.IsHighSurrogate(text[cutoff - 1]) &&
+                    char.IsLowSurrogate(text[cutoff]))
+                {
+                    cutoff--;
+                }
+
+                text = text.Substring(0, cutoff)
                     + "\r\n\r\n[内容过长，已在 2,000,000 字符处截断]";
             }
 
@@ -214,7 +226,7 @@ namespace FilePromptWin7
                 }
             }
 
-            return suspicious < count / 20;
+            return (long)suspicious * 20L < count;
         }
 
         private static string ExtractRtf(string path)
@@ -261,16 +273,10 @@ namespace FilePromptWin7
             ZipArchiveEntry entry,
             string sectionName)
         {
-            if (entry.Length > 128L * 1024L * 1024L)
-            {
-                throw new InvalidDataException("文档内部 XML 过大。");
-            }
-
-            XDocument document;
-            using (Stream stream = entry.Open())
-            {
-                document = XDocument.Load(stream, LoadOptions.PreserveWhitespace);
-            }
+            XDocument document = LoadOfficeXml(
+                entry,
+                "文档内部 XML",
+                LoadOptions.PreserveWhitespace);
 
             if (!string.IsNullOrEmpty(sectionName))
             {
@@ -331,11 +337,10 @@ namespace FilePromptWin7
                 Dictionary<string, string> relationshipTargets =
                     ReadWorkbookRelationships(relationshipsEntry);
 
-                XDocument workbook;
-                using (Stream stream = workbookEntry.Open())
-                {
-                    workbook = XDocument.Load(stream);
-                }
+                XDocument workbook = LoadOfficeXml(
+                    workbookEntry,
+                    "Excel 工作簿定义",
+                    LoadOptions.None);
 
                 int sheetIndex = 0;
                 foreach (XElement sheetElement in
@@ -381,16 +386,10 @@ namespace FilePromptWin7
                 return result;
             }
 
-            if (entry.Length > 128L * 1024L * 1024L)
-            {
-                throw new InvalidDataException("Excel 共享字符串表过大。");
-            }
-
-            XDocument document;
-            using (Stream stream = entry.Open())
-            {
-                document = XDocument.Load(stream, LoadOptions.PreserveWhitespace);
-            }
+            XDocument document = LoadOfficeXml(
+                entry,
+                "Excel 共享字符串表",
+                LoadOptions.PreserveWhitespace);
 
             foreach (XElement item in
                 document.Descendants().Where(element => element.Name.LocalName == "si"))
@@ -418,11 +417,10 @@ namespace FilePromptWin7
                 return result;
             }
 
-            XDocument document;
-            using (Stream stream = entry.Open())
-            {
-                document = XDocument.Load(stream);
-            }
+            XDocument document = LoadOfficeXml(
+                entry,
+                "Excel 工作簿关系",
+                LoadOptions.None);
 
             foreach (XElement relationship in
                 document.Descendants().Where(element => element.Name.LocalName == "Relationship"))
@@ -443,16 +441,10 @@ namespace FilePromptWin7
             ZipArchiveEntry entry,
             IList<string> sharedStrings)
         {
-            if (entry.Length > 128L * 1024L * 1024L)
-            {
-                throw new InvalidDataException("Excel 工作表 XML 过大。");
-            }
-
-            XDocument document;
-            using (Stream stream = entry.Open())
-            {
-                document = XDocument.Load(stream, LoadOptions.PreserveWhitespace);
-            }
+            XDocument document = LoadOfficeXml(
+                entry,
+                "Excel 工作表 XML",
+                LoadOptions.PreserveWhitespace);
 
             int renderedRows = 0;
             foreach (XElement row in
@@ -467,6 +459,12 @@ namespace FilePromptWin7
                     int column = string.IsNullOrEmpty(reference)
                         ? fallbackColumn
                         : GetColumnIndex(reference);
+                    if (column < 0 || column >= MaxWorksheetColumns)
+                    {
+                        throw new InvalidDataException(
+                            "Excel 单元格列引用超出有效范围（A 到 XFD）。");
+                    }
+
                     fallbackColumn = column + 1;
                     cells[column] = GetCellValue(cell, sharedStrings);
                 }
@@ -574,7 +572,7 @@ namespace FilePromptWin7
 
         private static int GetColumnIndex(string cellReference)
         {
-            int result = 0;
+            long result = 0;
             int letters = 0;
             foreach (char character in cellReference)
             {
@@ -588,10 +586,43 @@ namespace FilePromptWin7
 
                 char upper = char.ToUpperInvariant(character);
                 result = result * 26 + (upper - 'A' + 1);
+                if (result > MaxWorksheetColumns)
+                {
+                    return -1;
+                }
+
                 letters++;
             }
 
-            return letters == 0 ? 0 : result - 1;
+            return letters == 0 ? -1 : (int)result - 1;
+        }
+
+        private static XDocument LoadOfficeXml(
+            ZipArchiveEntry entry,
+            string description,
+            LoadOptions options)
+        {
+            if (entry == null)
+            {
+                throw new InvalidDataException(description + "不存在。");
+            }
+
+            if (entry.Length < 0 || entry.Length > MaxOfficeXmlBytes)
+            {
+                throw new InvalidDataException(
+                    description + "超过 32 MB 安全限制。");
+            }
+
+            XmlReaderSettings settings = new XmlReaderSettings();
+            settings.DtdProcessing = DtdProcessing.Prohibit;
+            settings.XmlResolver = null;
+            settings.MaxCharactersInDocument = MaxOfficeXmlBytes;
+            settings.MaxCharactersFromEntities = 0;
+            using (Stream stream = entry.Open())
+            using (XmlReader reader = XmlReader.Create(stream, settings))
+            {
+                return XDocument.Load(reader, options);
+            }
         }
 
         private static string ResolveWorkbookTarget(string target)

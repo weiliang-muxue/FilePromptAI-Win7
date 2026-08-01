@@ -25,6 +25,7 @@ $arguments = @(
     "/reference:$(Join-Path $frameworkRoot 'System.IO.Compression.dll')",
     "/reference:$(Join-Path $frameworkRoot 'System.IO.Compression.FileSystem.dll')",
     "/reference:$(Join-Path $frameworkRoot 'System.Xml.dll')",
+    (Join-Path $projectRoot 'src\AtomicFile.cs'),
     (Join-Path $projectRoot 'src\MarkdownDocument.cs'),
     (Join-Path $projectRoot 'src\CsvExporter.cs'),
     (Join-Path $projectRoot 'src\DocxExporter.cs'),

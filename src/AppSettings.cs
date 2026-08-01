@@ -39,7 +39,9 @@ namespace FilePromptWin7
 
                 XDocument document = XDocument.Load(SettingsPath);
                 XElement root = document.Root;
-                if (root == null)
+                if (root == null ||
+                    root.Name != "FilePromptSettings" ||
+                    (string)root.Attribute("version") != "1")
                 {
                     return settings;
                 }
@@ -76,14 +78,10 @@ namespace FilePromptWin7
                     new XElement("ModelName", ModelName ?? string.Empty),
                     new XElement("ProtectedApiKey", Protect(ApiKey ?? string.Empty))));
 
-            string temporaryPath = SettingsPath + ".tmp";
-            document.Save(temporaryPath);
-            if (File.Exists(SettingsPath))
-            {
-                File.Delete(SettingsPath);
-            }
-
-            File.Move(temporaryPath, SettingsPath);
+            AtomicFile.WriteAllText(
+                SettingsPath,
+                document.ToString(),
+                new UTF8Encoding(true));
         }
 
         private static string GetValue(XElement root, string name)

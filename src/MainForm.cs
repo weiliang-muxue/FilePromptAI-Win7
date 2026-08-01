@@ -13,6 +13,7 @@ namespace FilePromptWin7
 {
     internal sealed class MainForm : Form
     {
+        internal const string WindowTitle = "FilePrompt  ·  内网模型工作台";
         private const int MaxCombinedTextCharacters = 4000000;
         private const int MaxDisplayedUserCharacters = 8000;
         private const float ExpandedSettingsHeight = 94F;
@@ -56,6 +57,7 @@ namespace FilePromptWin7
         private Button testConnectionButton;
         private ToolStripStatusLabel statusLabel;
         private ToolStripProgressBar progressBar;
+        private System.Windows.Forms.Timer sessionSearchTimer;
 
         private CancellationTokenSource generationCancellation;
         private CancellationTokenSource connectionTestCancellation;
@@ -99,7 +101,7 @@ namespace FilePromptWin7
 
         private void InitializeWindow()
         {
-            Text = "FilePrompt  ·  内网模型工作台";
+            Text = WindowTitle;
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(880, 520);
             Rectangle workingArea = Screen.PrimaryScreen.WorkingArea;
@@ -207,9 +209,17 @@ namespace FilePromptWin7
             sessionSearchTextBox = CreateInputBox();
             sessionSearchTextBox.AccessibleName = "搜索会话";
             sessionSearchTextBox.Margin = new Padding(2, 7, 0, 6);
+            sessionSearchTimer = new System.Windows.Forms.Timer();
+            sessionSearchTimer.Interval = 180;
+            sessionSearchTimer.Tick += delegate
+            {
+                sessionSearchTimer.Stop();
+                RefreshSessionList();
+            };
             sessionSearchTextBox.TextChanged += delegate
             {
-                RefreshSessionList();
+                sessionSearchTimer.Stop();
+                sessionSearchTimer.Start();
             };
             searchLayout.Controls.Add(searchLabel, 0, 0);
             searchLayout.Controls.Add(sessionSearchTextBox, 1, 0);
@@ -760,10 +770,20 @@ namespace FilePromptWin7
                 !string.IsNullOrWhiteSpace(modelTextBox.Text);
         }
 
+        private bool IsBusy
+        {
+            get
+            {
+                return generationCancellation != null ||
+                    connectionTestCancellation != null ||
+                    isAddingFiles;
+            }
+        }
+
         private void OnMainKeyDown(object sender, KeyEventArgs args)
         {
             if (args.Control && args.KeyCode == Keys.N &&
-                generationCancellation == null)
+                !IsBusy)
             {
                 OnNewSessionClick(this, EventArgs.Empty);
                 args.SuppressKeyPress = true;
@@ -890,19 +910,27 @@ namespace FilePromptWin7
                 return false;
             }
 
+            const int maximumInspectedCharacters = 20000;
             int inspectedCharacters = 0;
             for (int index = session.Messages.Count - 1;
-                index >= 0 && inspectedCharacters < 20000;
+                index >= 0 &&
+                    inspectedCharacters < maximumInspectedCharacters;
                 index--)
             {
                 ConversationMessage message = session.Messages[index];
                 string content = message == null
                     ? string.Empty
                     : (message.Content ?? string.Empty);
-                inspectedCharacters += content.Length;
-                if (content.IndexOf(
-                    query,
-                    StringComparison.CurrentCultureIgnoreCase) >= 0)
+                int inspectLength = Math.Min(
+                    content.Length,
+                    maximumInspectedCharacters - inspectedCharacters);
+                inspectedCharacters += inspectLength;
+                if (inspectLength > 0 &&
+                    content.IndexOf(
+                        query,
+                        0,
+                        inspectLength,
+                        StringComparison.CurrentCultureIgnoreCase) >= 0)
                 {
                     return true;
                 }
@@ -1243,7 +1271,7 @@ namespace FilePromptWin7
             if (testConnectionButton != null)
             {
                 testConnectionButton.Enabled =
-                    generationCancellation == null &&
+                    !IsBusy &&
                     HasCompleteConnectionSettings();
             }
         }
@@ -1307,7 +1335,8 @@ namespace FilePromptWin7
         private async void OnTestConnectionClick(object sender, EventArgs args)
         {
             if (connectionTestCancellation != null ||
-                generationCancellation != null)
+                generationCancellation != null ||
+                isAddingFiles)
             {
                 return;
             }
@@ -1414,18 +1443,41 @@ namespace FilePromptWin7
         private void SetConnectionTestingState(bool testing)
         {
             testConnectionButton.Enabled = !testing &&
+                !isAddingFiles &&
+                generationCancellation == null &&
                 HasCompleteConnectionSettings();
             endpointTextBox.Enabled = !testing;
             apiKeyTextBox.Enabled = !testing;
             modelTextBox.Enabled = !testing;
             generateButton.Enabled = !testing &&
-                generationCancellation == null;
+                generationCancellation == null &&
+                !isAddingFiles;
+            SetInputButtonsEnabled(!testing && !isAddingFiles);
+            SetSessionNavigationEnabled(!testing && !isAddingFiles &&
+                generationCancellation == null);
+            if (testing)
+            {
+                renameSessionButton.Enabled = false;
+                deleteSessionButton.Enabled = false;
+                backupSessionsButton.Enabled = false;
+                restoreSessionsButton.Enabled = false;
+            }
+            else
+            {
+                UpdateSessionButtons();
+            }
+
             progressBar.Visible = testing || isAddingFiles ||
                 generationCancellation != null;
         }
 
         private void OnNewSessionClick(object sender, EventArgs args)
         {
+            if (IsBusy)
+            {
+                return;
+            }
+
             SaveCurrentDraft();
             ConversationSession session =
                 conversationStore.CreateSession("新会话");
@@ -1462,6 +1514,11 @@ namespace FilePromptWin7
 
         private void OnRenameSessionClick(object sender, EventArgs args)
         {
+            if (IsBusy)
+            {
+                return;
+            }
+
             ConversationSession session = conversationStore.CurrentSession;
             if (session == null)
             {
@@ -1490,6 +1547,11 @@ namespace FilePromptWin7
 
         private void OnDeleteSessionClick(object sender, EventArgs args)
         {
+            if (IsBusy)
+            {
+                return;
+            }
+
             ConversationSession session = conversationStore.CurrentSession;
             if (session == null || conversationStore.Sessions.Count <= 1)
             {
@@ -1517,6 +1579,11 @@ namespace FilePromptWin7
 
         private void OnBackupSessionsClick(object sender, EventArgs args)
         {
+            if (IsBusy)
+            {
+                return;
+            }
+
             using (SaveFileDialog dialog = new SaveFileDialog())
             {
                 dialog.Title = "备份全部会话";
@@ -1549,6 +1616,11 @@ namespace FilePromptWin7
 
         private void OnRestoreSessionsClick(object sender, EventArgs args)
         {
+            if (IsBusy)
+            {
+                return;
+            }
+
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
                 dialog.Title = "恢复会话备份";
@@ -1566,6 +1638,10 @@ namespace FilePromptWin7
                     if (sessionSearchTextBox != null)
                     {
                         sessionSearchTextBox.Clear();
+                        if (sessionSearchTimer != null)
+                        {
+                            sessionSearchTimer.Stop();
+                        }
                     }
 
                     RefreshSessionList();
@@ -1588,7 +1664,8 @@ namespace FilePromptWin7
 
         private void OnDragEnter(object sender, DragEventArgs args)
         {
-            args.Effect = args.Data != null &&
+            args.Effect = !IsBusy &&
+                args.Data != null &&
                 args.Data.GetDataPresent(DataFormats.FileDrop)
                 ? DragDropEffects.Copy
                 : DragDropEffects.None;
@@ -1596,7 +1673,8 @@ namespace FilePromptWin7
 
         private async void OnDragDrop(object sender, DragEventArgs args)
         {
-            if (args.Data == null ||
+            if (IsBusy ||
+                args.Data == null ||
                 !args.Data.GetDataPresent(DataFormats.FileDrop))
             {
                 return;
@@ -1611,6 +1689,11 @@ namespace FilePromptWin7
 
         private async void OnAddFileClick(object sender, EventArgs args)
         {
+            if (IsBusy)
+            {
+                return;
+            }
+
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
                 dialog.Title = "选择要交给模型的文件";
@@ -1628,9 +1711,9 @@ namespace FilePromptWin7
 
         private async Task AddFilesAsync(IEnumerable<string> paths)
         {
-            if (isAddingFiles)
+            if (IsBusy)
             {
-                SetStatus("正在处理上一批文件，请稍候。");
+                SetStatus("当前任务尚未完成，请稍候。");
                 return;
             }
 
@@ -1646,6 +1729,7 @@ namespace FilePromptWin7
             isAddingFiles = true;
             SetInputButtonsEnabled(false);
             SetSessionNavigationEnabled(false);
+            testConnectionButton.Enabled = false;
             progressBar.Visible = true;
             List<string> errors = new List<string>();
 
@@ -1672,7 +1756,12 @@ namespace FilePromptWin7
                 isAddingFiles = false;
                 SetInputButtonsEnabled(true);
                 SetSessionNavigationEnabled(
-                    generationCancellation == null);
+                    generationCancellation == null &&
+                    connectionTestCancellation == null);
+                testConnectionButton.Enabled =
+                    generationCancellation == null &&
+                    connectionTestCancellation == null &&
+                    HasCompleteConnectionSettings();
                 progressBar.Visible = generationCancellation != null ||
                     connectionTestCancellation != null;
                 UpdateInputStatus();
@@ -1691,6 +1780,11 @@ namespace FilePromptWin7
 
         private async void OnPasteClick(object sender, EventArgs args)
         {
+            if (IsBusy)
+            {
+                return;
+            }
+
             try
             {
                 if (Clipboard.ContainsFileDropList())
@@ -1815,9 +1909,7 @@ namespace FilePromptWin7
 
         private async void StartGeneration()
         {
-            if (generationCancellation != null ||
-                connectionTestCancellation != null ||
-                isAddingFiles)
+            if (IsBusy)
             {
                 return;
             }
@@ -1827,6 +1919,7 @@ namespace FilePromptWin7
             string model = modelTextBox.Text.Trim();
             if (string.IsNullOrWhiteSpace(endpoint))
             {
+                SetSettingsExpanded(true);
                 ShowValidation("请先填写完整请求 URL。", endpointTextBox);
                 return;
             }
@@ -1836,6 +1929,7 @@ namespace FilePromptWin7
                 (endpointUri.Scheme != Uri.UriSchemeHttp &&
                     endpointUri.Scheme != Uri.UriSchemeHttps))
             {
+                SetSettingsExpanded(true);
                 ShowValidation(
                     "请求 URL 必须是完整的 http:// 或 https:// 地址。",
                     endpointTextBox);
@@ -1844,12 +1938,14 @@ namespace FilePromptWin7
 
             if (string.IsNullOrWhiteSpace(key))
             {
+                SetSettingsExpanded(true);
                 ShowValidation("请先填写 API Key。", apiKeyTextBox);
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(model))
             {
+                SetSettingsExpanded(true);
                 ShowValidation("请先填写模型名称。", modelTextBox);
                 return;
             }
@@ -1870,6 +1966,7 @@ namespace FilePromptWin7
                 RefreshSessionList();
             }
 
+            string submittedPromptText = promptTextBox.Text ?? string.Empty;
             string instruction = GetCurrentInstruction();
             string visibleUserMessage = BuildVisibleUserMessage(instruction);
             string prompt = BuildCombinedPrompt(instruction);
@@ -1925,26 +2022,42 @@ namespace FilePromptWin7
                     AppendOutput(result);
                 }
 
-                conversationStore.AddMessage(
+                string updatedTitle = BuildAutoTitle(session, instruction);
+                bool saved = conversationStore.AddTurn(
                     session.Id,
-                    new ConversationMessage("user", prompt));
-                conversationStore.AddMessage(
-                    session.Id,
+                    new ConversationMessage("user", prompt),
                     new ConversationMessage(
                         "assistant",
-                        result ?? streamedResponse.ToString()));
-                AutoTitleSession(session, instruction);
+                        result ?? streamedResponse.ToString()),
+                    updatedTitle);
+                if (!saved)
+                {
+                    throw new InvalidOperationException(
+                        "当前会话已不存在，生成结果未能保存。");
+                }
+
                 RefreshSessionList();
                 sessionTitleLabel.Text = session.Title;
                 ClearDraft(session.Id);
-                promptTextBox.Clear();
+                bool promptUnchanged = string.Equals(
+                    promptTextBox.Text,
+                    submittedPromptText,
+                    StringComparison.Ordinal);
+                if (promptUnchanged)
+                {
+                    promptTextBox.Clear();
+                }
+
                 inputItems.Clear();
                 inputListView.Items.Clear();
                 RenderConversation(session);
                 SetStatus(
                     "生成完成，共 " +
                     (result == null ? 0 : result.Length).ToString("N0") +
-                    " 字符");
+                    " 字符" +
+                    (promptUnchanged
+                        ? string.Empty
+                        : "；已保留等待期间输入的下一条指令"));
                 promptTextBox.Focus();
             }
             catch (OperationCanceledException)
@@ -1986,17 +2099,17 @@ namespace FilePromptWin7
             }
         }
 
-        private void AutoTitleSession(
+        private static string BuildAutoTitle(
             ConversationSession session,
             string prompt)
         {
             if (session == null ||
                 session.Messages == null ||
-                session.Messages.Count > 2 ||
+                session.Messages.Count > 0 ||
                 !string.Equals(session.Title, "新会话",
                     StringComparison.OrdinalIgnoreCase))
             {
-                return;
+                return string.Empty;
             }
 
             string title = (prompt ?? string.Empty)
@@ -2008,10 +2121,9 @@ namespace FilePromptWin7
                 title = title.Substring(0, 22) + "…";
             }
 
-            if (!string.IsNullOrWhiteSpace(title))
-            {
-                conversationStore.RenameSession(session.Id, title);
-            }
+            return string.IsNullOrWhiteSpace(title)
+                ? string.Empty
+                : title;
         }
 
         private string GetCurrentInstruction()
@@ -2134,10 +2246,7 @@ namespace FilePromptWin7
         {
             generateButton.Enabled = !generating;
             stopButton.Enabled = generating;
-            addFileButton.Enabled = !generating && !isAddingFiles;
-            pasteButton.Enabled = !generating && !isAddingFiles;
-            removeButton.Enabled = !generating && !isAddingFiles;
-            clearButton.Enabled = !generating && !isAddingFiles;
+            SetInputButtonsEnabled(!generating && !isAddingFiles);
             SetSessionNavigationEnabled(!generating && !isAddingFiles);
             deleteSessionButton.Enabled = !generating &&
                 conversationStore.Sessions.Count > 1;
@@ -2175,11 +2284,18 @@ namespace FilePromptWin7
 
         private void SetInputButtonsEnabled(bool enabled)
         {
-            bool actual = enabled && generationCancellation == null;
+            bool actual = enabled &&
+                generationCancellation == null &&
+                connectionTestCancellation == null &&
+                !isAddingFiles;
             addFileButton.Enabled = actual;
             pasteButton.Enabled = actual;
             removeButton.Enabled = actual;
             clearButton.Enabled = actual;
+            if (inputListView != null)
+            {
+                inputListView.Enabled = actual;
+            }
         }
 
         private void AppendOutput(string value)
@@ -2424,6 +2540,13 @@ namespace FilePromptWin7
 
         private void OnFormClosing(object sender, FormClosingEventArgs args)
         {
+            if (sessionSearchTimer != null)
+            {
+                sessionSearchTimer.Stop();
+                sessionSearchTimer.Dispose();
+                sessionSearchTimer = null;
+            }
+
             if (generationCancellation != null)
             {
                 generationCancellation.Cancel();

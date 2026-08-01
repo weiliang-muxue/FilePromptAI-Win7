@@ -15,7 +15,9 @@ internal static class ExportSmokeTest
         {
             TestMarkdownTableAndCsv();
             TestRaggedCsvAndInvalidCharacters();
+            TestCsvFormulaNeutralizationAndAtomicWrite();
             TestDocxXmlAndNumbering();
+            TestIndependentOrderedLists();
             Console.WriteLine("PASS | export hardening");
             return 0;
         }
@@ -118,6 +120,58 @@ internal static class ExportSmokeTest
         AssertEqual(expected, csv, "ragged and sanitized CSV");
     }
 
+    private static void TestCsvFormulaNeutralizationAndAtomicWrite()
+    {
+        MarkdownTable table = new MarkdownTable(
+            new List<string> { "Value" });
+        table.Rows.Add(new List<string> { "=1+1" });
+        table.Rows.Add(new List<string> { " +cmd" });
+        table.Rows.Add(new List<string> { "-2+3" });
+        table.Rows.Add(new List<string> { "@SUM(A1:A2)" });
+        table.Rows.Add(new List<string> { "-123.45" });
+        table.Rows.Add(new List<string> { "\t=hidden" });
+        string expected =
+            "Value\r\n" +
+            "'=1+1\r\n" +
+            "' +cmd\r\n" +
+            "'-2+3\r\n" +
+            "'@SUM(A1:A2)\r\n" +
+            "-123.45\r\n" +
+            "'\t=hidden";
+        AssertEqual(
+            expected,
+            CsvExporter.ToCsv(table),
+            "CSV formula neutralization");
+
+        string outputPath = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "export-atomic.csv");
+        byte[] original = Encoding.UTF8.GetBytes("original content");
+        File.WriteAllBytes(outputPath, original);
+        bool failed = false;
+        using (FileStream locked = new FileStream(
+            outputPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read))
+        {
+            try
+            {
+                CsvExporter.Export(table, outputPath);
+            }
+            catch (IOException)
+            {
+                failed = true;
+            }
+        }
+
+        AssertTrue(failed, "locked CSV export fails safely");
+        byte[] after = File.ReadAllBytes(outputPath);
+        AssertTrue(
+            Convert.ToBase64String(original) == Convert.ToBase64String(after),
+            "failed CSV export preserves original file");
+    }
+
     private static void TestDocxXmlAndNumbering()
     {
         string markdown =
@@ -171,6 +225,45 @@ internal static class ExportSmokeTest
             AssertTrue(
                 numberingXml.IndexOf("Symbol", StringComparison.OrdinalIgnoreCase) < 0,
                 "bullet does not depend on Symbol font remapping");
+        }
+    }
+
+    private static void TestIndependentOrderedLists()
+    {
+        string markdown =
+            "1. first\n" +
+            "2. second\n\n" +
+            "between\n\n" +
+            "1. again\n" +
+            "2. last";
+        byte[] content = DocxExporter.Create(markdown);
+        using (MemoryStream memory = new MemoryStream(content))
+        using (ZipArchive archive = new ZipArchive(
+            memory,
+            ZipArchiveMode.Read,
+            false,
+            Encoding.UTF8))
+        {
+            string documentXml = ReadEntry(
+                archive.GetEntry("word/document.xml"));
+            string numberingXml = ReadEntry(
+                archive.GetEntry("word/numbering.xml"));
+            AssertContains(
+                documentXml,
+                "<w:numId w:val=\"1\"/>",
+                "first ordered list numbering instance");
+            AssertContains(
+                documentXml,
+                "<w:numId w:val=\"2\"/>",
+                "second ordered list numbering instance");
+            AssertContains(
+                numberingXml,
+                "<w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/>",
+                "first ordered list definition");
+            AssertContains(
+                numberingXml,
+                "<w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/>",
+                "second ordered list definition");
         }
     }
 
