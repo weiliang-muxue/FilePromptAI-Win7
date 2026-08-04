@@ -566,7 +566,7 @@ namespace FilePromptWin7
         private Control CreatePromptPanel()
         {
             GroupBox group = new GroupBox();
-            group.Text = "指令";
+            group.Text = "指令  ·  回车发送，Shift+Enter 换行";
             group.Dock = DockStyle.Fill;
             group.ForeColor = UiTheme.TextSecondary;
 
@@ -579,7 +579,7 @@ namespace FilePromptWin7
             promptTextBox.AccessibleName = "文字描述或指令";
             promptTextBox.KeyDown += delegate(object sender, KeyEventArgs args)
             {
-                if (args.Control && args.KeyCode == Keys.Enter)
+                if (args.KeyCode == Keys.Enter && !args.Shift)
                 {
                     args.SuppressKeyPress = true;
                     StartGeneration();
