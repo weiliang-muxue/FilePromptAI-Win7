@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
@@ -25,7 +25,7 @@ namespace FilePromptWin7
                 Math.Max(MinimumSize.Width, Math.Min(820, workingArea.Width - 64)),
                 Math.Max(MinimumSize.Height, Math.Min(580, workingArea.Height - 64)));
             Font = new Font("Microsoft YaHei", 9F, FontStyle.Regular);
-            BackColor = Color.FromArgb(31, 35, 42);
+            BackColor = UiTheme.WindowBackground;
             AutoScaleMode = AutoScaleMode.None;
             MinimizeBox = false;
             ShowInTaskbar = false;
@@ -84,7 +84,7 @@ namespace FilePromptWin7
 
             Label title = new Label();
             title.Text = item.Name ?? "未命名内容";
-            title.ForeColor = Color.FromArgb(242, 245, 249);
+            title.ForeColor = UiTheme.TextPrimary;
             title.Font = new Font(Font.FontFamily, 11F, FontStyle.Bold);
             title.AutoEllipsis = true;
             title.Dock = DockStyle.Fill;
@@ -95,7 +95,7 @@ namespace FilePromptWin7
                 (string.IsNullOrWhiteSpace(item.Note)
                     ? string.Empty
                     : "  ·  " + item.Note);
-            detail.ForeColor = Color.FromArgb(160, 173, 190);
+            detail.ForeColor = UiTheme.TextMuted;
             detail.AutoEllipsis = true;
             detail.Dock = DockStyle.Fill;
             detail.TextAlign = ContentAlignment.MiddleLeft;
@@ -123,7 +123,7 @@ namespace FilePromptWin7
 
                     PictureBox picture = new PictureBox();
                     picture.Dock = DockStyle.Fill;
-                    picture.BackColor = Color.FromArgb(245, 247, 250);
+                    picture.BackColor = UiTheme.PanelAltBackground;
                     picture.BorderStyle = BorderStyle.FixedSingle;
                     picture.SizeMode = PictureBoxSizeMode.Zoom;
                     picture.Image = previewImage;
@@ -144,7 +144,7 @@ namespace FilePromptWin7
                 text.Dock = DockStyle.Fill;
                 text.ReadOnly = true;
                 text.BackColor = Color.White;
-                text.ForeColor = Color.FromArgb(32, 37, 43);
+                text.ForeColor = UiTheme.TextPrimary;
                 text.BorderStyle = BorderStyle.FixedSingle;
                 text.DetectUrls = false;
                 text.WordWrap = true;
@@ -174,7 +174,7 @@ namespace FilePromptWin7
             label.Dock = DockStyle.Fill;
             label.Padding = new Padding(24);
             label.BackColor = Color.White;
-            label.ForeColor = Color.FromArgb(62, 70, 82);
+            label.ForeColor = UiTheme.TextPrimary;
             label.TextAlign = ContentAlignment.MiddleCenter;
             label.BorderStyle = BorderStyle.FixedSingle;
             return label;
@@ -193,9 +193,9 @@ namespace FilePromptWin7
             close.Height = 28;
             close.DialogResult = DialogResult.OK;
             close.FlatStyle = FlatStyle.Flat;
-            close.BackColor = Color.FromArgb(47, 53, 63);
-            close.ForeColor = Color.FromArgb(235, 239, 245);
-            close.FlatAppearance.BorderColor = Color.FromArgb(91, 101, 116);
+            close.BackColor = UiTheme.ButtonBackground;
+            close.ForeColor = UiTheme.ButtonText;
+            close.FlatAppearance.BorderColor = UiTheme.BorderColor;
             panel.Controls.Add(close);
             AcceptButton = close;
             CancelButton = close;

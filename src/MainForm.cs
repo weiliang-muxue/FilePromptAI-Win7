@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Drawing;
@@ -122,7 +122,7 @@ namespace FilePromptWin7
                     MinimumSize.Height,
                     Math.Min(640, workingArea.Height - 32)));
             Font = new Font("Microsoft YaHei", 9F, FontStyle.Regular);
-            BackColor = Color.FromArgb(31, 35, 42);
+            BackColor = UiTheme.WindowBackground;
             AutoScaleMode = AutoScaleMode.None;
             DoubleBuffered = true;
             try
@@ -166,7 +166,7 @@ namespace FilePromptWin7
         {
             Panel panel = new Panel();
             panel.Dock = DockStyle.Fill;
-            panel.BackColor = Color.FromArgb(23, 27, 33);
+            panel.BackColor = UiTheme.SidebarBackground;
             panel.Padding = new Padding(10);
 
             TableLayoutPanel layout = new TableLayoutPanel();
@@ -181,7 +181,7 @@ namespace FilePromptWin7
 
             Label brand = new Label();
             brand.Text = "FILEPROMPT";
-            brand.ForeColor = Color.FromArgb(233, 238, 245);
+            brand.ForeColor = UiTheme.TextPrimary;
             brand.Font = new Font(Font, FontStyle.Bold);
             brand.Dock = DockStyle.Fill;
             brand.TextAlign = ContentAlignment.MiddleLeft;
@@ -189,14 +189,14 @@ namespace FilePromptWin7
 
             newSessionButton = CreateButton("新会话", 200);
             newSessionButton.Dock = DockStyle.Fill;
-            newSessionButton.BackColor = Color.FromArgb(45, 121, 218);
+            newSessionButton.BackColor = UiTheme.Accent;
             newSessionButton.ForeColor = Color.White;
             newSessionButton.FlatStyle = FlatStyle.Flat;
             newSessionButton.FlatAppearance.BorderSize = 0;
             newSessionButton.FlatAppearance.MouseOverBackColor =
-                Color.FromArgb(54, 132, 230);
+                UiTheme.AccentHover;
             newSessionButton.FlatAppearance.MouseDownBackColor =
-                Color.FromArgb(35, 101, 188);
+                UiTheme.AccentPressed;
             newSessionButton.Click += OnNewSessionClick;
             layout.Controls.Add(newSessionButton, 0, 1);
 
@@ -213,7 +213,7 @@ namespace FilePromptWin7
             searchLabel.Text = "搜索";
             searchLabel.Dock = DockStyle.Fill;
             searchLabel.TextAlign = ContentAlignment.MiddleLeft;
-            searchLabel.ForeColor = Color.FromArgb(171, 183, 198);
+            searchLabel.ForeColor = UiTheme.TextSecondary;
 
             sessionSearchTextBox = CreateInputBox();
             sessionSearchTextBox.AccessibleName = "搜索会话";
@@ -237,8 +237,8 @@ namespace FilePromptWin7
             sessionListBox = new ListBox();
             sessionListBox.Dock = DockStyle.Fill;
             sessionListBox.BorderStyle = BorderStyle.None;
-            sessionListBox.BackColor = Color.FromArgb(23, 27, 33);
-            sessionListBox.ForeColor = Color.FromArgb(220, 226, 235);
+            sessionListBox.BackColor = UiTheme.SidebarBackground;
+            sessionListBox.ForeColor = UiTheme.TextPrimary;
             sessionListBox.IntegralHeight = false;
             sessionListBox.DrawMode = DrawMode.OwnerDrawFixed;
             sessionListBox.ItemHeight = 48;
@@ -265,7 +265,7 @@ namespace FilePromptWin7
 
             deleteSessionButton = CreateButton("删除", 96);
             deleteSessionButton.Dock = DockStyle.Fill;
-            deleteSessionButton.ForeColor = Color.FromArgb(235, 120, 120);
+            deleteSessionButton.ForeColor = UiTheme.Danger;
             deleteSessionButton.Click += OnDeleteSessionClick;
 
             backupSessionsButton = CreateButton("备份", 96);
@@ -317,7 +317,7 @@ namespace FilePromptWin7
         {
             TableLayoutPanel panel = new TableLayoutPanel();
             panel.Dock = DockStyle.Fill;
-            panel.BackColor = Color.FromArgb(31, 35, 42);
+            panel.BackColor = UiTheme.WindowBackground;
             panel.ColumnCount = 2;
             panel.RowCount = 1;
             panel.ColumnStyles.Add(
@@ -330,7 +330,7 @@ namespace FilePromptWin7
 
             sessionTitleLabel = new Label();
             sessionTitleLabel.Text = "新会话";
-            sessionTitleLabel.ForeColor = Color.FromArgb(242, 245, 249);
+            sessionTitleLabel.ForeColor = UiTheme.TextPrimary;
             sessionTitleLabel.Font = new Font(Font.FontFamily, 13F, FontStyle.Bold);
             sessionTitleLabel.AutoSize = false;
             sessionTitleLabel.Location = new Point(4, 4);
@@ -341,7 +341,7 @@ namespace FilePromptWin7
 
             connectionStatusLabel = new Label();
             connectionStatusLabel.Text = "未连接";
-            connectionStatusLabel.ForeColor = Color.FromArgb(145, 157, 174);
+            connectionStatusLabel.ForeColor = UiTheme.TextMuted;
             connectionStatusLabel.AutoSize = false;
             connectionStatusLabel.Location = new Point(5, 29);
             connectionStatusLabel.Size = new Size(440, 20);
@@ -394,7 +394,7 @@ namespace FilePromptWin7
             GroupBox group = new GroupBox();
             group.Text = "连接设置  ·  仅保存在本机当前用户";
             group.Dock = DockStyle.Fill;
-            group.ForeColor = Color.FromArgb(205, 214, 226);
+            group.ForeColor = UiTheme.TextSecondary;
             group.Padding = new Padding(8, 5, 8, 4);
 
             TableLayoutPanel layout = new TableLayoutPanel();
@@ -434,7 +434,7 @@ namespace FilePromptWin7
             CheckBox showKey = new CheckBox();
             showKey.Text = "显示 Key";
             showKey.AutoSize = true;
-            showKey.ForeColor = Color.FromArgb(205, 214, 226);
+            showKey.ForeColor = UiTheme.TextSecondary;
             showKey.Anchor = AnchorStyles.Left;
             showKey.AccessibleName = "显示或隐藏 API Key";
             showKey.CheckedChanged += delegate
@@ -468,7 +468,7 @@ namespace FilePromptWin7
             GroupBox group = new GroupBox();
             group.Text = "输入资料  ·  拖入文件或粘贴内容";
             group.Dock = DockStyle.Fill;
-            group.ForeColor = Color.FromArgb(205, 214, 226);
+            group.ForeColor = UiTheme.TextSecondary;
             group.AllowDrop = true;
             group.DragEnter += OnDragEnter;
             group.DragDrop += OnDragDrop;
@@ -491,7 +491,7 @@ namespace FilePromptWin7
             Label hint = new Label();
             hint.Text = "仅发送内容和文件名，不发送本地路径";
             hint.AutoSize = true;
-            hint.ForeColor = Color.FromArgb(137, 149, 166);
+            hint.ForeColor = UiTheme.TextMuted;
             hint.Margin = new Padding(12, 7, 3, 3);
 
             buttons.Controls.Add(addFileButton);
@@ -507,7 +507,7 @@ namespace FilePromptWin7
             inputListView.HideSelection = false;
             inputListView.MultiSelect = true;
             inputListView.AllowDrop = true;
-            inputListView.BackColor = Color.FromArgb(247, 249, 252);
+            inputListView.BackColor = UiTheme.InputBackground;
             inputListView.AccessibleName = "已添加内容";
             inputListView.Columns.Add("名称", 260);
             inputListView.Columns.Add("类型", 76);
@@ -568,7 +568,7 @@ namespace FilePromptWin7
             GroupBox group = new GroupBox();
             group.Text = "指令";
             group.Dock = DockStyle.Fill;
-            group.ForeColor = Color.FromArgb(205, 214, 226);
+            group.ForeColor = UiTheme.TextSecondary;
 
             promptTextBox = new RichTextBox();
             promptTextBox.Dock = DockStyle.Fill;
@@ -594,7 +594,7 @@ namespace FilePromptWin7
             GroupBox group = new GroupBox();
             group.Text = "模型输出";
             group.Dock = DockStyle.Fill;
-            group.ForeColor = Color.FromArgb(205, 214, 226);
+            group.ForeColor = UiTheme.TextSecondary;
 
             FlowLayoutPanel buttons = new FlowLayoutPanel();
             buttons.Dock = DockStyle.Top;
@@ -603,14 +603,14 @@ namespace FilePromptWin7
             buttons.WrapContents = false;
 
             generateButton = CreateButton("发送", 80);
-            generateButton.BackColor = Color.FromArgb(45, 121, 218);
+            generateButton.BackColor = UiTheme.Accent;
             generateButton.ForeColor = Color.White;
             generateButton.FlatStyle = FlatStyle.Flat;
             generateButton.FlatAppearance.BorderSize = 0;
             generateButton.FlatAppearance.MouseOverBackColor =
-                Color.FromArgb(54, 132, 230);
+                UiTheme.AccentHover;
             generateButton.FlatAppearance.MouseDownBackColor =
-                Color.FromArgb(35, 101, 188);
+                UiTheme.AccentPressed;
             generateButton.Click += delegate { StartGeneration(); };
 
             stopButton = CreateButton("停止", 64);
@@ -688,11 +688,11 @@ namespace FilePromptWin7
             StatusStrip strip = new StatusStrip();
             strip.Dock = DockStyle.Fill;
             strip.SizingGrip = false;
-            strip.BackColor = Color.FromArgb(31, 35, 42);
+            strip.BackColor = UiTheme.WindowBackground;
 
             statusLabel = new ToolStripStatusLabel();
             statusLabel.Text = "就绪";
-            statusLabel.ForeColor = Color.FromArgb(178, 190, 207);
+            statusLabel.ForeColor = UiTheme.TextSecondary;
             statusLabel.Spring = true;
             statusLabel.TextAlign = ContentAlignment.MiddleLeft;
 
@@ -722,7 +722,7 @@ namespace FilePromptWin7
             label.Text = text;
             label.AutoSize = true;
             label.Anchor = AnchorStyles.Left;
-            label.ForeColor = Color.FromArgb(205, 214, 226);
+            label.ForeColor = UiTheme.TextSecondary;
             return label;
         }
 
@@ -734,14 +734,14 @@ namespace FilePromptWin7
             button.Height = 27;
             button.Margin = new Padding(3);
             button.FlatStyle = FlatStyle.Flat;
-            button.FlatAppearance.BorderColor = Color.FromArgb(91, 101, 116);
+            button.FlatAppearance.BorderColor = UiTheme.BorderColor;
             button.FlatAppearance.BorderSize = 1;
             button.FlatAppearance.MouseOverBackColor =
-                Color.FromArgb(58, 65, 76);
+                UiTheme.ButtonHover;
             button.FlatAppearance.MouseDownBackColor =
-                Color.FromArgb(39, 44, 52);
-            button.BackColor = Color.FromArgb(47, 53, 63);
-            button.ForeColor = Color.FromArgb(226, 232, 240);
+                UiTheme.ButtonPressed;
+            button.BackColor = UiTheme.ButtonBackground;
+            button.ForeColor = UiTheme.ButtonText;
             button.UseVisualStyleBackColor = false;
             return button;
         }
@@ -837,14 +837,14 @@ namespace FilePromptWin7
             bool selected =
                 (args.State & DrawItemState.Selected) == DrawItemState.Selected;
             Color background = selected
-                ? Color.FromArgb(45, 74, 109)
+                ? UiTheme.SelectionBackground
                 : sessionListBox.BackColor;
             Color titleColor = selected
-                ? Color.White
-                : Color.FromArgb(226, 232, 240);
+                ? UiTheme.SelectionText
+                : UiTheme.ButtonText;
             Color metaColor = selected
-                ? Color.FromArgb(205, 220, 239)
-                : Color.FromArgb(143, 156, 174);
+                ? UiTheme.SelectionMuted
+                : UiTheme.TextMuted;
 
             using (SolidBrush brush = new SolidBrush(background))
             {
@@ -1105,10 +1105,10 @@ namespace FilePromptWin7
                     ? "模型"
                     : (message.Role == "system" ? "系统" : "你");
                 Color roleColor = message.Role == "assistant"
-                    ? Color.FromArgb(29, 105, 178)
+                    ? UiTheme.RoleAssistant
                     : (message.Role == "system"
-                        ? Color.FromArgb(120, 102, 160)
-                        : Color.FromArgb(54, 86, 120));
+                        ? UiTheme.RoleSystem
+                        : UiTheme.RoleUser);
                 AppendTranscriptMessage(
                     role,
                     FormatMessageForDisplay(message),
@@ -1127,7 +1127,7 @@ namespace FilePromptWin7
         private void AppendEmptyConversation()
         {
             outputTextBox.SelectionStart = 0;
-            outputTextBox.SelectionColor = Color.FromArgb(126, 137, 151);
+            outputTextBox.SelectionColor = UiTheme.Placeholder;
             using (Font emptyFont = new Font(
                 outputTextBox.Font,
                 FontStyle.Italic))
@@ -1173,7 +1173,7 @@ namespace FilePromptWin7
                 outputTextBox.AppendText("【" + role + "】\r\n");
             }
 
-            outputTextBox.SelectionColor = Color.FromArgb(32, 37, 43);
+            outputTextBox.SelectionColor = UiTheme.TextPrimary;
             outputTextBox.SelectionFont = outputTextBox.Font;
         }
 
@@ -2082,10 +2082,10 @@ namespace FilePromptWin7
             AppendTranscriptMessage(
                 "你",
                 visibleUserMessage,
-                Color.FromArgb(54, 86, 120));
+                UiTheme.RoleUser);
             AppendTranscriptHeader(
                 "模型",
-                Color.FromArgb(29, 105, 178));
+                UiTheme.RoleAssistant);
             streamedResponse = new StringBuilder();
             generationCancellation = new CancellationTokenSource();
             SetGeneratingState(true);
@@ -2315,8 +2315,8 @@ namespace FilePromptWin7
                     Math.Min(360, height));
                 dialog.Size = new Size(width, height);
                 dialog.Font = Font;
-                dialog.BackColor = Color.FromArgb(31, 35, 42);
-                dialog.ForeColor = Color.FromArgb(226, 232, 240);
+                dialog.BackColor = UiTheme.WindowBackground;
+                dialog.ForeColor = UiTheme.ButtonText;
                 dialog.AutoScaleMode = AutoScaleMode.None;
                 dialog.ShowInTaskbar = false;
                 dialog.MinimizeBox = false;
@@ -2335,7 +2335,7 @@ namespace FilePromptWin7
                 Label warning = new Label();
                 warning.Dock = DockStyle.Fill;
                 warning.TextAlign = ContentAlignment.MiddleLeft;
-                warning.ForeColor = Color.FromArgb(226, 232, 240);
+                warning.ForeColor = UiTheme.ButtonText;
                 warning.Text =
                     "本地 stdio MCP 会在工具调用确认之前启动，并以当前用户权限运行。" +
                     "请完整核对下面的命令；仅在信任配置时允许。";
@@ -2344,7 +2344,7 @@ namespace FilePromptWin7
                 Label detailsLabel = new Label();
                 detailsLabel.Dock = DockStyle.Fill;
                 detailsLabel.TextAlign = ContentAlignment.MiddleLeft;
-                detailsLabel.ForeColor = Color.FromArgb(174, 187, 204);
+                detailsLabel.ForeColor = UiTheme.TextSecondary;
                 detailsLabel.Text =
                     "即将启动 " + stdioServers.Count +
                     " 个服务（完整启动配置）";
@@ -2358,7 +2358,7 @@ namespace FilePromptWin7
                 detailsBox.ScrollBars = ScrollBars.Both;
                 detailsBox.MaxLength = int.MaxValue;
                 detailsBox.BackColor = Color.White;
-                detailsBox.ForeColor = Color.FromArgb(30, 35, 42);
+                detailsBox.ForeColor = UiTheme.TextPrimary;
                 detailsBox.Text = details;
                 detailsBox.AccessibleName = "本地 MCP 完整启动配置";
 
@@ -2368,7 +2368,7 @@ namespace FilePromptWin7
                 actions.WrapContents = false;
                 Button reject = CreateButton("拒绝", 88);
                 reject.DialogResult = DialogResult.No;
-                reject.BackColor = Color.FromArgb(45, 121, 218);
+                reject.BackColor = UiTheme.Accent;
                 reject.FlatAppearance.BorderSize = 0;
                 reject.AccessibleName = "拒绝启动本地 MCP 服务";
                 Button approve = CreateButton("允许本次启动", 120);
@@ -2623,8 +2623,8 @@ namespace FilePromptWin7
                 dialog.MinimumSize = new Size(620, 400);
                 dialog.Size = new Size(760, 540);
                 dialog.Font = Font;
-                dialog.BackColor = Color.FromArgb(31, 35, 42);
-                dialog.ForeColor = Color.FromArgb(226, 232, 240);
+                dialog.BackColor = UiTheme.WindowBackground;
+                dialog.ForeColor = UiTheme.ButtonText;
                 dialog.AutoScaleMode = AutoScaleMode.None;
                 dialog.ShowInTaskbar = false;
                 dialog.MinimizeBox = false;
@@ -2643,7 +2643,7 @@ namespace FilePromptWin7
                 identity.Dock = DockStyle.Fill;
                 identity.TextAlign = ContentAlignment.MiddleLeft;
                 identity.AutoEllipsis = true;
-                identity.ForeColor = Color.FromArgb(226, 232, 240);
+                identity.ForeColor = UiTheme.ButtonText;
                 identity.Text =
                     "服务：" + (tool.ServerName ?? string.Empty) +
                     "\r\n工具：" + (tool.ToolName ?? tool.PublicName);
@@ -2651,7 +2651,7 @@ namespace FilePromptWin7
                 Label argumentsLabel = new Label();
                 argumentsLabel.Dock = DockStyle.Fill;
                 argumentsLabel.TextAlign = ContentAlignment.MiddleLeft;
-                argumentsLabel.ForeColor = Color.FromArgb(174, 187, 204);
+                argumentsLabel.ForeColor = UiTheme.TextSecondary;
                 argumentsLabel.Text = "调用参数（完整内容）";
 
                 TextBox argumentsBox = new TextBox();
@@ -2662,7 +2662,7 @@ namespace FilePromptWin7
                 argumentsBox.WordWrap = false;
                 argumentsBox.ScrollBars = ScrollBars.Both;
                 argumentsBox.BackColor = Color.White;
-                argumentsBox.ForeColor = Color.FromArgb(30, 35, 42);
+                argumentsBox.ForeColor = UiTheme.TextPrimary;
                 argumentsBox.Text = arguments;
                 argumentsBox.AccessibleName = "MCP 工具完整调用参数";
 
@@ -2674,7 +2674,7 @@ namespace FilePromptWin7
                 reject.DialogResult = DialogResult.No;
                 Button approve = CreateButton("仅允许本次", 104);
                 approve.DialogResult = DialogResult.Yes;
-                approve.BackColor = Color.FromArgb(45, 121, 218);
+                approve.BackColor = UiTheme.Accent;
                 approve.FlatAppearance.BorderSize = 0;
                 actions.Controls.Add(reject);
                 actions.Controls.Add(approve);

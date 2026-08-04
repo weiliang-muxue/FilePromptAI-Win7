@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
@@ -55,8 +55,8 @@ namespace FilePromptWin7
                     MinimumSize.Height,
                     Math.Min(680, workingArea.Height - 32)));
             Font = new Font("Microsoft YaHei", 9F, FontStyle.Regular);
-            BackColor = Color.FromArgb(31, 35, 42);
-            ForeColor = Color.FromArgb(226, 232, 240);
+            BackColor = UiTheme.WindowBackground;
+            ForeColor = UiTheme.ButtonText;
             AutoScaleMode = AutoScaleMode.None;
             ShowInTaskbar = false;
             KeyPreview = true;
@@ -104,7 +104,7 @@ namespace FilePromptWin7
             dialogStatus = new Label();
             dialogStatus.Dock = DockStyle.Fill;
             dialogStatus.TextAlign = ContentAlignment.MiddleLeft;
-            dialogStatus.ForeColor = Color.FromArgb(164, 178, 196);
+            dialogStatus.ForeColor = UiTheme.TextMuted;
             dialogStatus.AutoEllipsis = true;
 
             FlowLayoutPanel actions = new FlowLayoutPanel();
@@ -113,7 +113,7 @@ namespace FilePromptWin7
             actions.WrapContents = false;
 
             okButton = CreateButton("保存", 86);
-            okButton.BackColor = Color.FromArgb(45, 121, 218);
+            okButton.BackColor = UiTheme.Accent;
             okButton.FlatAppearance.BorderSize = 0;
             okButton.Click += OnSaveAndClose;
             Button cancelButton = CreateButton("取消", 86);
@@ -219,7 +219,7 @@ namespace FilePromptWin7
             Panel scrollHost = new Panel();
             scrollHost.Dock = DockStyle.Fill;
             scrollHost.AutoScroll = true;
-            scrollHost.BackColor = Color.FromArgb(38, 43, 51);
+            scrollHost.BackColor = UiTheme.PanelBackground;
 
             TableLayoutPanel editor = new TableLayoutPanel();
             editor.Dock = DockStyle.Top;
@@ -684,8 +684,8 @@ namespace FilePromptWin7
         {
             dialogStatus.Text = value ?? string.Empty;
             dialogStatus.ForeColor = error
-                ? Color.FromArgb(238, 126, 126)
-                : Color.FromArgb(164, 178, 196);
+                ? UiTheme.Danger
+                : UiTheme.TextMuted;
         }
 
         private void ShowError(string message)
@@ -785,15 +785,15 @@ namespace FilePromptWin7
             box.Enabled = enabled;
             box.BackColor = enabled
                 ? Color.White
-                : Color.FromArgb(220, 224, 230);
+                : UiTheme.InputDisabledBackground;
         }
 
         private static TabPage CreateTabPage(string text)
         {
             TabPage page = new TabPage(text);
             page.Padding = new Padding(0);
-            page.BackColor = Color.FromArgb(38, 43, 51);
-            page.ForeColor = Color.FromArgb(226, 232, 240);
+            page.BackColor = UiTheme.PanelBackground;
+            page.ForeColor = UiTheme.ButtonText;
             return page;
         }
 
@@ -807,8 +807,8 @@ namespace FilePromptWin7
             split.Panel2MinSize = 450;
             split.SplitterDistance = 270;
             split.SplitterWidth = 5;
-            split.Panel1.BackColor = Color.FromArgb(27, 31, 38);
-            split.Panel2.BackColor = Color.FromArgb(38, 43, 51);
+            split.Panel1.BackColor = UiTheme.PanelAltBackground;
+            split.Panel2.BackColor = UiTheme.PanelBackground;
             return split;
         }
 
@@ -841,8 +841,8 @@ namespace FilePromptWin7
             list.CheckOnClick = true;
             list.IntegralHeight = false;
             list.BorderStyle = BorderStyle.FixedSingle;
-            list.BackColor = Color.FromArgb(247, 249, 252);
-            list.ForeColor = Color.FromArgb(30, 35, 42);
+            list.BackColor = UiTheme.InputBackground;
+            list.ForeColor = UiTheme.TextPrimary;
             list.AccessibleName = accessibleName;
             return list;
         }
@@ -857,7 +857,7 @@ namespace FilePromptWin7
                 ? ScrollBars.Vertical
                 : ScrollBars.None;
             box.BackColor = Color.White;
-            box.ForeColor = Color.FromArgb(30, 35, 42);
+            box.ForeColor = UiTheme.TextPrimary;
             box.BorderStyle = BorderStyle.FixedSingle;
             box.Margin = new Padding(3, 3, 3, 5);
             return box;
@@ -869,7 +869,7 @@ namespace FilePromptWin7
             label.Text = text;
             label.Dock = DockStyle.Fill;
             label.TextAlign = ContentAlignment.MiddleLeft;
-            label.ForeColor = Color.FromArgb(201, 211, 225);
+            label.ForeColor = UiTheme.TextSecondary;
             label.AutoEllipsis = true;
             return label;
         }
@@ -882,13 +882,13 @@ namespace FilePromptWin7
             button.Height = 28;
             button.Margin = new Padding(3);
             button.FlatStyle = FlatStyle.Flat;
-            button.FlatAppearance.BorderColor = Color.FromArgb(91, 101, 116);
+            button.FlatAppearance.BorderColor = UiTheme.BorderColor;
             button.FlatAppearance.MouseOverBackColor =
-                Color.FromArgb(58, 65, 76);
+                UiTheme.ButtonHover;
             button.FlatAppearance.MouseDownBackColor =
-                Color.FromArgb(39, 44, 52);
-            button.BackColor = Color.FromArgb(47, 53, 63);
-            button.ForeColor = Color.FromArgb(226, 232, 240);
+                UiTheme.ButtonPressed;
+            button.BackColor = UiTheme.ButtonBackground;
+            button.ForeColor = UiTheme.ButtonText;
             button.UseVisualStyleBackColor = false;
             return button;
         }
