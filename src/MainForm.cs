@@ -68,6 +68,8 @@ namespace FilePromptWin7
         private bool isAddingFiles;
         private bool isLoadingSession;
         private bool settingsExpanded;
+        private string sendShortcutMode;
+        private GroupBox promptGroup;
 
         private sealed class SessionDraft
         {
@@ -565,10 +567,10 @@ namespace FilePromptWin7
 
         private Control CreatePromptPanel()
         {
-            GroupBox group = new GroupBox();
-            group.Text = "指令  ·  回车发送，Shift+Enter 换行";
-            group.Dock = DockStyle.Fill;
-            group.ForeColor = UiTheme.TextSecondary;
+            promptGroup = new GroupBox();
+            promptGroup.Text = "指令";
+            promptGroup.Dock = DockStyle.Fill;
+            promptGroup.ForeColor = UiTheme.TextSecondary;
 
             promptTextBox = new RichTextBox();
             promptTextBox.Dock = DockStyle.Fill;
@@ -579,14 +581,15 @@ namespace FilePromptWin7
             promptTextBox.AccessibleName = "文字描述或指令";
             promptTextBox.KeyDown += delegate(object sender, KeyEventArgs args)
             {
-                if (args.KeyCode == Keys.Enter && !args.Shift)
+                if (args.KeyCode == Keys.Enter &&
+                    IsEnterSendShortcut(args.Control, args.Shift))
                 {
                     args.SuppressKeyPress = true;
                     StartGeneration();
                 }
             };
-            group.Controls.Add(promptTextBox);
-            return group;
+            promptGroup.Controls.Add(promptTextBox);
+            return promptGroup;
         }
 
         private Control CreateOutputPanel()
@@ -612,6 +615,8 @@ namespace FilePromptWin7
             generateButton.FlatAppearance.MouseDownBackColor =
                 UiTheme.AccentPressed;
             generateButton.Click += delegate { StartGeneration(); };
+            generateButton.ContextMenuStrip = CreateSendShortcutMenu();
+            generateButton.AccessibleName = "发送（右键可配置快捷键）";
 
             stopButton = CreateButton("停止", 64);
             stopButton.Enabled = false;
@@ -1325,6 +1330,11 @@ namespace FilePromptWin7
             endpointTextBox.Text = settings.EndpointUrl;
             apiKeyTextBox.Text = settings.ApiKey;
             modelTextBox.Text = settings.ModelName;
+            sendShortcutMode = IsValidSendShortcutMode(settings.SendShortcut)
+                ? settings.SendShortcut
+                : "Both";
+            UpdatePromptHint();
+            UpdateSendShortcutMenuChecks();
             connectionStatusLabel.Text = BuildConnectionStatus();
             testConnectionButton.Enabled = HasCompleteConnectionSettings();
             SetSettingsExpanded(!HasCompleteConnectionSettings());
@@ -1338,12 +1348,148 @@ namespace FilePromptWin7
                 settings.EndpointUrl = endpointTextBox.Text.Trim();
                 settings.ApiKey = apiKeyTextBox.Text.Trim();
                 settings.ModelName = modelTextBox.Text.Trim();
+                settings.SendShortcut = sendShortcutMode ?? "Both";
                 settings.Save();
             }
             catch (Exception exception)
             {
                 SetStatus("配置未能保存：" + exception.Message);
             }
+        }
+
+        private static bool IsValidSendShortcutMode(string mode)
+        {
+            return mode == "Enter" ||
+                mode == "CtrlEnter" ||
+                mode == "Both";
+        }
+
+        private bool IsEnterSendShortcut(bool control, bool shift)
+        {
+            if (shift)
+            {
+                return false;
+            }
+
+            if (sendShortcutMode == "Enter")
+            {
+                return !control;
+            }
+
+            if (sendShortcutMode == "CtrlEnter")
+            {
+                return control;
+            }
+
+            return true;
+        }
+
+        private static string SendShortcutDisplay(string mode)
+        {
+            if (mode == "Enter")
+            {
+                return "回车（Enter）";
+            }
+
+            if (mode == "CtrlEnter")
+            {
+                return "Ctrl+Enter";
+            }
+
+            return "回车 与 Ctrl+Enter";
+        }
+
+        private void SetSendShortcutMode(string mode)
+        {
+            if (!IsValidSendShortcutMode(mode))
+            {
+                mode = "Both";
+            }
+
+            sendShortcutMode = mode;
+            UpdatePromptHint();
+            UpdateSendShortcutMenuChecks();
+            SaveSettings();
+            SetStatus("发送快捷键已设为：" + SendShortcutDisplay(mode));
+        }
+
+        private void UpdatePromptHint()
+        {
+            if (promptGroup == null)
+            {
+                return;
+            }
+
+            if (sendShortcutMode == "Enter")
+            {
+                promptGroup.Text = "指令  ·  回车发送 · Shift+Enter 换行";
+            }
+            else if (sendShortcutMode == "CtrlEnter")
+            {
+                promptGroup.Text = "指令  ·  Ctrl+Enter 发送 · Enter 换行";
+            }
+            else
+            {
+                promptGroup.Text =
+                    "指令  ·  回车 / Ctrl+Enter 发送 · Shift+Enter 换行";
+            }
+        }
+
+        private void UpdateSendShortcutMenuChecks()
+        {
+            ContextMenuStrip menu = generateButton == null
+                ? null
+                : generateButton.ContextMenuStrip;
+            if (menu == null)
+            {
+                return;
+            }
+
+            foreach (ToolStripItem item in menu.Items)
+            {
+                ToolStripMenuItem menuItem = item as ToolStripMenuItem;
+                if (menuItem != null && menuItem.Tag != null)
+                {
+                    menuItem.Checked =
+                        IsValidSendShortcutMode(menuItem.Tag as string) &&
+                        (string)menuItem.Tag == sendShortcutMode;
+                }
+            }
+        }
+
+        private ContextMenuStrip CreateSendShortcutMenu()
+        {
+            ContextMenuStrip menu = new ContextMenuStrip();
+            ToolStripMenuItem enterItem =
+                new ToolStripMenuItem("回车（Enter）发送");
+            enterItem.Tag = "Enter";
+            enterItem.Click += delegate
+            {
+                SetSendShortcutMode("Enter");
+            };
+            ToolStripMenuItem ctrlEnterItem =
+                new ToolStripMenuItem("Ctrl+Enter 发送");
+            ctrlEnterItem.Tag = "CtrlEnter";
+            ctrlEnterItem.Click += delegate
+            {
+                SetSendShortcutMode("CtrlEnter");
+            };
+            ToolStripMenuItem bothItem =
+                new ToolStripMenuItem("回车 与 Ctrl+Enter 都发送");
+            bothItem.Tag = "Both";
+            bothItem.Click += delegate
+            {
+                SetSendShortcutMode("Both");
+            };
+            menu.Items.Add(enterItem);
+            menu.Items.Add(ctrlEnterItem);
+            menu.Items.Add(bothItem);
+            menu.Items.Add(new ToolStripSeparator());
+            ToolStripMenuItem hint =
+                new ToolStripMenuItem("Shift+Enter 换行 · 点击按钮始终可发送");
+            hint.Enabled = false;
+            menu.Items.Add(hint);
+            return menu;
         }
 
         private void OnExtensionsClick(object sender, EventArgs args)

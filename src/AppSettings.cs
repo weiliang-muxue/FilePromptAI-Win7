@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -14,6 +14,7 @@ namespace FilePromptWin7
         public string EndpointUrl { get; set; }
         public string ApiKey { get; set; }
         public string ModelName { get; set; }
+        public string SendShortcut { get; set; }
 
         public static string SettingsPath
         {
@@ -29,6 +30,7 @@ namespace FilePromptWin7
             settings.EndpointUrl = string.Empty;
             settings.ApiKey = string.Empty;
             settings.ModelName = string.Empty;
+            settings.SendShortcut = "Both";
 
             try
             {
@@ -48,6 +50,7 @@ namespace FilePromptWin7
 
                 settings.EndpointUrl = GetValue(root, "EndpointUrl");
                 settings.ModelName = GetValue(root, "ModelName");
+                settings.SendShortcut = GetValue(root, "SendShortcut");
                 string protectedKey = GetValue(root, "ProtectedApiKey");
                 if (!string.IsNullOrWhiteSpace(protectedKey))
                 {
@@ -76,6 +79,7 @@ namespace FilePromptWin7
                     new XAttribute("version", "1"),
                     new XElement("EndpointUrl", EndpointUrl ?? string.Empty),
                     new XElement("ModelName", ModelName ?? string.Empty),
+                    new XElement("SendShortcut", SendShortcut ?? "Both"),
                     new XElement("ProtectedApiKey", Protect(ApiKey ?? string.Empty))));
 
             AtomicFile.WriteAllText(

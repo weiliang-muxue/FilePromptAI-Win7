@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -39,6 +39,7 @@ internal static class UiStateSmokeTest
             form = Activator.CreateInstance(formType, true);
 
             TestCtrlNBusyGuard(formType, form);
+            TestSendShortcutConfig(formType, form);
             TestDragBusyGuard(formType, form, dataRoot);
             TestSearchCharacterBudget(application, formType, form);
             TestExtensionsDialog(application, formType, form);
@@ -80,6 +81,64 @@ internal static class UiStateSmokeTest
                 // Temporary state can be removed on the next run.
             }
         }
+    }
+
+    private static void TestSendShortcutConfig(
+        Type formType,
+        object form)
+    {
+        object generateButton = GetField(formType, form, "generateButton");
+        ContextMenuStrip menu =
+            ((Button)generateButton).ContextMenuStrip;
+        AssertTrue(menu != null, "Send button shortcut menu exists");
+        AssertTrue(menu.Items.Count >= 4, "Send button shortcut menu has options");
+
+        int checkedCount = 0;
+        foreach (ToolStripItem item in menu.Items)
+        {
+            ToolStripMenuItem menuItem = item as ToolStripMenuItem;
+            if (menuItem != null && menuItem.Tag != null)
+            {
+                checkedCount += menuItem.Checked ? 1 : 0;
+            }
+        }
+        AssertTrue(
+            checkedCount == 1,
+            "Send button shortcut menu has one checked option");
+
+        InvokePrivate(formType, form, "SetSendShortcutMode", "CtrlEnter");
+        AssertTrue(
+            !(bool)InvokePrivate(
+                formType, form, "IsEnterSendShortcut", false, false),
+            "CtrlEnter mode: plain Enter does not send");
+        AssertTrue(
+            (bool)InvokePrivate(
+                formType, form, "IsEnterSendShortcut", true, false),
+            "CtrlEnter mode: Ctrl+Enter sends");
+
+        InvokePrivate(formType, form, "SetSendShortcutMode", "Enter");
+        AssertTrue(
+            (bool)InvokePrivate(
+                formType, form, "IsEnterSendShortcut", false, false),
+            "Enter mode: plain Enter sends");
+        AssertTrue(
+            !(bool)InvokePrivate(
+                formType, form, "IsEnterSendShortcut", true, false),
+            "Enter mode: Ctrl+Enter does not send");
+
+        InvokePrivate(formType, form, "SetSendShortcutMode", "Both");
+        AssertTrue(
+            (bool)InvokePrivate(
+                formType, form, "IsEnterSendShortcut", false, false),
+            "Both mode: plain Enter sends");
+        AssertTrue(
+            (bool)InvokePrivate(
+                formType, form, "IsEnterSendShortcut", true, false),
+            "Both mode: Ctrl+Enter sends");
+        AssertTrue(
+            !(bool)InvokePrivate(
+                formType, form, "IsEnterSendShortcut", false, true),
+            "Shift+Enter inserts newline");
     }
 
     private static void TestCtrlNBusyGuard(Type formType, object form)
