@@ -16,7 +16,6 @@ if ([string]::IsNullOrWhiteSpace($Version) -or
 }
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$prepareLibrariesScript = Join-Path $projectRoot 'prepare-libs.ps1'
 $appBuildScript = Join-Path $projectRoot 'build.ps1'
 $appDistribution = Join-Path $projectRoot 'dist'
 $libraryRoot = Join-Path $projectRoot 'lib'
@@ -89,7 +88,6 @@ function Copy-RequiredFile {
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
 
-Assert-FileExists -Path $prepareLibrariesScript -Description 'library preparation script'
 Assert-FileExists -Path $appBuildScript -Description 'application build script'
 Assert-FileExists -Path $appIcon -Description 'application icon'
 Assert-FileExists -Path (Join-Path $uninstallerRoot 'Program.cs') -Description 'uninstaller source'
@@ -102,12 +100,7 @@ Assert-FileExists -Path (Join-Path $referenceRoot 'System.Drawing.dll') -Descrip
 Assert-FileExists -Path (Join-Path $referenceRoot 'System.Windows.Forms.dll') -Description '.NET 2.0 Windows Forms reference'
 Assert-OfflineRuntime -Path $runtimeSource
 
-# Both scripts consume only the source tree and the already populated local packages directory.
-& powershell -NoProfile -ExecutionPolicy Bypass -File $prepareLibrariesScript
-if ($LASTEXITCODE -ne 0) {
-    throw 'Preparing the local application libraries failed.'
-}
-
+# build.ps1 prepares and verifies the approved local DLL set before compiling.
 & powershell -NoProfile -ExecutionPolicy Bypass -File $appBuildScript
 if ($LASTEXITCODE -ne 0) {
     throw 'The FilePrompt AI application build failed.'

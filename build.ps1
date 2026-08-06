@@ -9,6 +9,7 @@ $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sourceRoot = Join-Path $projectRoot 'src'
 $distributionRoot = Join-Path $projectRoot 'dist'
 $libraryRoot = Join-Path $projectRoot 'lib'
+$prepareLibrariesScript = Join-Path $projectRoot 'prepare-libs.ps1'
 $frameworkRoot = 'C:\Windows\Microsoft.NET\Framework\v4.0.30319'
 $compiler = Join-Path $frameworkRoot 'csc.exe'
 $outputExe = Join-Path $distributionRoot 'FilePromptAI.exe'
@@ -16,6 +17,17 @@ $iconPath = Join-Path $projectRoot 'assets\FilePromptAI.ico'
 
 if (-not (Test-Path -LiteralPath $compiler)) {
     throw '.NET Framework C# compiler was not found.'
+}
+if (-not (Test-Path -LiteralPath $prepareLibrariesScript -PathType Leaf)) {
+    throw "Dependency preparation script was not found: $prepareLibrariesScript"
+}
+
+# Rebuild the approved local DLL set before every application build. This is
+# intentionally offline: prepare-libs.ps1 only reads the checked local package
+# cache and fails with a clear message when that cache is incomplete.
+& powershell -NoProfile -ExecutionPolicy Bypass -File $prepareLibrariesScript
+if ($LASTEXITCODE -ne 0) {
+    throw "Dependency preparation failed with exit code $LASTEXITCODE."
 }
 
 if ((Split-Path -Leaf $distributionRoot) -ne 'dist' -or
