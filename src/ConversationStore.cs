@@ -10,14 +10,14 @@ using System.Text;
 using System.Xml;
 using System.Xml.Linq;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal sealed class ConversationStore
     {
         private const string StoreRootName = "ConversationStore";
         private const string StoreVersion = "1";
         private const string BackupRootName =
-            "FilePromptConversationBackup";
+            "FilePromptAIConversationBackup";
         private const string BackupVersion = "1";
         private const long MaximumConversationBytes = 128L * 1024L * 1024L;
         private const int MaximumBackupSessions = 10000;
@@ -192,7 +192,7 @@ namespace FilePromptWin7
             if (root == null || root.Name != StoreRootName)
             {
                 throw new InvalidDataException(
-                    "This is not a FilePrompt conversation store.");
+                    "This is not a FilePrompt AI conversation store.");
             }
 
             ValidateAttributes(root, "version", "currentSessionId");
@@ -787,7 +787,7 @@ namespace FilePromptWin7
             if (root == null || root.Name != BackupRootName)
             {
                 throw new InvalidDataException(
-                    "This is not a FilePrompt conversation backup.");
+                    "This is not a FilePrompt AI conversation backup.");
             }
 
             ValidateAttributes(root, "version", "exportedAt");

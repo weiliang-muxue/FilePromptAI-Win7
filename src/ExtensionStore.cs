@@ -8,7 +8,7 @@ using System.Web.Script.Serialization;
 using System.Xml;
 using System.Xml.Linq;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal sealed class ExtensionStore
     {
@@ -20,7 +20,7 @@ namespace FilePromptWin7
         private static readonly UTF8Encoding SettingsEncoding =
             new UTF8Encoding(true);
         private static readonly byte[] Entropy = Encoding.UTF8.GetBytes(
-            "FilePromptWin7.ExtensionSettings.v1");
+            "FilePromptAIWin7.ExtensionSettings.v1");
 
         private readonly JavaScriptSerializer json;
 
@@ -132,7 +132,7 @@ namespace FilePromptWin7
 
             XDocument document = new XDocument(
                 new XElement(
-                    "FilePromptExtensions",
+                    "FilePromptAIExtensions",
                     new XAttribute("version", "1"),
                     skills,
                     servers));
@@ -207,7 +207,7 @@ namespace FilePromptWin7
         private ExtensionSettings ReadSettings(XDocument document)
         {
             XElement root = document.Root;
-            if (root == null || root.Name != "FilePromptExtensions" ||
+            if (root == null || root.Name != "FilePromptAIExtensions" ||
                 (string)root.Attribute("version") != "1")
             {
                 throw new InvalidDataException("扩展配置根节点或版本无效。");

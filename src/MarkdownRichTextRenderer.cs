@@ -4,7 +4,7 @@ using System.Drawing;
 using System.Text;
 using System.Windows.Forms;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal static class MarkdownRichTextRenderer
     {

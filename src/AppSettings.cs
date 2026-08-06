@@ -4,12 +4,12 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Xml.Linq;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal sealed class AppSettings
     {
         private static readonly byte[] Entropy =
-            Encoding.UTF8.GetBytes("FilePromptWin7.Settings.v1");
+            Encoding.UTF8.GetBytes("FilePromptAIWin7.Settings.v1");
 
         public string EndpointUrl { get; set; }
         public string ApiKey { get; set; }
@@ -42,7 +42,7 @@ namespace FilePromptWin7
                 XDocument document = XDocument.Load(SettingsPath);
                 XElement root = document.Root;
                 if (root == null ||
-                    root.Name != "FilePromptSettings" ||
+                    root.Name != "FilePromptAISettings" ||
                     (string)root.Attribute("version") != "1")
                 {
                     return settings;
@@ -75,7 +75,7 @@ namespace FilePromptWin7
 
             XDocument document = new XDocument(
                 new XElement(
-                    "FilePromptSettings",
+                    "FilePromptAISettings",
                     new XAttribute("version", "1"),
                     new XElement("EndpointUrl", EndpointUrl ?? string.Empty),
                     new XElement("ModelName", ModelName ?? string.Empty),

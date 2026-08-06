@@ -9,7 +9,7 @@ internal static class ExtractorSmokeTest
         if (args.Length < 2)
         {
             Console.Error.WriteLine(
-                "Usage: ExtractorSmokeTest <FilePrompt.exe> <files...>");
+                "Usage: ExtractorSmokeTest <FilePromptAI.exe> <files...>");
             return 2;
         }
 
@@ -44,7 +44,7 @@ internal static class ExtractorSmokeTest
 
         Assembly application = Assembly.LoadFrom(applicationPath);
         Type extractorType = application.GetType(
-            "FilePromptWin7.FileContentExtractor",
+            "FilePromptAIWin7.FileContentExtractor",
             true);
         object extractor = Activator.CreateInstance(extractorType, true);
         MethodInfo extractFile = extractorType.GetMethod(

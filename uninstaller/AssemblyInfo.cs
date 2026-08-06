@@ -1,8 +1,8 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-[assembly: AssemblyTitle("FilePrompt AI Offline Launcher")]
-[assembly: AssemblyDescription("Offline .NET Framework 4.8 launcher for FilePrompt AI")]
+[assembly: AssemblyTitle("FilePrompt AI Uninstaller")]
+[assembly: AssemblyDescription("Safe offline uninstaller for FilePrompt AI")]
 [assembly: AssemblyCompany("FilePrompt AI")]
 [assembly: AssemblyProduct("FilePrompt AI")]
 [assembly: AssemblyCopyright("Copyright (c) 2026")]

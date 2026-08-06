@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 using System.Xml.Linq;
-using FilePromptWin7;
+using FilePromptAIWin7;
 
 internal static class ConversationStoreSmokeTest
 {

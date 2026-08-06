@@ -4,12 +4,12 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal static class Program
     {
         private const string InstanceMutexName =
-            @"Local\FilePromptWin7.Singleton.77e99c24-2d55-4fa0-9a90-2b498733335a";
+            @"Local\FilePromptAIWin7.Singleton.77e99c24-2d55-4fa0-9a90-2b498733335a";
 
         [STAThread]
         private static void Main()
@@ -50,8 +50,8 @@ namespace FilePromptWin7
                     else
                     {
                         MessageBox.Show(
-                            "FilePrompt 已经在运行。请切换到现有窗口继续使用。",
-                            "FilePrompt",
+                            "FilePrompt AI 已经在运行。请切换到现有窗口继续使用。",
+                            "FilePrompt AI",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Information);
                     }
@@ -78,7 +78,7 @@ namespace FilePromptWin7
             string message = exception == null ? "发生未知错误。" : exception.Message;
             MessageBox.Show(
                 "程序遇到错误：\r\n\r\n" + message,
-                "FilePrompt",
+                "FilePrompt AI",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }

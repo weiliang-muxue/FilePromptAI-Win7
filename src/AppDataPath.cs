@@ -1,11 +1,11 @@
 using System;
 using System.IO;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal static class AppDataPath
     {
-        private const string OverrideVariable = "FILEPROMPT_DATA_ROOT";
+        private const string OverrideVariable = "FILEPROMPTAI_DATA_ROOT";
 
         public static string Root
         {
@@ -20,7 +20,7 @@ namespace FilePromptWin7
 
                 string local = Environment.GetFolderPath(
                     Environment.SpecialFolder.LocalApplicationData);
-                return Path.Combine(local, "FilePromptWin7");
+                return Path.Combine(local, "FilePromptAI-Win7");
             }
         }
     }

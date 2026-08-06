@@ -4,7 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Text;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal static class DocxExporter
     {
@@ -413,8 +413,8 @@ namespace FilePromptWin7
                 "xmlns:dcterms=\"http://purl.org/dc/terms/\" " +
                 "xmlns:dcmitype=\"http://purl.org/dc/dcmitype/\" " +
                 "xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">" +
-                "<dc:title>FilePrompt conversation</dc:title>" +
-                "<dc:creator>FilePrompt</dc:creator>" +
+                "<dc:title>FilePrompt AI conversation</dc:title>" +
+                "<dc:creator>FilePrompt AI</dc:creator>" +
                 "<dcterms:created xsi:type=\"dcterms:W3CDTF\">" +
                 now + "</dcterms:created>" +
                 "<dcterms:modified xsi:type=\"dcterms:W3CDTF\">" +

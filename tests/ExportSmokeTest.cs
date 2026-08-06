@@ -5,7 +5,7 @@ using System.IO.Compression;
 using System.Text;
 using System.Xml;
 
-using FilePromptWin7;
+using FilePromptAIWin7;
 
 internal static class ExportSmokeTest
 {

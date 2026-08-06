@@ -7,7 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal sealed class ExtensionsDialog : Form
     {

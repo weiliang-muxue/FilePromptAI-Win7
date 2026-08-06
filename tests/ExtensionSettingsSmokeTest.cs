@@ -4,7 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal static class ExtensionSettingsSmokeTest
     {
@@ -12,7 +12,7 @@ namespace FilePromptWin7
         {
             string root = Path.Combine(
                 Path.GetTempPath(),
-                "FilePromptExtensions-" + Guid.NewGuid().ToString("N"));
+                "FilePromptAIExtensions-" + Guid.NewGuid().ToString("N"));
             try
             {
                 Directory.CreateDirectory(root);

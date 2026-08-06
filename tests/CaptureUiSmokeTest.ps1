@@ -9,13 +9,13 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
 $projectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$application = Join-Path $projectRoot 'dist\FilePrompt.exe'
+$application = Join-Path $projectRoot 'dist\FilePromptAI.exe'
 $artifactRoot = Join-Path $projectRoot 'tests\build-artifacts'
 $profileRoot = Join-Path $artifactRoot ('ui-profile-' + $Mode.ToLowerInvariant())
-$applicationData = Join-Path $profileRoot 'FilePromptWin7'
+$applicationData = Join-Path $profileRoot 'FilePromptAI-Win7'
 $sizeSuffix = if ($MinimumWindow) { '-minimum' } else { '' }
 $outputPath = Join-Path $artifactRoot (
-    'FilePrompt-ui-v1.6-' + $Mode.ToLowerInvariant() + $sizeSuffix + '.png'
+    'FilePromptAI-ui-v1.7-' + $Mode.ToLowerInvariant() + $sizeSuffix + '.png'
 )
 
 if (-not (Test-Path -LiteralPath $artifactRoot)) {
@@ -30,7 +30,7 @@ New-Item -ItemType Directory -Path $applicationData -Force | Out-Null
 
 if ($Mode -eq 'Conversation') {
     Add-Type -AssemblyName System.Security
-    $entropy = [System.Text.Encoding]::UTF8.GetBytes('FilePromptWin7.Settings.v1')
+    $entropy = [System.Text.Encoding]::UTF8.GetBytes('FilePromptAIWin7.Settings.v1')
     $clearKey = [System.Text.Encoding]::UTF8.GetBytes('ui-smoke-key')
     $protectedKey = [System.Security.Cryptography.ProtectedData]::Protect(
         $clearKey,
@@ -40,11 +40,11 @@ if ($Mode -eq 'Conversation') {
     $encodedKey = [Convert]::ToBase64String($protectedKey)
     $settings = @"
 <?xml version="1.0" encoding="utf-8"?>
-<FilePromptSettings version="1">
+<FilePromptAISettings version="1">
   <EndpointUrl>http://127.0.0.1:19999/v1/chat/completions</EndpointUrl>
   <ModelName>internal-test-model</ModelName>
   <ProtectedApiKey>$encodedKey</ProtectedApiKey>
-</FilePromptSettings>
+</FilePromptAISettings>
 "@
     [IO.File]::WriteAllText(
         (Join-Path $applicationData 'settings.xml'),
@@ -94,7 +94,7 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 
-public static class FilePromptCaptureNative
+public static class FilePromptAICaptureNative
 {
     public delegate bool EnumChildCallback(IntPtr handle, IntPtr parameter);
 
@@ -187,13 +187,13 @@ $startInfo = New-Object Diagnostics.ProcessStartInfo
 $startInfo.FileName = $application
 $startInfo.WorkingDirectory = Split-Path -Parent $application
 $startInfo.UseShellExecute = $false
-$previousDataRoot = $env:FILEPROMPT_DATA_ROOT
+$previousDataRoot = $env:FILEPROMPTAI_DATA_ROOT
 try {
-    $env:FILEPROMPT_DATA_ROOT = $applicationData
+    $env:FILEPROMPTAI_DATA_ROOT = $applicationData
     $process = [Diagnostics.Process]::Start($startInfo)
 }
 finally {
-    $env:FILEPROMPT_DATA_ROOT = $previousDataRoot
+    $env:FILEPROMPTAI_DATA_ROOT = $previousDataRoot
 }
 
 try {
@@ -206,11 +206,11 @@ try {
         [DateTime]::UtcNow -lt $deadline)
 
     if ($process.MainWindowHandle -eq [IntPtr]::Zero) {
-        throw 'FilePrompt main window was not created.'
+        throw 'FilePrompt AI main window was not created.'
     }
 
     if ($MinimumWindow) {
-        if (-not [FilePromptCaptureNative]::SetWindowPos(
+        if (-not [FilePromptAICaptureNative]::SetWindowPos(
             $process.MainWindowHandle,
             [IntPtr]::Zero,
             40,
@@ -219,23 +219,23 @@ try {
             520,
             0x0040
         )) {
-            throw 'Could not resize FilePrompt to its minimum window size.'
+            throw 'Could not resize FilePrompt AI to its minimum window size.'
         }
 
         Start-Sleep -Milliseconds 300
     }
 
-    $null = [FilePromptCaptureNative]::SetForegroundWindow(
+    $null = [FilePromptAICaptureNative]::SetForegroundWindow(
         $process.MainWindowHandle
     )
     Start-Sleep -Milliseconds 500
 
-    $rect = New-Object FilePromptCaptureNative+RECT
-    if (-not [FilePromptCaptureNative]::GetWindowRect(
+    $rect = New-Object FilePromptAICaptureNative+RECT
+    if (-not [FilePromptAICaptureNative]::GetWindowRect(
         $process.MainWindowHandle,
         [ref]$rect
     )) {
-        throw 'Could not read FilePrompt window bounds.'
+        throw 'Could not read FilePrompt AI window bounds.'
     }
 
     $width = $rect.Right - $rect.Left
@@ -246,12 +246,12 @@ try {
     try {
         $deviceContext = $graphics.GetHdc()
         try {
-            if (-not [FilePromptCaptureNative]::PrintWindow(
+            if (-not [FilePromptAICaptureNative]::PrintWindow(
                 $process.MainWindowHandle,
                 $deviceContext,
                 0
             )) {
-                throw 'PrintWindow could not capture FilePrompt.'
+                throw 'PrintWindow could not capture FilePrompt AI.'
             }
         }
         finally {
@@ -298,7 +298,7 @@ try {
 
     $dpi = 0
     try {
-        $dpi = [FilePromptCaptureNative]::GetDpiForWindow(
+        $dpi = [FilePromptAICaptureNative]::GetDpiForWindow(
             $process.MainWindowHandle
         )
     }
@@ -306,7 +306,7 @@ try {
         $dpi = 96
     }
 
-    $listView = [FilePromptCaptureNative]::DescribeListView(
+    $listView = [FilePromptAICaptureNative]::DescribeListView(
         $process.MainWindowHandle
     )
     Write-Host "PASS | ui capture | mode=$Mode | ${width}x${height} | dpi=$dpi | list=$listView | $outputPath | physical125=$physicalPath"

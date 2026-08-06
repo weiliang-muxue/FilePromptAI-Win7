@@ -11,20 +11,20 @@ internal static class ExtractorHardeningSmokeTest
     {
         string temporaryRoot = Path.Combine(
             Path.GetTempPath(),
-            "FilePromptExtractorHardening-" + Guid.NewGuid().ToString("N"));
+            "FilePromptAIExtractorHardening-" + Guid.NewGuid().ToString("N"));
         try
         {
             if (args.Length != 1)
             {
                 throw new ArgumentException(
-                    "Usage: ExtractorHardeningSmokeTest <FilePrompt.exe>");
+                    "Usage: ExtractorHardeningSmokeTest <FilePromptAI.exe>");
             }
 
             string applicationPath = Path.GetFullPath(args[0]);
             ConfigureAssemblyResolution(applicationPath);
             Assembly application = Assembly.LoadFrom(applicationPath);
             Type extractorType = application.GetType(
-                "FilePromptWin7.FileContentExtractor",
+                "FilePromptAIWin7.FileContentExtractor",
                 true);
             object extractor = Activator.CreateInstance(extractorType, true);
             MethodInfo extractFile = extractorType.GetMethod(

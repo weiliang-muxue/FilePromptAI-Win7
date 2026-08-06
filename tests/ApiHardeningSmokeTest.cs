@@ -17,10 +17,10 @@ internal static class ApiHardeningSmokeTest
             string applicationPath = ResolveApplicationPath(args);
             Assembly application = Assembly.LoadFrom(applicationPath);
             Type clientType = application.GetType(
-                "FilePromptWin7.ModelClient",
+                "FilePromptAIWin7.ModelClient",
                 true);
             Type requestType = application.GetType(
-                "FilePromptWin7.ModelRequest",
+                "FilePromptAIWin7.ModelRequest",
                 true);
 
             TestRedirectIsRejected(clientType, requestType);
@@ -99,7 +99,7 @@ internal static class ApiHardeningSmokeTest
             AssertTrue(!followedRedirect, "Redirect target was not contacted");
             AssertTrue(
                 failure != null &&
-                failure.GetType().FullName == "FilePromptWin7.ModelCallException",
+                failure.GetType().FullName == "FilePromptAIWin7.ModelCallException",
                 "Redirect returned ModelCallException");
             AssertContains(
                 failure == null ? string.Empty : failure.Message,
@@ -217,7 +217,7 @@ internal static class ApiHardeningSmokeTest
                 TimeSpan.FromSeconds(5));
             AssertTrue(
                 failure != null &&
-                failure.GetType().FullName == "FilePromptWin7.ModelCallException",
+                failure.GetType().FullName == "FilePromptAIWin7.ModelCallException",
                 "Malformed stream returned ModelCallException");
             AssertContains(
                 failure == null ? string.Empty : failure.Message,
@@ -258,7 +258,7 @@ internal static class ApiHardeningSmokeTest
             AssertTrue(
                 failure != null &&
                 failure.GetType().FullName ==
-                    "FilePromptWin7.ModelCallException",
+                    "FilePromptAIWin7.ModelCallException",
                 "Oversized response returned ModelCallException");
             AssertContains(
                 failure == null ? string.Empty : failure.Message,
@@ -489,14 +489,14 @@ internal static class ApiHardeningSmokeTest
         {
             candidate = Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory,
-                "FilePrompt.exe");
+                "FilePromptAI.exe");
         }
 
         candidate = Path.GetFullPath(candidate);
         if (!File.Exists(candidate))
         {
             throw new FileNotFoundException(
-                "FilePrompt.exe was not found.",
+                "FilePromptAI.exe was not found.",
                 candidate);
         }
 

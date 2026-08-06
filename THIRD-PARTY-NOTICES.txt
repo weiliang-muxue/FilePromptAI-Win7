@@ -1,4 +1,4 @@
-FilePrompt third-party notices
+FilePrompt AI third-party notices
 ================================
 
 PdfPig

@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal enum InputKind
     {

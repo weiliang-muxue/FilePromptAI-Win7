@@ -1,6 +1,6 @@
 ﻿using System.Drawing;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal static class UiTheme
     {
@@ -13,7 +13,7 @@ namespace FilePromptWin7
         public static readonly Color BorderColor = Color.FromArgb(205, 214, 226);
         public static readonly Color TextPrimary = Color.FromArgb(32, 38, 46);
         public static readonly Color TextSecondary = Color.FromArgb(92, 107, 122);
-        public static readonly Color TextMuted = Color.FromArgb(122, 137, 153);
+        public static readonly Color TextMuted = Color.FromArgb(99, 112, 128);
         public static readonly Color Accent = Color.FromArgb(37, 112, 205);
         public static readonly Color AccentHover = Color.FromArgb(58, 132, 225);
         public static readonly Color AccentPressed = Color.FromArgb(26, 88, 168);
@@ -28,6 +28,6 @@ namespace FilePromptWin7
         public static readonly Color RoleUser = Color.FromArgb(47, 84, 122);
         public static readonly Color RoleAssistant = Color.FromArgb(29, 105, 178);
         public static readonly Color RoleSystem = Color.FromArgb(118, 98, 156);
-        public static readonly Color Placeholder = Color.FromArgb(130, 142, 157);
+        public static readonly Color Placeholder = Color.FromArgb(99, 112, 128);
     }
 }

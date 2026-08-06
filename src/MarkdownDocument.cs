@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal enum MarkdownBlockKind
     {
@@ -355,7 +355,7 @@ namespace FilePromptWin7
         {
             string text = value ?? string.Empty;
             List<string> codeSpans = new List<string>();
-            string codeTokenPrefix = "\uE000FilePromptCode";
+            string codeTokenPrefix = "\uE000FilePromptAICode";
             const string codeTokenSuffix = "\uE001";
             while (text.IndexOf(
                 codeTokenPrefix,

@@ -9,7 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal static class ToolLoopSmokeTest
     {

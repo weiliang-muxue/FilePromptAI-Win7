@@ -13,7 +13,7 @@ $artifactRoot = Join-Path $testRoot 'build-artifacts'
 $testExecutable = Join-Path $artifactRoot 'UiStateSmokeTest.exe'
 
 if ([string]::IsNullOrWhiteSpace($ApplicationPath)) {
-    $ApplicationPath = Join-Path $projectRoot 'dist\FilePrompt.exe'
+    $ApplicationPath = Join-Path $projectRoot 'dist\FilePromptAI.exe'
 }
 
 if (-not (Test-Path -LiteralPath $artifactRoot)) {

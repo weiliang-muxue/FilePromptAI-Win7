@@ -6,7 +6,7 @@ using System.Security.Cryptography;
 using Microsoft.Win32;
 using System.Windows.Forms;
 
-namespace FilePromptBootstrapper
+namespace FilePromptAIBootstrapper
 {
     internal static class Program
     {
@@ -23,7 +23,7 @@ namespace FilePromptBootstrapper
             Application.SetCompatibleTextRenderingDefault(false);
 
             string root = AppDomain.CurrentDomain.BaseDirectory;
-            string applicationPath = Path.Combine(root, "app\\FilePrompt.exe");
+            string applicationPath = Path.Combine(root, "app\\FilePromptAI.exe");
             string[] arguments = Environment.GetCommandLineArgs();
             bool checkOnly = arguments.Length > 1 &&
                 string.Equals(arguments[1], "--check", StringComparison.OrdinalIgnoreCase);
@@ -69,7 +69,7 @@ namespace FilePromptBootstrapper
             }
 
             DialogResult answer = MessageBox.Show(
-                "FilePrompt 需要 Microsoft .NET Framework 4.8。\r\n\r\n" +
+                "FilePrompt AI 需要 Microsoft .NET Framework 4.8。\r\n\r\n" +
                 "当前电脑尚未安装。是否现在使用安装包内的微软官方离线程序安装？\r\n\r\n" +
                 "安装过程需要管理员权限。",
                 "安装运行环境",
@@ -94,7 +94,7 @@ namespace FilePromptBootstrapper
             {
                 ShowError(
                     "随包运行环境未通过完整性校验，因此没有启动安装。\r\n\r\n" +
-                    "请删除当前文件，重新取得完整的 FilePrompt 离线包。\r\n\r\n" +
+                    "请删除当前文件，重新取得完整的 FilePrompt AI 离线包。\r\n\r\n" +
                     "校验目标：Microsoft .NET Framework 4.8 官方离线安装程序。");
                 return;
             }
@@ -197,7 +197,7 @@ namespace FilePromptBootstrapper
                 if (exitCode == 0 && IsNet48Installed())
                 {
                     MessageBox.Show(
-                        ".NET Framework 4.8 安装完成。现在启动 FilePrompt。",
+                        ".NET Framework 4.8 安装完成。现在启动 FilePrompt AI。",
                         "安装完成",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information);
@@ -210,7 +210,7 @@ namespace FilePromptBootstrapper
                 {
                     MessageBox.Show(
                         "运行环境已经安装，但 Windows 需要重新启动。\r\n\r\n" +
-                        "重启电脑后，再双击“Start-FilePrompt.exe”。",
+                        "重启电脑后，再双击“Start-FilePromptAI.exe”。",
                         "需要重新启动",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information);
@@ -227,7 +227,7 @@ namespace FilePromptBootstrapper
                 if (exception.NativeErrorCode == 1223)
                 {
                     MessageBox.Show(
-                        "安装已取消。FilePrompt 尚不能启动。",
+                        "安装已取消。FilePrompt AI 尚不能启动。",
                         "安装运行环境",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information);
@@ -271,7 +271,7 @@ namespace FilePromptBootstrapper
         {
             MessageBox.Show(
                 message,
-                "FilePrompt 无法启动",
+                "FilePrompt AI 无法启动",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }

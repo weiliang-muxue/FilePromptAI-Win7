@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.6',
+    [string]$Version = '1.7',
     [switch]$StageOnly
 )
 
@@ -21,18 +21,20 @@ $appBuildScript = Join-Path $projectRoot 'build.ps1'
 $appDistribution = Join-Path $projectRoot 'dist'
 $libraryRoot = Join-Path $projectRoot 'lib'
 $bootstrapperRoot = Join-Path $projectRoot 'bootstrapper'
-$appIcon = Join-Path $projectRoot 'assets\FilePrompt.ico'
+$uninstallerRoot = Join-Path $projectRoot 'uninstaller'
+$appIcon = Join-Path $projectRoot 'assets\FilePromptAI.ico'
 $redistRoot = Join-Path $projectRoot 'redist'
-$releaseFolderName = "offline-release-v$Version"
+$releaseFolderName = "FilePromptAI-offline-release-v$Version"
 $releaseRoot = Join-Path $projectRoot $releaseFolderName
 $releaseAppRoot = Join-Path $releaseRoot 'app'
 $releaseRuntimeRoot = Join-Path $releaseRoot 'runtime'
 $compilerRoot = 'C:\Windows\Microsoft.NET\Framework\v3.5'
 $referenceRoot = 'C:\Windows\Microsoft.NET\Framework\v2.0.50727'
 $compiler = Join-Path $compilerRoot 'csc.exe'
-$bootstrapperExe = Join-Path $releaseRoot 'Start-FilePrompt.exe'
+$bootstrapperExe = Join-Path $releaseRoot 'Start-FilePromptAI.exe'
+$uninstallerExe = Join-Path $releaseRoot 'Uninstall-FilePromptAI.exe'
 $runtimeSource = Join-Path $redistRoot $runtimeFileName
-$archivePath = Join-Path $projectRoot ("FilePrompt-Win7-Full-v$Version.zip")
+$archivePath = Join-Path $projectRoot ("FilePromptAI-Win7-Full-v$Version.zip")
 
 function Assert-FileExists {
     param(
@@ -90,8 +92,13 @@ function Copy-RequiredFile {
 Assert-FileExists -Path $prepareLibrariesScript -Description 'library preparation script'
 Assert-FileExists -Path $appBuildScript -Description 'application build script'
 Assert-FileExists -Path $appIcon -Description 'application icon'
+Assert-FileExists -Path (Join-Path $uninstallerRoot 'Program.cs') -Description 'uninstaller source'
+Assert-FileExists -Path (Join-Path $uninstallerRoot 'AssemblyInfo.cs') -Description 'uninstaller assembly metadata'
+Assert-FileExists -Path (Join-Path $uninstallerRoot 'uninstaller.manifest') -Description 'uninstaller manifest'
+Assert-FileExists -Path (Join-Path $uninstallerRoot 'Uninstall-FilePromptAI.exe.config') -Description 'uninstaller configuration'
 Assert-FileExists -Path $compiler -Description '.NET Framework 3.5 compiler'
 Assert-FileExists -Path (Join-Path $referenceRoot 'System.dll') -Description '.NET 2.0 System.dll reference'
+Assert-FileExists -Path (Join-Path $referenceRoot 'System.Drawing.dll') -Description '.NET 2.0 System.Drawing.dll reference'
 Assert-FileExists -Path (Join-Path $referenceRoot 'System.Windows.Forms.dll') -Description '.NET 2.0 Windows Forms reference'
 Assert-OfflineRuntime -Path $runtimeSource
 
@@ -103,7 +110,7 @@ if ($LASTEXITCODE -ne 0) {
 
 & powershell -NoProfile -ExecutionPolicy Bypass -File $appBuildScript
 if ($LASTEXITCODE -ne 0) {
-    throw 'The FilePrompt application build failed.'
+    throw 'The FilePrompt AI application build failed.'
 }
 
 $libraryFiles = @(
@@ -127,13 +134,13 @@ New-Item -ItemType Directory -Path $releaseAppRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $releaseRuntimeRoot -Force | Out-Null
 
 Copy-RequiredFile `
-    -Source (Join-Path $appDistribution 'FilePrompt.exe') `
+    -Source (Join-Path $appDistribution 'FilePromptAI.exe') `
     -Destination $releaseAppRoot `
-    -Description 'FilePrompt executable'
+    -Description 'FilePrompt AI executable'
 Copy-RequiredFile `
-    -Source (Join-Path $appDistribution 'FilePrompt.exe.config') `
+    -Source (Join-Path $appDistribution 'FilePromptAI.exe.config') `
     -Destination $releaseAppRoot `
-    -Description 'FilePrompt configuration'
+    -Description 'FilePrompt AI configuration'
 
 foreach ($libraryFile in $libraryFiles) {
     $distributionLibrary = Join-Path $appDistribution $libraryFile.Name
@@ -163,6 +170,7 @@ $compilerArguments = @(
     '/platform:anycpu',
     '/optimize+',
     '/codepage:65001',
+    '/warn:4',
     "/out:$bootstrapperExe",
     "/win32manifest:$(Join-Path $bootstrapperRoot 'bootstrapper.manifest')",
     "/win32icon:$appIcon",
@@ -178,9 +186,36 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Copy-RequiredFile `
-    -Source (Join-Path $bootstrapperRoot 'Start-FilePrompt.exe.config') `
+    -Source (Join-Path $bootstrapperRoot 'Start-FilePromptAI.exe.config') `
     -Destination $releaseRoot `
     -Description 'bootstrapper configuration'
+
+$uninstallerCompilerArguments = @(
+    '/nologo',
+    '/target:winexe',
+    '/platform:anycpu',
+    '/optimize+',
+    '/codepage:65001',
+    '/warn:4',
+    "/out:$uninstallerExe",
+    "/win32manifest:$(Join-Path $uninstallerRoot 'uninstaller.manifest')",
+    "/win32icon:$appIcon",
+    "/reference:$(Join-Path $referenceRoot 'System.dll')",
+    "/reference:$(Join-Path $referenceRoot 'System.Drawing.dll')",
+    "/reference:$(Join-Path $referenceRoot 'System.Windows.Forms.dll')",
+    (Join-Path $uninstallerRoot 'AssemblyInfo.cs'),
+    (Join-Path $uninstallerRoot 'Program.cs')
+)
+
+& $compiler $uninstallerCompilerArguments
+if ($LASTEXITCODE -ne 0) {
+    throw "Uninstaller compilation failed with exit code $LASTEXITCODE."
+}
+
+Copy-RequiredFile `
+    -Source (Join-Path $uninstallerRoot 'Uninstall-FilePromptAI.exe.config') `
+    -Destination $releaseRoot `
+    -Description 'uninstaller configuration'
 Copy-Item -LiteralPath $runtimeSource -Destination $releaseRuntimeRoot -Force
 Assert-OfflineRuntime -Path (Join-Path $releaseRuntimeRoot $runtimeFileName)
 Copy-RequiredFile `

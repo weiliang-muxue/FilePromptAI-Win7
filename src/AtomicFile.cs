@@ -4,7 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal static class AtomicFile
     {

@@ -14,7 +14,7 @@ $testSource = Join-Path $testRoot 'ApiSmokeTest.cs'
 $testExecutable = Join-Path $artifactRoot 'ApiSmokeTest.exe'
 
 if ([string]::IsNullOrWhiteSpace($ApplicationPath)) {
-    $ApplicationPath = Join-Path $projectRoot 'dist\FilePrompt.exe'
+    $ApplicationPath = Join-Path $projectRoot 'dist\FilePromptAI.exe'
 }
 
 if (-not (Test-Path -LiteralPath $compiler)) {

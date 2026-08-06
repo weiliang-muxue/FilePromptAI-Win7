@@ -1,16 +1,27 @@
-FilePrompt Windows 7 离线完整版
-================================
+FilePrompt AI for Windows 7 离线完整版
+======================================
 
 使用方法
 --------
 
 1. 请先完整解压 ZIP，不要在压缩包中直接运行，也不要只复制 EXE。
-2. 双击“Start-FilePrompt.exe”。
+2. 双击“Start-FilePromptAI.exe”。
 3. 启动器会自动检测 Microsoft .NET Framework 4.8。
 4. 如果缺少运行环境，选择“是”。启动器会先校验随包安装程序的大小和
    SHA-256，再调用微软官方完整离线安装程序；此过程不会下载任何文件。
-5. 安装完成后会自动启动 FilePrompt；如果提示重启，请重启电脑后再次
+5. 安装完成后会自动启动 FilePrompt AI；如果提示重启，请重启电脑后再次
    双击启动器。
+
+卸载方法
+--------
+
+运行“Uninstall-FilePromptAI.exe”，或在主窗口选择“更多”→
+“卸载 FilePrompt AI...”。卸载器只删除校验清单中内容未被修改的程序文件，
+发布目录中的额外文件不会被递归删除。用户配置和会话默认保留；只有明确勾选
+并再次确认后才会删除。
+
+正常运行时，程序数据固定保存在当前用户的
+%LocalAppData%\FilePromptAI-Win7，不会搜索、读取或迁移其他数据目录。
 
 无需另外安装
 ------------
@@ -19,7 +30,7 @@ FilePrompt Windows 7 离线完整版
 - Microsoft Word 或 Excel。Word/表格文件的读取和导出由 app 目录中的 DLL 完成。
 - PDF、Office、图片解析插件。所需的 28 个托管 DLL 已放在 app 目录。
 
-必须保留 app 目录中的全部文件，不能只复制 FilePrompt.exe。
+必须保留 app 目录中的全部文件，不能只复制 FilePromptAI.exe。
 
 主要功能
 --------
@@ -39,7 +50,7 @@ FilePrompt Windows 7 离线完整版
 
 - 技能是保存在本机的模型指令，不需要额外运行环境；程序不会执行技能中的脚本。
 - stdio MCP 的 EXE 和它自身需要的 Node.js、Python、Java 等运行环境不会由
-  FilePrompt 下载或安装，必须由管理员提前从离线介质准备好。
+  FilePrompt AI 下载或安装，必须由管理员提前从离线介质准备好。
 - 手工启用 stdio MCP 后，每次实际启动前都会显示完整命令、工作目录、参数和
   环境变量名称，默认操作是拒绝。
 - HTTP MCP 只连接用户填写的地址。模型只收到工具名称、说明、参数结构和获准

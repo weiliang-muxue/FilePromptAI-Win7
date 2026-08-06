@@ -13,7 +13,7 @@ using System.Windows.Forms;
 using System.Xml;
 using System.Xml.Linq;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal sealed class FileContentExtractor
     {

@@ -6,7 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Xml.Linq;
 
-using FilePromptWin7;
+using FilePromptAIWin7;
 
 internal static class ConversationBackupSmokeTest
 {
@@ -75,7 +75,7 @@ internal static class ConversationBackupSmokeTest
         AssertEqual(2, source.ExportBackup(backupPath), "exported count");
         XDocument backup = XDocument.Load(backupPath);
         AssertEqual(
-            "FilePromptConversationBackup",
+            "FilePromptAIConversationBackup",
             backup.Root.Name.LocalName,
             "backup root");
         string rawBackup = File.ReadAllText(backupPath, Encoding.UTF8);
@@ -160,20 +160,20 @@ internal static class ConversationBackupSmokeTest
         string now = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
         string validPrefix =
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
-            "<FilePromptConversationBackup version=\"1\" exportedAt=\"" +
+            "<FilePromptAIConversationBackup version=\"1\" exportedAt=\"" +
             now + "\"><Sessions>";
         string validSession =
             "<Session id=\"source-id\" title=\"source\" createdAt=\"" + now +
             "\" updatedAt=\"" + now + "\"><Messages>" +
             "<Message role=\"user\" createdAt=\"" + now +
             "\">content</Message></Messages></Session>";
-        string validSuffix = "</Sessions></FilePromptConversationBackup>";
+        string validSuffix = "</Sessions></FilePromptAIConversationBackup>";
 
         AssertInvalidImportUnchanged(
             store,
             storagePath,
             Path.Combine(directory, "malformed.fpc"),
-            "<FilePromptConversationBackup");
+            "<FilePromptAIConversationBackup");
         AssertInvalidImportUnchanged(
             store,
             storagePath,

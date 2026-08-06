@@ -8,13 +8,13 @@ Set-StrictMode -Version 2.0
 
 $testRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = Split-Path -Parent $testRoot
-$application = Join-Path $projectRoot 'dist\FilePrompt.exe'
+$application = Join-Path $projectRoot 'dist\FilePromptAI.exe'
 $frameworkRoot = 'C:\Windows\Microsoft.NET\Framework\v4.0.30319'
 $compiler = Join-Path $frameworkRoot 'csc.exe'
 $artifactRoot = Join-Path $testRoot 'build-artifacts'
 $hostExecutable = Join-Path $artifactRoot 'ExtensionsDialogHost.exe'
 $outputPath = Join-Path $artifactRoot (
-    'FilePrompt-ui-v1.6-extensions-' + $Mode.ToLowerInvariant() + '.png'
+    'FilePromptAI-ui-v1.7-extensions-' + $Mode.ToLowerInvariant() + '.png'
 )
 $profileRoot = Join-Path $artifactRoot 'extensions-ui-profile'
 
@@ -72,13 +72,13 @@ $startInfo.FileName = $hostExecutable
 $startInfo.Arguments = '"' + $application + '" ' + $Mode.ToLowerInvariant()
 $startInfo.WorkingDirectory = $artifactRoot
 $startInfo.UseShellExecute = $false
-$previousDataRoot = $env:FILEPROMPT_DATA_ROOT
+$previousDataRoot = $env:FILEPROMPTAI_DATA_ROOT
 try {
-    $env:FILEPROMPT_DATA_ROOT = $profileRoot
+    $env:FILEPROMPTAI_DATA_ROOT = $profileRoot
     $process = [Diagnostics.Process]::Start($startInfo)
 }
 finally {
-    $env:FILEPROMPT_DATA_ROOT = $previousDataRoot
+    $env:FILEPROMPTAI_DATA_ROOT = $previousDataRoot
 }
 
 try {

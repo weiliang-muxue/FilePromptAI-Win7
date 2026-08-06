@@ -11,16 +11,21 @@ $distributionRoot = Join-Path $projectRoot 'dist'
 $libraryRoot = Join-Path $projectRoot 'lib'
 $frameworkRoot = 'C:\Windows\Microsoft.NET\Framework\v4.0.30319'
 $compiler = Join-Path $frameworkRoot 'csc.exe'
-$outputExe = Join-Path $distributionRoot 'FilePrompt.exe'
-$iconPath = Join-Path $projectRoot 'assets\FilePrompt.ico'
+$outputExe = Join-Path $distributionRoot 'FilePromptAI.exe'
+$iconPath = Join-Path $projectRoot 'assets\FilePromptAI.ico'
 
 if (-not (Test-Path -LiteralPath $compiler)) {
     throw '.NET Framework C# compiler was not found.'
 }
 
-if (-not (Test-Path -LiteralPath $distributionRoot)) {
-    New-Item -ItemType Directory -Path $distributionRoot | Out-Null
+if ((Split-Path -Leaf $distributionRoot) -ne 'dist' -or
+    (Split-Path -Parent $distributionRoot) -ne $projectRoot) {
+    throw "Unsafe distribution path: $distributionRoot"
 }
+if (Test-Path -LiteralPath $distributionRoot) {
+    Remove-Item -LiteralPath $distributionRoot -Recurse -Force
+}
+New-Item -ItemType Directory -Path $distributionRoot | Out-Null
 
 $sourceFiles = @(
     Get-ChildItem -LiteralPath $sourceRoot -Filter '*.cs' -File |
@@ -72,8 +77,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed with exit code $LASTEXITCODE."
 }
 
-Copy-Item -LiteralPath (Join-Path $projectRoot 'FilePrompt.exe.config') `
-    -Destination (Join-Path $distributionRoot 'FilePrompt.exe.config') `
+Copy-Item -LiteralPath (Join-Path $projectRoot 'FilePromptAI.exe.config') `
+    -Destination (Join-Path $distributionRoot 'FilePromptAI.exe.config') `
     -Force
 
 if (Test-Path -LiteralPath $libraryRoot) {

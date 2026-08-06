@@ -15,7 +15,7 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using Microsoft.Win32.SafeHandles;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal sealed class McpRuntime : IDisposable
     {
@@ -380,8 +380,8 @@ namespace FilePromptWin7
                         "clientInfo",
                         new Dictionary<string, object>
                         {
-                            { "name", "FilePromptWin7" },
-                            { "version", "1.6.0" }
+                            { "name", "FilePromptAIWin7" },
+                            { "version", "1.7.0" }
                         }
                     }
                 },
@@ -1161,7 +1161,7 @@ namespace FilePromptWin7
                             { "code", -32601 },
                             {
                                 "message",
-                                "FilePrompt does not support server-initiated requests."
+                                "FilePrompt AI does not support server-initiated requests."
                             }
                         }
                     }

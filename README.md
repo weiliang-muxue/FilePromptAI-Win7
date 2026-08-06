@@ -1,6 +1,6 @@
-# FilePrompt Win7
+# FilePrompt AI for Windows 7
 
-一个不依赖 WebView2 的 Windows 7 文件内容模型客户端。
+一个面向 Windows 7 与内网自定义模型的文件问答 AI 客户端，不依赖 WebView2。
 
 ## 当前功能
 
@@ -29,6 +29,7 @@
 - 完整请求 URL 不跟随 3xx 重定向，避免把用户资料转发到其他地址。
 - 会话按完整问答轮次原子保存；保存失败会回滚，重复启动会切回现有窗口。
 - 对异常 Office XML、极端 Excel 列号和 CSV 公式内容进行安全限制与转义。
+- 完整离线包包含独立卸载器；主窗口“更多”菜单也可启动卸载。
 
 ## 固定接口格式
 
@@ -100,7 +101,7 @@ MCP 可手工填写，也可把标准配置复制到剪贴板后选择“粘贴 
 粘贴导入的 MCP 即使 JSON 中写了 `"enabled": true` 也不会自动启用。请先在界面
 逐项核对，再手工开启需要的服务。
 
-stdio MCP 所需的 EXE 及其运行环境必须由管理员提前离线放到电脑上；FilePrompt
+stdio MCP 所需的 EXE 及其运行环境必须由管理员提前离线放到电脑上；FilePrompt AI
 只负责启动已配置的命令，不会在线安装 Node.js、Python、Java 或 MCP 服务。
 每次生成中首次连接 stdio MCP 前，程序会展示服务名、完整命令、工作目录、全部
 参数和环境变量名称；默认按钮为“拒绝”，只有选择“允许本次启动”后才会创建进程。
@@ -112,7 +113,7 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 
 “每次调用前确认”默认开启。只有在完全信任对应 MCP 服务和模型时才应关闭。
 本地 MCP 自身能访问哪些文件或系统资源，取决于该 MCP 的实现和当前 Windows
-用户权限，不是 FilePrompt 自动授予的能力。字符串脱敏无法阻止恶意 MCP 对内容
+用户权限，不是 FilePrompt AI 自动授予的能力。字符串脱敏无法阻止恶意 MCP 对内容
 编码、拆分或转发；只能启用来源可信且已由管理员审查的 MCP。
 
 ## 系统要求
@@ -123,8 +124,8 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 
 ## Windows 7 离线完整版
 
-优先使用 `FilePrompt-Win7-Full-v1.6.zip`。完整解压后运行
-`Start-FilePrompt.exe`，启动器会检测 .NET Framework 4.8；缺少时会调用包内
+优先使用 `FilePromptAI-Win7-Full-v1.7.zip`。完整解压后运行
+`Start-FilePromptAI.exe`，启动器会检测 .NET Framework 4.8；缺少时会调用包内
 经过微软数字签名的官方完整离线安装程序。安装过程不下载文件，也不需要访问
 互联网。不要只复制 `app` 目录中的 EXE。
 
@@ -132,6 +133,14 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 不需要另装 WebView2、VC++ 运行库、Node.js、Python、Java 或 Microsoft Office。
 实际生成内容时，电脑仍需能够访问用户填写的完整请求 URL；该地址可以是内网
 模型服务，不要求连接公网。
+
+卸载时运行 `Uninstall-FilePromptAI.exe`，或在主窗口选择“更多”→
+“卸载 FilePrompt AI...”。卸载器只删除校验清单内且内容未被修改的程序文件，
+不会递归删除发布目录中的额外文件。用户配置和会话默认保留，只有明确勾选并
+再次确认后才删除。
+
+正常运行时，程序数据固定保存在当前用户的
+`%LocalAppData%\FilePromptAI-Win7`，不会搜索、读取或迁移其他数据目录。
 
 对于长期未更新或被精简过的 Windows 7，微软的 .NET Framework 4.8 安装程序
 仍可能要求操作系统已具备 SP1、SHA-2 代码签名支持、最新服务堆栈以及
@@ -147,7 +156,7 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-输出位于 `dist\FilePrompt.exe`。发布时需要复制整个 `dist` 目录，不能只复制
+输出位于 `dist\FilePromptAI.exe`。发布时需要复制整个 `dist` 目录，不能只复制
 EXE，因为 PDF 与旧版 Office 文件解析器由旁边的 DLL 提供。
 
 包含 .NET Framework 4.8 离线安装程序的完整包可运行：
@@ -163,7 +172,7 @@ Microsoft Authenticode 签名，并生成 `PACKAGE-CHECKSUMS-SHA256.txt`。仅�
 
 ## 测试
 
-构建并运行全部 13 组自动回归测试：
+构建、生成离线包并运行全部 16 组自动回归测试：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1

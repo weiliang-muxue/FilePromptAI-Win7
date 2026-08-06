@@ -1,9 +1,14 @@
+param(
+    [string]$Version = '1.7'
+)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
 $testRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = Split-Path -Parent $testRoot
 $buildScript = Join-Path $projectRoot 'build.ps1'
+$packageBuildScript = Join-Path $projectRoot 'build-offline-package.ps1'
 
 & powershell -NoProfile -ExecutionPolicy Bypass -File $buildScript
 if ($LASTEXITCODE -ne 0) {
@@ -35,4 +40,29 @@ foreach ($name in $scripts) {
     }
 }
 
-Write-Host "PASS | all smoke tests ($($scripts.Count) suites)"
+Write-Host "RUN build-offline-package.ps1"
+& powershell -NoProfile -ExecutionPolicy Bypass `
+    -File $packageBuildScript `
+    -Version $Version
+if ($LASTEXITCODE -ne 0) {
+    throw "Offline package build failed with exit code $LASTEXITCODE."
+}
+
+$packageScripts = @(
+    'VerifyOfflinePackage.ps1',
+    'RunUninstallerSmokeTest.ps1',
+    'RunUninstallerSecuritySmokeTest.ps1'
+)
+foreach ($name in $packageScripts) {
+    $script = Join-Path $testRoot $name
+    Write-Host "RUN $name"
+    & powershell -NoProfile -ExecutionPolicy Bypass `
+        -File $script `
+        -Version $Version
+    if ($LASTEXITCODE -ne 0) {
+        throw "$name failed with exit code $LASTEXITCODE."
+    }
+}
+
+$suiteCount = $scripts.Count + $packageScripts.Count
+Write-Host "PASS | all smoke tests ($suiteCount suites + offline package build)"

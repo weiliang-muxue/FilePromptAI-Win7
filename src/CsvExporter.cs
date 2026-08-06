@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal static class CsvExporter
     {

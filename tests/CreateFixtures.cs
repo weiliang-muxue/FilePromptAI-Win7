@@ -18,7 +18,7 @@ internal static class CreateFixtures
 
         File.WriteAllText(
             Path.Combine(outputDirectory, "sample.txt"),
-            "中文文本测试\r\nHello FilePrompt\r\n第二行内容",
+            "中文文本测试\r\nHello FilePrompt AI\r\n第二行内容",
             new UTF8Encoding(true));
         CreateDocx(Path.Combine(outputDirectory, "sample.docx"));
         CreatePdf(Path.Combine(outputDirectory, "sample.pdf"));
@@ -107,7 +107,7 @@ internal static class CreateFixtures
             graphics.Clear(Color.White);
             graphics.DrawRectangle(Pens.RoyalBlue, 10, 10, 619, 339);
             graphics.DrawString(
-                "FilePrompt Image Test",
+                "FilePrompt AI Image Test",
                 font,
                 Brushes.Black,
                 new PointF(80F, 145F));

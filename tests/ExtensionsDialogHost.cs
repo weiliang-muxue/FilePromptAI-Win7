@@ -30,14 +30,14 @@ internal static class ExtensionsDialogHost
         Application.SetCompatibleTextRenderingDefault(false);
         Assembly application = Assembly.LoadFrom(applicationPath);
         Type settingsType = application.GetType(
-            "FilePromptWin7.ExtensionSettings",
+            "FilePromptAIWin7.ExtensionSettings",
             true);
         object settings = Activator.CreateInstance(settingsType, true);
         AddSampleSkill(application, settingsType, settings);
         AddSampleServer(application, settingsType, settings);
 
         Type dialogType = application.GetType(
-            "FilePromptWin7.ExtensionsDialog",
+            "FilePromptAIWin7.ExtensionsDialog",
             true);
         using (Form dialog = Activator.CreateInstance(
             dialogType,
@@ -71,7 +71,7 @@ internal static class ExtensionsDialogHost
         object settings)
     {
         Type skillType = application.GetType(
-            "FilePromptWin7.SkillDefinition",
+            "FilePromptAIWin7.SkillDefinition",
             true);
         object skill = Activator.CreateInstance(skillType, true);
         skillType.GetProperty("Name").SetValue(skill, "合同审阅", null);
@@ -94,7 +94,7 @@ internal static class ExtensionsDialogHost
         object settings)
     {
         Type serverType = application.GetType(
-            "FilePromptWin7.McpServerDefinition",
+            "FilePromptAIWin7.McpServerDefinition",
             true);
         object server = Activator.CreateInstance(serverType, true);
         serverType.GetProperty("Name").SetValue(

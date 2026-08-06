@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.6'
+    [string]$Version = '1.7'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -7,8 +7,8 @@ Set-StrictMode -Version 2.0
 
 $testRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = Split-Path -Parent $testRoot
-$stagingRoot = Join-Path $projectRoot "offline-release-v$Version"
-$archivePath = Join-Path $projectRoot "FilePrompt-Win7-Full-v$Version.zip"
+$stagingRoot = Join-Path $projectRoot "FilePromptAI-offline-release-v$Version"
+$archivePath = Join-Path $projectRoot "FilePromptAI-Win7-Full-v$Version.zip"
 $archiveChecksumPath = "$archivePath.sha256.txt"
 
 if (-not (Test-Path -LiteralPath $stagingRoot -PathType Container)) {
@@ -83,7 +83,7 @@ finally {
 }
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
-    'FilePromptPackageVerify-' + [Guid]::NewGuid().ToString('N')
+    'FilePromptAIPackageVerify-' + [Guid]::NewGuid().ToString('N')
 )
 New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
 try {
@@ -125,20 +125,34 @@ finally {
         $resolvedSystemTemp,
         [StringComparison]::OrdinalIgnoreCase) -and
         (Split-Path -Leaf $resolvedTemporary).StartsWith(
-            'FilePromptPackageVerify-',
+            'FilePromptAIPackageVerify-',
             [StringComparison]::Ordinal)) {
         Remove-Item -LiteralPath $resolvedTemporary -Recurse -Force
     }
 }
 
 $appVersion = (Get-Item -LiteralPath (
-    Join-Path $stagingRoot 'app\FilePrompt.exe'
+    Join-Path $stagingRoot 'app\FilePromptAI.exe'
 )).VersionInfo.FileVersion
 $bootstrapperVersion = (Get-Item -LiteralPath (
-    Join-Path $stagingRoot 'Start-FilePrompt.exe'
+    Join-Path $stagingRoot 'Start-FilePromptAI.exe'
 )).VersionInfo.FileVersion
-if ($appVersion -ne '1.6.0.0' -or $bootstrapperVersion -ne '1.6.0.0') {
-    throw "Unexpected executable versions: app=$appVersion bootstrapper=$bootstrapperVersion"
+$uninstallerPath = Join-Path $stagingRoot 'Uninstall-FilePromptAI.exe'
+$uninstallerVersion = (Get-Item -LiteralPath $uninstallerPath).VersionInfo.FileVersion
+if ($appVersion -ne '1.7.0.0' -or
+    $bootstrapperVersion -ne '1.7.0.0' -or
+    $uninstallerVersion -ne '1.7.0.0') {
+    throw "Unexpected executable versions: app=$appVersion bootstrapper=$bootstrapperVersion uninstaller=$uninstallerVersion"
+}
+
+$uninstallerCheck = Start-Process `
+    -FilePath $uninstallerPath `
+    -ArgumentList '--check' `
+    -WorkingDirectory $stagingRoot `
+    -PassThru `
+    -Wait
+if ($uninstallerCheck.ExitCode -ne 0) {
+    throw "Uninstaller safety check failed with exit code $($uninstallerCheck.ExitCode)."
 }
 
 Write-Host "PASS | offline package | version=$Version | files=$($entryNames.Count) | checksums=$checksumEntries | sha256=$archiveHash"

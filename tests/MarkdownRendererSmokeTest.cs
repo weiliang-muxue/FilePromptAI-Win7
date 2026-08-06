@@ -3,7 +3,7 @@ using System.Drawing;
 using System.Threading;
 using System.Windows.Forms;
 
-using FilePromptWin7;
+using FilePromptAIWin7;
 
 internal static class MarkdownRendererSmokeTest
 {

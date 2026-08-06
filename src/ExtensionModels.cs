@@ -7,7 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Web.Script.Serialization;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal sealed class ExtensionSettings
     {
@@ -57,7 +57,7 @@ namespace FilePromptWin7
 
             StringBuilder prompt = new StringBuilder();
             prompt.AppendLine(
-                "以下内容是用户在 FilePrompt 中明确安装并启用的本地技能指令。" +
+                "以下内容是用户在 FilePrompt AI 中明确安装并启用的本地技能指令。" +
                 "请在不违反用户当前要求的前提下遵循这些指令：");
             foreach (SkillDefinition skill in enabled)
             {

@@ -60,16 +60,16 @@ internal static class ApiSmokeTest
         {
             Assembly application = Assembly.LoadFrom(applicationPath);
             Type clientType = application.GetType(
-                "FilePromptWin7.ModelClient",
+                "FilePromptAIWin7.ModelClient",
                 true);
             Type requestType = application.GetType(
-                "FilePromptWin7.ModelRequest",
+                "FilePromptAIWin7.ModelRequest",
                 true);
             Type itemType = application.GetType(
-                "FilePromptWin7.InputItem",
+                "FilePromptAIWin7.InputItem",
                 true);
             Type messageType = application.GetType(
-                "FilePromptWin7.ConversationMessage",
+                "FilePromptAIWin7.ConversationMessage",
                 true);
 
             client = Activator.CreateInstance(clientType, true);
@@ -170,7 +170,7 @@ internal static class ApiSmokeTest
         {
             Assembly application = Assembly.LoadFrom(applicationPath);
             Type clientType = application.GetType(
-                "FilePromptWin7.ModelClient",
+                "FilePromptAIWin7.ModelClient",
                 true);
             client = Activator.CreateInstance(clientType, true);
             MethodInfo testConnection = clientType.GetMethod(
@@ -480,7 +480,7 @@ internal static class ApiSmokeTest
         {
             candidate = Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory,
-                "FilePrompt.exe");
+                "FilePromptAI.exe");
         }
 
         candidate = Path.GetFullPath(candidate);
@@ -491,7 +491,7 @@ internal static class ApiSmokeTest
                 "..",
                 "..",
                 "dist",
-                "FilePrompt.exe"));
+                "FilePromptAI.exe"));
             if (File.Exists(projectCandidate))
             {
                 candidate = projectCandidate;
@@ -501,7 +501,7 @@ internal static class ApiSmokeTest
         if (!File.Exists(candidate))
         {
             throw new FileNotFoundException(
-                "FilePrompt.exe was not found. Pass its full path as argument 1.",
+                "FilePromptAI.exe was not found. Pass its full path as argument 1.",
                 candidate);
         }
 

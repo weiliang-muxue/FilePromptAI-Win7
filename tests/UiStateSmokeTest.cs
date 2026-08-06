@@ -13,28 +13,28 @@ internal static class UiStateSmokeTest
     {
         string dataRoot = Path.Combine(
             Path.GetTempPath(),
-            "FilePromptUiState-" + Guid.NewGuid().ToString("N"));
+            "FilePromptAIUiState-" + Guid.NewGuid().ToString("N"));
         string previousRoot = Environment.GetEnvironmentVariable(
-            "FILEPROMPT_DATA_ROOT");
+            "FILEPROMPTAI_DATA_ROOT");
         object form = null;
         try
         {
             if (args.Length != 1)
             {
                 throw new ArgumentException(
-                    "Usage: UiStateSmokeTest <FilePrompt.exe>");
+                    "Usage: UiStateSmokeTest <FilePromptAI.exe>");
             }
 
             string applicationPath = Path.GetFullPath(args[0]);
             ConfigureAssemblyResolution(applicationPath);
             Environment.SetEnvironmentVariable(
-                "FILEPROMPT_DATA_ROOT",
+                "FILEPROMPTAI_DATA_ROOT",
                 dataRoot);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Assembly application = Assembly.LoadFrom(applicationPath);
             Type formType = application.GetType(
-                "FilePromptWin7.MainForm",
+                "FilePromptAIWin7.MainForm",
                 true);
             form = Activator.CreateInstance(formType, true);
 
@@ -43,6 +43,7 @@ internal static class UiStateSmokeTest
             TestDragBusyGuard(formType, form, dataRoot);
             TestSearchCharacterBudget(application, formType, form);
             TestExtensionsDialog(application, formType, form);
+            TestUninstallerEntry(formType, form);
             TestMcpApprovalArguments(application, formType, form);
             TestStdioStartupApproval(application, formType, form);
             TestRejectedStdioStartupCancelsGeneration(
@@ -67,7 +68,7 @@ internal static class UiStateSmokeTest
             }
 
             Environment.SetEnvironmentVariable(
-                "FILEPROMPT_DATA_ROOT",
+                "FILEPROMPTAI_DATA_ROOT",
                 previousRoot);
             try
             {
@@ -204,10 +205,10 @@ internal static class UiStateSmokeTest
         object form)
     {
         Type sessionType = application.GetType(
-            "FilePromptWin7.ConversationSession",
+            "FilePromptAIWin7.ConversationSession",
             true);
         Type messageType = application.GetType(
-            "FilePromptWin7.ConversationMessage",
+            "FilePromptAIWin7.ConversationMessage",
             true);
         object session = Activator.CreateInstance(sessionType, true);
         object message = Activator.CreateInstance(messageType, true);
@@ -247,10 +248,10 @@ internal static class UiStateSmokeTest
         AssertTrue(extensionsButton.Enabled, "Extensions button enabled when idle");
 
         Type settingsType = application.GetType(
-            "FilePromptWin7.ExtensionSettings",
+            "FilePromptAIWin7.ExtensionSettings",
             true);
         Type dialogType = application.GetType(
-            "FilePromptWin7.ExtensionsDialog",
+            "FilePromptAIWin7.ExtensionsDialog",
             true);
         object settings = Activator.CreateInstance(settingsType, true);
         Form dialog = Activator.CreateInstance(
@@ -298,6 +299,26 @@ internal static class UiStateSmokeTest
         }
     }
 
+    private static void TestUninstallerEntry(Type formType, object form)
+    {
+        Button moreButton = GetField(
+            formType,
+            form,
+            "moreButton") as Button;
+        AssertTrue(moreButton != null, "More button exists");
+        AssertTrue(
+            moreButton.ContextMenuStrip != null,
+            "More menu exists");
+        ToolStripItem uninstallItem =
+            moreButton.ContextMenuStrip.Items.Count == 0
+                ? null
+                : moreButton.ContextMenuStrip.Items[0];
+        AssertTrue(
+            uninstallItem != null &&
+            uninstallItem.Text == "卸载 FilePrompt AI...",
+            "Uninstall entry exists");
+    }
+
     private static T FindControl<T>(
         Control root,
         string text) where T : Control
@@ -330,7 +351,7 @@ internal static class UiStateSmokeTest
         object form)
     {
         Type toolType = application.GetType(
-            "FilePromptWin7.McpToolDefinition",
+            "FilePromptAIWin7.McpToolDefinition",
             true);
         object tool = Activator.CreateInstance(toolType, true);
         toolType.GetProperty("ServerName").SetValue(
@@ -402,7 +423,7 @@ internal static class UiStateSmokeTest
         object form)
     {
         Type serverType = application.GetType(
-            "FilePromptWin7.McpServerDefinition",
+            "FilePromptAIWin7.McpServerDefinition",
             true);
         Type serverListType = typeof(List<>).MakeGenericType(serverType);
         IList servers = (IList)Activator.CreateInstance(serverListType);
@@ -554,10 +575,10 @@ internal static class UiStateSmokeTest
         object form)
     {
         Type settingsType = application.GetType(
-            "FilePromptWin7.ExtensionSettings",
+            "FilePromptAIWin7.ExtensionSettings",
             true);
         Type serverType = application.GetType(
-            "FilePromptWin7.McpServerDefinition",
+            "FilePromptAIWin7.McpServerDefinition",
             true);
         object settings = Activator.CreateInstance(settingsType, true);
         object server = Activator.CreateInstance(serverType, true);

@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -9,11 +10,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal sealed class MainForm : Form
     {
-        internal const string WindowTitle = "FilePrompt  ·  内网模型工作台";
+        internal const string WindowTitle =
+            "FilePrompt AI  ·  内网文件问答工作台";
         private const int MaxCombinedTextCharacters = 4000000;
         private const int MaxDisplayedUserCharacters = 8000;
         private const float ExpandedSettingsHeight = 94F;
@@ -58,6 +60,7 @@ namespace FilePromptWin7
         private Button toggleSettingsButton;
         private Button testConnectionButton;
         private Button extensionsButton;
+        private Button moreButton;
         private ToolStripStatusLabel statusLabel;
         private ToolStripProgressBar progressBar;
         private System.Windows.Forms.Timer sessionSearchTimer;
@@ -182,7 +185,7 @@ namespace FilePromptWin7
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
 
             Label brand = new Label();
-            brand.Text = "FILEPROMPT";
+            brand.Text = "FILEPROMPT AI";
             brand.ForeColor = UiTheme.TextPrimary;
             brand.Font = new Font(Font, FontStyle.Bold);
             brand.Dock = DockStyle.Fill;
@@ -383,9 +386,26 @@ namespace FilePromptWin7
                 SetSettingsExpanded(!settingsExpanded);
             };
 
+            moreButton = CreateButton("更多", 64);
+            moreButton.AccessibleName = "更多应用操作";
+            ContextMenuStrip moreMenu = new ContextMenuStrip();
+            ToolStripMenuItem uninstallItem =
+                new ToolStripMenuItem("卸载 FilePrompt AI...");
+            uninstallItem.AccessibleName = "卸载 FilePrompt AI";
+            uninstallItem.Click += OnUninstallClick;
+            moreMenu.Items.Add(uninstallItem);
+            moreButton.ContextMenuStrip = moreMenu;
+            moreButton.Click += delegate
+            {
+                moreMenu.Show(
+                    moreButton,
+                    new Point(0, moreButton.Height));
+            };
+
             actions.Controls.Add(extensionsButton);
             actions.Controls.Add(testConnectionButton);
             actions.Controls.Add(toggleSettingsButton);
+            actions.Controls.Add(moreButton);
             panel.Controls.Add(titlePanel, 0, 0);
             panel.Controls.Add(actions, 1, 0);
             return panel;
@@ -1549,6 +1569,56 @@ namespace FilePromptWin7
             return "技能 " + skills + " · MCP " + servers;
         }
 
+        private void OnUninstallClick(object sender, EventArgs args)
+        {
+            if (IsBusy)
+            {
+                SetStatus("当前有任务运行，请先停止后再卸载。");
+                return;
+            }
+
+            string appDirectory =
+                Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory);
+            string packageRoot = Directory.GetParent(
+                appDirectory.TrimEnd(Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar)).FullName;
+            string uninstallerPath = Path.Combine(
+                packageRoot,
+                "Uninstall-FilePromptAI.exe");
+            if (!File.Exists(uninstallerPath))
+            {
+                MessageBox.Show(
+                    this,
+                    "当前目录没有找到卸载器。便携版可以直接删除完整程序目录；" +
+                    "源码目录不会被此操作处理。",
+                    "卸载 FilePrompt AI",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            try
+            {
+                ProcessStartInfo startInfo = new ProcessStartInfo();
+                startInfo.FileName = uninstallerPath;
+                startInfo.Arguments = "--from-app " +
+                    Process.GetCurrentProcess().Id.ToString();
+                startInfo.WorkingDirectory = packageRoot;
+                startInfo.UseShellExecute = true;
+                Process.Start(startInfo);
+                Close();
+            }
+            catch (Exception exception)
+            {
+                MessageBox.Show(
+                    this,
+                    "无法启动卸载器：\r\n\r\n" + exception.Message,
+                    "卸载 FilePrompt AI",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
         private async void OnTestConnectionClick(object sender, EventArgs args)
         {
             if (connectionTestCancellation != null ||
@@ -1810,10 +1880,10 @@ namespace FilePromptWin7
             using (SaveFileDialog dialog = new SaveFileDialog())
             {
                 dialog.Title = "备份全部会话";
-                dialog.Filter = "FilePrompt 会话备份|*.fpc";
+                dialog.Filter = "FilePrompt AI 会话备份|*.fpc";
                 dialog.DefaultExt = "fpc";
                 dialog.AddExtension = true;
-                dialog.FileName = "FilePrompt会话备份_" +
+                dialog.FileName = "FilePromptAI会话备份_" +
                     DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".fpc";
                 if (dialog.ShowDialog(this) != DialogResult.OK)
                 {
@@ -1847,7 +1917,7 @@ namespace FilePromptWin7
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
                 dialog.Title = "恢复会话备份";
-                dialog.Filter = "FilePrompt 会话备份|*.fpc";
+                dialog.Filter = "FilePrompt AI 会话备份|*.fpc";
                 dialog.CheckFileExists = true;
                 dialog.Multiselect = false;
                 if (dialog.ShowDialog(this) != DialogResult.OK)
@@ -3153,7 +3223,7 @@ namespace FilePromptWin7
             {
                 dialog.Title = "导出 Word 文档";
                 dialog.Filter = "Word 文档|*.docx";
-                dialog.FileName = "FilePrompt会话_" +
+                dialog.FileName = "FilePromptAI会话_" +
                     DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".docx";
                 if (dialog.ShowDialog(this) != DialogResult.OK)
                 {
@@ -3198,7 +3268,7 @@ namespace FilePromptWin7
             {
                 dialog.Title = "导出表格";
                 dialog.Filter = "CSV 表格|*.csv";
-                dialog.FileName = "FilePrompt表格_" +
+                dialog.FileName = "FilePromptAI表格_" +
                     DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv";
                 if (dialog.ShowDialog(this) != DialogResult.OK)
                 {

@@ -3,7 +3,7 @@ using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
 
-namespace FilePromptWin7
+namespace FilePromptAIWin7
 {
     internal sealed class InputPreviewDialog : Form
     {
