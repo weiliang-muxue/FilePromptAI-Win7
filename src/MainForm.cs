@@ -2329,6 +2329,20 @@ namespace FilePromptAIWin7
                     " 个重复文件。");
             }
 
+            // A drag/drop or file-picker batch has no dedicated source field
+            // to restore failed entries into. Keep them in the path editor
+            // when it is idle so the user can correct and retry them.
+            if (!isClosing && !IsDisposed &&
+                outcome.FailedPaths.Count > 0 &&
+                pathTextBox != null &&
+                string.IsNullOrWhiteSpace(pathTextBox.Text))
+            {
+                pathTextBox.Text = string.Join(
+                    Environment.NewLine,
+                    outcome.FailedPaths.ToArray());
+                SetStatus("部分路径未读取，失败项已保留在路径输入框中。");
+            }
+
             return outcome;
         }
 
