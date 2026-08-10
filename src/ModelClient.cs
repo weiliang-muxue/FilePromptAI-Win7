@@ -32,12 +32,67 @@ namespace FilePromptAIWin7
         private const int MaximumRequestCharacters = 32 * 1024 * 1024;
         private const int MaximumResponseCharacters = 8 * 1024 * 1024;
         private const long MaximumResponseBytes = 16L * 1024L * 1024L;
+        private const int DefaultResponseHeadersTimeoutMilliseconds = 30000;
+        private const int DefaultResponseReadIdleTimeoutMilliseconds = 60000;
+        private const int DefaultMaximumRequestAttempts = 3;
+        private const int DefaultRetryBaseDelayMilliseconds = 500;
+        private const int DefaultMaximumRetryAfterMilliseconds = 30000;
 
         private readonly HttpClient client;
         private readonly JavaScriptSerializer json;
+        private readonly TimeSpan responseHeadersTimeout;
+        private readonly TimeSpan responseReadIdleTimeout;
+        private readonly int maximumRequestAttempts;
+        private readonly TimeSpan retryBaseDelay;
+        private readonly TimeSpan maximumRetryAfter;
 
         public ModelClient()
+            : this(
+                DefaultResponseHeadersTimeoutMilliseconds,
+                DefaultResponseReadIdleTimeoutMilliseconds,
+                DefaultMaximumRequestAttempts,
+                DefaultRetryBaseDelayMilliseconds,
+                DefaultMaximumRetryAfterMilliseconds)
         {
+        }
+
+        internal ModelClient(
+            int responseHeadersTimeoutMilliseconds,
+            int responseReadIdleTimeoutMilliseconds,
+            int maximumRequestAttempts,
+            int retryBaseDelayMilliseconds,
+            int maximumRetryAfterMilliseconds)
+        {
+            if (responseHeadersTimeoutMilliseconds <= 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    "responseHeadersTimeoutMilliseconds");
+            }
+
+            if (responseReadIdleTimeoutMilliseconds <= 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    "responseReadIdleTimeoutMilliseconds");
+            }
+
+            if (maximumRequestAttempts <= 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    "maximumRequestAttempts");
+            }
+
+            if (retryBaseDelayMilliseconds < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    "retryBaseDelayMilliseconds");
+            }
+
+            if (maximumRetryAfterMilliseconds <= 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    "maximumRetryAfterMilliseconds");
+            }
+
             HttpClientHandler handler = new HttpClientHandler();
             handler.AutomaticDecompression =
                 DecompressionMethods.GZip | DecompressionMethods.Deflate;
@@ -47,6 +102,15 @@ namespace FilePromptAIWin7
 
             client = new HttpClient(handler);
             client.Timeout = TimeSpan.FromMilliseconds(Timeout.Infinite);
+            responseHeadersTimeout = TimeSpan.FromMilliseconds(
+                responseHeadersTimeoutMilliseconds);
+            responseReadIdleTimeout = TimeSpan.FromMilliseconds(
+                responseReadIdleTimeoutMilliseconds);
+            this.maximumRequestAttempts = maximumRequestAttempts;
+            retryBaseDelay = TimeSpan.FromMilliseconds(
+                retryBaseDelayMilliseconds);
+            maximumRetryAfter = TimeSpan.FromMilliseconds(
+                maximumRetryAfterMilliseconds);
             json = new JavaScriptSerializer();
             json.MaxJsonLength = int.MaxValue;
             json.RecursionLimit = 256;
@@ -382,6 +446,67 @@ namespace FilePromptAIWin7
                     "模型请求内容超过 32 MB 安全限制，请减少资料或会话内容。");
             }
 
+            bool emittedDelta = false;
+            Action<string> trackedDelta = delegate(string value)
+            {
+                emittedDelta = true;
+                Notify(onDelta, value);
+            };
+
+            // A retry is safe only while no visible stream delta has escaped.
+            for (int attemptNumber = 1;
+                attemptNumber <= maximumRequestAttempts;
+                attemptNumber++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                TimeSpan? retryAfter = null;
+                try
+                {
+                    return await SendSingleAttemptAsync(
+                        attempt,
+                        request,
+                        payload,
+                        stream,
+                        trackedDelta,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (AttemptException exception)
+                {
+                    if (emittedDelta ||
+                        attemptNumber >= maximumRequestAttempts ||
+                        !CanRetry(exception))
+                    {
+                        throw;
+                    }
+
+                    retryAfter = exception.RetryAfter;
+                }
+                catch (ConnectionAttemptException)
+                {
+                    if (emittedDelta ||
+                        attemptNumber >= maximumRequestAttempts)
+                    {
+                        throw;
+                    }
+                }
+
+                await DelayBeforeRetryAsync(
+                    attemptNumber,
+                    retryAfter,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            throw new InvalidOperationException("模型请求重试状态无效。");
+        }
+
+        private async Task<string> SendSingleAttemptAsync(
+            EndpointAttempt attempt,
+            ModelRequest request,
+            string payload,
+            bool stream,
+            Action<string> onDelta,
+            CancellationToken cancellationToken)
+        {
             using (HttpRequestMessage message = new HttpRequestMessage(
                 HttpMethod.Post,
                 attempt.Url))
@@ -400,9 +525,8 @@ namespace FilePromptAIWin7
                     0.9));
                 message.Content = new StringContent(payload, Encoding.UTF8, "application/json");
 
-                HttpResponseMessage response = await client.SendAsync(
+                HttpResponseMessage response = await SendForHeadersAsync(
                     message,
-                    HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
                 using (response)
                 using (CancellationTokenRegistration registration =
@@ -419,7 +543,8 @@ namespace FilePromptAIWin7
                             throw new AttemptException(
                                 (int)response.StatusCode,
                                 errorBody,
-                                requestId);
+                                requestId,
+                                GetRetryAfter(response));
                         }
 
                         string mediaType = response.Content.Headers.ContentType == null
@@ -497,6 +622,53 @@ namespace FilePromptAIWin7
             string payload,
             CancellationToken cancellationToken)
         {
+            for (int attemptNumber = 1;
+                attemptNumber <= maximumRequestAttempts;
+                attemptNumber++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                TimeSpan? retryAfter = null;
+                try
+                {
+                    return await SendSingleToolAttemptAsync(
+                        attempt,
+                        request,
+                        payload,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (AttemptException exception)
+                {
+                    if (attemptNumber >= maximumRequestAttempts ||
+                        !CanRetry(exception))
+                    {
+                        throw;
+                    }
+
+                    retryAfter = exception.RetryAfter;
+                }
+                catch (ConnectionAttemptException)
+                {
+                    if (attemptNumber >= maximumRequestAttempts)
+                    {
+                        throw;
+                    }
+                }
+
+                await DelayBeforeRetryAsync(
+                    attemptNumber,
+                    retryAfter,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            throw new InvalidOperationException("工具请求重试状态无效。");
+        }
+
+        private async Task<object> SendSingleToolAttemptAsync(
+            EndpointAttempt attempt,
+            ModelRequest request,
+            string payload,
+            CancellationToken cancellationToken)
+        {
             using (HttpRequestMessage message = new HttpRequestMessage(
                 HttpMethod.Post,
                 attempt.Url))
@@ -515,9 +687,8 @@ namespace FilePromptAIWin7
                     Encoding.UTF8,
                     "application/json");
 
-                HttpResponseMessage response = await client.SendAsync(
+                HttpResponseMessage response = await SendForHeadersAsync(
                     message,
-                    HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
                 using (response)
                 using (CancellationTokenRegistration registration =
@@ -535,7 +706,8 @@ namespace FilePromptAIWin7
                             throw new AttemptException(
                                 (int)response.StatusCode,
                                 body,
-                                requestId);
+                                requestId,
+                                GetRetryAfter(response));
                         }
 
                         object parsed;
@@ -598,7 +770,151 @@ namespace FilePromptAIWin7
             }
         }
 
-        private static async Task<string> ReadBoundedResponseAsync(
+        private async Task<HttpResponseMessage> SendForHeadersAsync(
+            HttpRequestMessage message,
+            CancellationToken cancellationToken)
+        {
+            using (CancellationTokenSource timeoutCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken))
+            {
+                timeoutCancellation.CancelAfter(responseHeadersTimeout);
+                try
+                {
+                    return await client.SendAsync(
+                        message,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        timeoutCancellation.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException exception)
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        throw new OperationCanceledException(cancellationToken);
+                    }
+
+                    throw new ConnectionAttemptException(
+                        "连接或等待响应头超时（" +
+                        FormatSeconds(responseHeadersTimeout) + " 秒）。",
+                        exception);
+                }
+                catch (HttpRequestException exception)
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        throw new OperationCanceledException(cancellationToken);
+                    }
+
+                    throw new ConnectionAttemptException(
+                        exception.Message,
+                        exception);
+                }
+                catch (IOException exception)
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        throw new OperationCanceledException(cancellationToken);
+                    }
+
+                    throw new ConnectionAttemptException(
+                        exception.Message,
+                        exception);
+                }
+            }
+        }
+
+        private bool CanRetry(AttemptException exception)
+        {
+            if (exception.StatusCode != 429 &&
+                exception.StatusCode != 502 &&
+                exception.StatusCode != 503 &&
+                exception.StatusCode != 504)
+            {
+                return false;
+            }
+
+            return !exception.RetryAfter.HasValue ||
+                exception.RetryAfter.Value <= maximumRetryAfter;
+        }
+
+        private async Task DelayBeforeRetryAsync(
+            int completedAttemptNumber,
+            TimeSpan? retryAfter,
+            CancellationToken cancellationToken)
+        {
+            double multiplier = Math.Pow(
+                2.0,
+                Math.Min(completedAttemptNumber - 1, 10));
+            double milliseconds = Math.Min(
+                retryBaseDelay.TotalMilliseconds * multiplier,
+                maximumRetryAfter.TotalMilliseconds);
+            TimeSpan delay = TimeSpan.FromMilliseconds(milliseconds);
+            if (retryAfter.HasValue && retryAfter.Value > delay)
+            {
+                delay = retryAfter.Value;
+            }
+
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+        }
+
+        private async Task<T> AwaitReadWithIdleTimeoutAsync<T>(
+            Task<T> readTask,
+            CancellationToken cancellationToken)
+        {
+            using (CancellationTokenSource timeoutCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken))
+            {
+                Task timeoutTask = Task.Delay(
+                    responseReadIdleTimeout,
+                    timeoutCancellation.Token);
+                Task completed = await Task.WhenAny(
+                    readTask,
+                    timeoutTask).ConfigureAwait(false);
+                if (completed == readTask || readTask.IsCompleted)
+                {
+                    timeoutCancellation.Cancel();
+                    return await readTask.ConfigureAwait(false);
+                }
+
+                ObserveFault(readTask);
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new ConnectionAttemptException(
+                    "模型接口响应读取超时（连续 " +
+                    FormatSeconds(responseReadIdleTimeout) +
+                    " 秒未收到数据）。",
+                    null);
+            }
+        }
+
+        private static void ObserveFault(Task task)
+        {
+            task.ContinueWith(
+                delegate(Task completed)
+                {
+                    AggregateException ignored = completed.Exception;
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted |
+                    TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
+        private static string FormatSeconds(TimeSpan value)
+        {
+            return value.TotalSeconds.ToString(
+                "0.###",
+                CultureInfo.InvariantCulture);
+        }
+
+        private async Task<string> ReadBoundedResponseAsync(
             HttpContent content,
             CancellationToken cancellationToken)
         {
@@ -629,10 +945,9 @@ namespace FilePromptAIWin7
                 while (true)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    int read = await reader.ReadAsync(
-                        buffer,
-                        0,
-                        buffer.Length).ConfigureAwait(false);
+                    int read = await AwaitReadWithIdleTimeoutAsync(
+                        reader.ReadAsync(buffer, 0, buffer.Length),
+                        cancellationToken).ConfigureAwait(false);
                     if (read == 0)
                     {
                         break;
@@ -659,6 +974,9 @@ namespace FilePromptAIWin7
         {
             StringBuilder result = new StringBuilder();
             StringBuilder eventData = new StringBuilder();
+            string eventName = string.Empty;
+            bool streamCompleted = false;
+            // Closing a socket is not a successful stream terminator.
             using (StreamReader reader = new StreamReader(
                 stream,
                 Encoding.UTF8,
@@ -672,7 +990,9 @@ namespace FilePromptAIWin7
                     string line;
                     try
                     {
-                        line = await reader.ReadLineAsync().ConfigureAwait(false);
+                        line = await AwaitReadWithIdleTimeoutAsync(
+                            reader.ReadLineAsync(),
+                            cancellationToken).ConfigureAwait(false);
                     }
                     catch (ObjectDisposedException)
                     {
@@ -686,7 +1006,11 @@ namespace FilePromptAIWin7
 
                     if (line == null)
                     {
-                        ProcessEventData(eventData, result, onDelta);
+                        streamCompleted = ProcessEventData(
+                            eventData,
+                            eventName,
+                            result,
+                            onDelta);
                         break;
                     }
 
@@ -698,8 +1022,13 @@ namespace FilePromptAIWin7
 
                     if (line.Length == 0)
                     {
-                        bool completed = ProcessEventData(eventData, result, onDelta);
-                        if (completed)
+                        streamCompleted = ProcessEventData(
+                            eventData,
+                            eventName,
+                            result,
+                            onDelta);
+                        eventName = string.Empty;
+                        if (streamCompleted)
                         {
                             break;
                         }
@@ -730,7 +1059,20 @@ namespace FilePromptAIWin7
 
                         eventData.Append(eventLine);
                     }
+                    else if (line.StartsWith(
+                        "event:",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        eventName = line.Substring(6).Trim();
+                    }
                 }
+            }
+
+            if (!streamCompleted)
+            {
+                throw new ConnectionAttemptException(
+                    "流式响应未完整结束，请重试；已收到的部分内容不会保存为成功回复。",
+                    null);
             }
 
             if (result.Length == 0)
@@ -744,12 +1086,13 @@ namespace FilePromptAIWin7
 
         private bool ProcessEventData(
             StringBuilder eventData,
+            string eventName,
             StringBuilder result,
             Action<string> onDelta)
         {
             if (eventData.Length == 0)
             {
-                return false;
+                return IsCompletionName(eventName);
             }
 
             string data = eventData.ToString();
@@ -811,7 +1154,110 @@ namespace FilePromptAIWin7
                 }
             }
 
+            return IsCompletionName(eventName) ||
+                IsExplicitStreamCompletion(parsed);
+        }
+
+        private static bool IsExplicitStreamCompletion(object parsed)
+        {
+            IDictionary<string, object> root = AsDictionary(parsed);
+            if (root == null)
+            {
+                return false;
+            }
+
+            object flag = GetValue(root, "done");
+            if (IsTrue(flag))
+            {
+                return true;
+            }
+
+            flag = GetValue(root, "completed");
+            if (IsTrue(flag))
+            {
+                return true;
+            }
+
+            if (IsCompletionName(GetString(root, "status")) ||
+                IsCompletionName(GetString(root, "type")) ||
+                IsCompletionName(GetString(root, "event")))
+            {
+                return true;
+            }
+
+            if (HasFinishReason(root))
+            {
+                return true;
+            }
+
+            IList choices = AsList(GetValue(root, "choices"));
+            if (choices == null)
+            {
+                return false;
+            }
+
+            foreach (object choiceValue in choices)
+            {
+                if (HasFinishReason(AsDictionary(choiceValue)))
+                {
+                    return true;
+                }
+            }
+
             return false;
+        }
+
+        private static bool HasFinishReason(
+            IDictionary<string, object> value)
+        {
+            if (value == null)
+            {
+                return false;
+            }
+
+            object reason = GetValue(value, "finish_reason");
+            return reason != null &&
+                !string.IsNullOrWhiteSpace(Convert.ToString(
+                    reason,
+                    CultureInfo.InvariantCulture));
+        }
+
+        private static bool IsTrue(object value)
+        {
+            return value is bool && (bool)value;
+        }
+
+        private static bool IsCompletionName(string value)
+        {
+            string normalized = (value ?? string.Empty).Trim();
+            return string.Equals(
+                    normalized,
+                    "done",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "complete",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "completed",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "succeeded",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "response.completed",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "message_stop",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "message.completed",
+                    StringComparison.OrdinalIgnoreCase);
         }
 
         private static void EnsureResponseCapacity(
@@ -1812,6 +2258,41 @@ namespace FilePromptAIWin7
             return string.Empty;
         }
 
+        private static TimeSpan? GetRetryAfter(HttpResponseMessage response)
+        {
+            RetryConditionHeaderValue header;
+            try
+            {
+                header = response.Headers.RetryAfter;
+            }
+            catch (FormatException)
+            {
+                return null;
+            }
+
+            if (header == null)
+            {
+                return null;
+            }
+
+            if (header.Delta.HasValue)
+            {
+                return header.Delta.Value < TimeSpan.Zero
+                    ? TimeSpan.Zero
+                    : header.Delta.Value;
+            }
+
+            if (header.Date.HasValue)
+            {
+                TimeSpan remaining = header.Date.Value - DateTimeOffset.UtcNow;
+                return remaining < TimeSpan.Zero
+                    ? TimeSpan.Zero
+                    : remaining;
+            }
+
+            return null;
+        }
+
         private static void ValidateRequest(ModelRequest request)
         {
             if (request == null)
@@ -1877,13 +2358,29 @@ namespace FilePromptAIWin7
             public int StatusCode { get; private set; }
             public string Body { get; private set; }
             public string RequestId { get; private set; }
+            public TimeSpan? RetryAfter { get; private set; }
 
-            public AttemptException(int statusCode, string body, string requestId)
+            public AttemptException(
+                int statusCode,
+                string body,
+                string requestId,
+                TimeSpan? retryAfter)
                 : base("HTTP " + statusCode.ToString(CultureInfo.InvariantCulture))
             {
                 StatusCode = statusCode;
                 Body = body;
                 RequestId = requestId;
+                RetryAfter = retryAfter;
+            }
+        }
+
+        private sealed class ConnectionAttemptException : HttpRequestException
+        {
+            public ConnectionAttemptException(
+                string message,
+                Exception innerException)
+                : base(message, innerException)
+            {
             }
         }
     }

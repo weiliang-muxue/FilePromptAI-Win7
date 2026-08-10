@@ -28,7 +28,8 @@ $frameworkFolders = @(
     'System.Security.Cryptography.Xml.8.0.2\lib\net462',
     'System.Text.Encoding.CodePages.5.0.0\lib\net461',
     'System.Threading.Tasks.Extensions.4.5.2\lib\netstandard2.0',
-    'ZString.2.6.0\lib\netstandard2.0'
+    'ZString.2.6.0\lib\netstandard2.0',
+    'PDFsharp-MigraDoc-gdi.1.50.5147\lib\net20'
 )
 
 $expectedLibraryFiles = @(
@@ -59,7 +60,12 @@ $expectedLibraryFiles = @(
     'UglyToad.PdfPig.Package.dll',
     'UglyToad.PdfPig.Tokenization.dll',
     'UglyToad.PdfPig.Tokens.dll',
-    'ZString.dll'
+    'ZString.dll',
+    'MigraDoc.DocumentObjectModel-gdi.dll',
+    'MigraDoc.Rendering-gdi.dll',
+    'MigraDoc.RtfRendering-gdi.dll',
+    'PdfSharp-gdi.dll',
+    'PdfSharp.Charting-gdi.dll'
 )
 
 $copyPlan = @()

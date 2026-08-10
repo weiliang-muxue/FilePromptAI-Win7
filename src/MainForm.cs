@@ -18,6 +18,12 @@ namespace FilePromptAIWin7
             "FilePrompt AI  ·  内网文件问答工作台";
         private const int MaxCombinedTextCharacters = 4000000;
         private const int MaxDisplayedUserCharacters = 8000;
+        private const int MaximumFilesPerAdd = 128;
+        private const int MaximumPathCandidates = 4096;
+        private const int PathResolutionTimeoutMilliseconds = 15000;
+        // Keep enough room below ModelClient's 32 MB serialized-request limit
+        // for JSON, tool definitions, and provider-specific envelope fields.
+        private const long MaximumConversationContextCharacters = 48000L;
         private const float ExpandedSettingsHeight = 94F;
 
         private readonly FileContentExtractor extractor;
@@ -43,6 +49,8 @@ namespace FilePromptAIWin7
         private RichTextBox promptTextBox;
         private RichTextBox outputTextBox;
         private Button addFileButton;
+        private TextBox pathTextBox;
+        private Button readPathButton;
         private Button pasteButton;
         private Button removeButton;
         private Button clearButton;
@@ -50,8 +58,7 @@ namespace FilePromptAIWin7
         private Button stopButton;
         private Button copyOutputButton;
         private Button saveOutputButton;
-        private Button exportWordButton;
-        private Button exportTableButton;
+        private ContextMenuStrip exportMenu;
         private Button newSessionButton;
         private Button deleteSessionButton;
         private Button renameSessionButton;
@@ -67,8 +74,10 @@ namespace FilePromptAIWin7
 
         private CancellationTokenSource generationCancellation;
         private CancellationTokenSource connectionTestCancellation;
+        private CancellationTokenSource fileAddCancellation;
         private StringBuilder streamedResponse;
         private bool isAddingFiles;
+        private bool isClosing;
         private bool isLoadingSession;
         private bool settingsExpanded;
         private string sendShortcutMode;
@@ -83,6 +92,32 @@ namespace FilePromptAIWin7
             {
                 Prompt = string.Empty;
                 Items = new List<InputItem>();
+            }
+        }
+
+        private sealed class FileResolutionResult
+        {
+            public IList<string> Files { get; private set; }
+            public IList<string> RejectedPaths { get; private set; }
+            public bool TooManyFiles { get; set; }
+
+            public FileResolutionResult()
+            {
+                Files = new List<string>();
+                RejectedPaths = new List<string>();
+            }
+        }
+
+        private sealed class FileAddResult
+        {
+            public int AddedCount { get; set; }
+            public int SkippedCount { get; set; }
+            public IList<string> FailedPaths { get; private set; }
+            public bool TimedOut { get; set; }
+
+            public FileAddResult()
+            {
+                FailedPaths = new List<string>();
             }
         }
 
@@ -475,9 +510,9 @@ namespace FilePromptAIWin7
             area.Dock = DockStyle.Fill;
             area.ColumnCount = 1;
             area.RowCount = 3;
-            area.RowStyles.Add(new RowStyle(SizeType.Percent, 30F));
-            area.RowStyles.Add(new RowStyle(SizeType.Percent, 24F));
-            area.RowStyles.Add(new RowStyle(SizeType.Percent, 46F));
+            area.RowStyles.Add(new RowStyle(SizeType.Percent, 34F));
+            area.RowStyles.Add(new RowStyle(SizeType.Percent, 22F));
+            area.RowStyles.Add(new RowStyle(SizeType.Percent, 44F));
 
             area.Controls.Add(CreateInputsPanel(), 0, 0);
             area.Controls.Add(CreatePromptPanel(), 0, 1);
@@ -495,14 +530,32 @@ namespace FilePromptAIWin7
             group.DragEnter += OnDragEnter;
             group.DragDrop += OnDragDrop;
 
-            FlowLayoutPanel buttons = new FlowLayoutPanel();
+            TableLayoutPanel buttons = new TableLayoutPanel();
             buttons.Dock = DockStyle.Top;
-            buttons.Height = 34;
+            buttons.Height = 60;
             buttons.Padding = new Padding(2, 1, 2, 0);
-            buttons.WrapContents = false;
+            buttons.ColumnCount = 1;
+            buttons.RowCount = 2;
+            buttons.RowStyles.Add(new RowStyle(SizeType.Absolute, 31F));
+            buttons.RowStyles.Add(new RowStyle(SizeType.Absolute, 27F));
+
+            FlowLayoutPanel actionRow = new FlowLayoutPanel();
+            actionRow.Dock = DockStyle.Fill;
+            actionRow.WrapContents = false;
+            actionRow.Padding = new Padding(0, 0, 0, 0);
 
             addFileButton = CreateButton("添加文件", 84);
             addFileButton.Click += OnAddFileClick;
+            pathTextBox = new TextBox();
+            pathTextBox.Multiline = true;
+            pathTextBox.AcceptsReturn = false;
+            pathTextBox.WordWrap = false;
+            pathTextBox.ScrollBars = ScrollBars.Horizontal;
+            pathTextBox.Dock = DockStyle.Fill;
+            pathTextBox.Margin = new Padding(3, 2, 3, 2);
+            pathTextBox.AccessibleName = "文件路径（可粘贴多个，每行一个）";
+            readPathButton = CreateButton("读取路径", 80);
+            readPathButton.Click += OnReadPathClick;
             pasteButton = CreateButton("粘贴内容", 84);
             pasteButton.Click += OnPasteClick;
             removeButton = CreateButton("移除选中", 84);
@@ -511,16 +564,38 @@ namespace FilePromptAIWin7
             clearButton.Click += OnClearClick;
 
             Label hint = new Label();
-            hint.Text = "仅发送内容和文件名，不发送本地路径";
+            hint.Text = "路径需点击读取；只发送内容和文件名";
             hint.AutoSize = true;
+            hint.TextAlign = ContentAlignment.MiddleLeft;
             hint.ForeColor = UiTheme.TextMuted;
-            hint.Margin = new Padding(12, 7, 3, 3);
+            hint.Margin = new Padding(10, 7, 3, 0);
 
-            buttons.Controls.Add(addFileButton);
-            buttons.Controls.Add(pasteButton);
-            buttons.Controls.Add(removeButton);
-            buttons.Controls.Add(clearButton);
-            buttons.Controls.Add(hint);
+            actionRow.Controls.Add(addFileButton);
+            actionRow.Controls.Add(pasteButton);
+            actionRow.Controls.Add(removeButton);
+            actionRow.Controls.Add(clearButton);
+            actionRow.Controls.Add(hint);
+
+            TableLayoutPanel pathRow = new TableLayoutPanel();
+            pathRow.Dock = DockStyle.Fill;
+            pathRow.ColumnCount = 3;
+            pathRow.RowCount = 1;
+            pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38F));
+            pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84F));
+
+            Label pathLabel = new Label();
+            pathLabel.Text = "路径";
+            pathLabel.Dock = DockStyle.Fill;
+            pathLabel.TextAlign = ContentAlignment.MiddleLeft;
+            pathLabel.ForeColor = UiTheme.TextSecondary;
+            pathLabel.AccessibleName = "文件路径输入";
+            pathRow.Controls.Add(pathLabel, 0, 0);
+            pathRow.Controls.Add(pathTextBox, 1, 0);
+            pathRow.Controls.Add(readPathButton, 2, 0);
+
+            buttons.Controls.Add(actionRow, 0, 0);
+            buttons.Controls.Add(pathRow, 0, 1);
 
             inputListView = new ListView();
             inputListView.Dock = DockStyle.Fill;
@@ -650,19 +725,21 @@ namespace FilePromptAIWin7
 
             copyOutputButton = CreateButton("复制回复", 76);
             copyOutputButton.Click += OnCopyOutputClick;
-            saveOutputButton = CreateButton("保存回复", 76);
-            saveOutputButton.Click += OnSaveOutputClick;
-            exportWordButton = CreateButton("导出 Word", 86);
-            exportWordButton.Click += OnExportWordClick;
-            exportTableButton = CreateButton("导出表格", 86);
-            exportTableButton.Click += OnExportTableClick;
+            saveOutputButton = CreateButton("导出文件", 86);
+            saveOutputButton.AccessibleName = "导出回复或会话文件";
+            exportMenu = CreateExportMenu();
+            saveOutputButton.ContextMenuStrip = exportMenu;
+            saveOutputButton.Click += delegate
+            {
+                exportMenu.Show(
+                    saveOutputButton,
+                    new Point(0, saveOutputButton.Height));
+            };
 
             buttons.Controls.Add(generateButton);
             buttons.Controls.Add(stopButton);
             buttons.Controls.Add(copyOutputButton);
             buttons.Controls.Add(saveOutputButton);
-            buttons.Controls.Add(exportWordButton);
-            buttons.Controls.Add(exportTableButton);
 
             outputTextBox = new RichTextBox();
             outputTextBox.Dock = DockStyle.Fill;
@@ -1268,14 +1345,8 @@ namespace FilePromptAIWin7
             }
 
             bool hasReply = !string.IsNullOrEmpty(GetLatestAssistantOutput());
-            ConversationSession session = conversationStore.CurrentSession;
-            bool hasConversation = session != null &&
-                session.Messages != null &&
-                session.Messages.Count > 0;
             copyOutputButton.Enabled = !generating && hasReply;
             saveOutputButton.Enabled = !generating && hasReply;
-            exportTableButton.Enabled = !generating && hasReply;
-            exportWordButton.Enabled = !generating && hasConversation;
         }
 
         private string BuildConnectionStatus()
@@ -1514,7 +1585,7 @@ namespace FilePromptAIWin7
 
         private void OnExtensionsClick(object sender, EventArgs args)
         {
-            if (IsBusy)
+            if (IsBusy || isClosing)
             {
                 return;
             }
@@ -2002,21 +2073,105 @@ namespace FilePromptAIWin7
             }
         }
 
-        private async Task AddFilesAsync(IEnumerable<string> paths)
+        private async void OnReadPathClick(object sender, EventArgs args)
         {
             if (IsBusy)
             {
-                SetStatus("当前任务尚未完成，请稍候。");
                 return;
             }
 
-            string[] files = paths
-                .Where(path => !string.IsNullOrWhiteSpace(path) &&
-                    File.Exists(path))
-                .ToArray();
-            if (files.Length == 0)
+            string raw = pathTextBox == null ? string.Empty : pathTextBox.Text;
+            string[] paths = ParsePastedPaths(raw);
+            if (paths.Length == 0)
+            {
+                ShowValidation(
+                    "请先粘贴至少一个文件路径（每行一个），再点击“读取路径”。",
+                    pathTextBox);
+                return;
+            }
+
+            FileAddResult addResult = await AddFilesAsync(paths);
+            if (addResult == null)
             {
                 return;
+            }
+
+            if (addResult.FailedPaths.Count == 0 &&
+                addResult.AddedCount + addResult.SkippedCount > 0)
+            {
+                pathTextBox.Clear();
+            }
+            else if (addResult.FailedPaths.Count > 0 &&
+                pathTextBox != null && !IsDisposed)
+            {
+                pathTextBox.Text = string.Join(
+                    Environment.NewLine,
+                    addResult.FailedPaths.ToArray());
+                SetStatus(
+                    "已读取 " + addResult.AddedCount +
+                    " 个文件；未读取的路径已保留，可修正后重试。");
+            }
+        }
+
+        private static string[] ParsePastedPaths(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return new string[0];
+            }
+
+            // Explorer and command prompts commonly wrap a path in quotes.
+            // Keep parsing line-oriented so spaces and semicolons in a Windows
+            // filename remain valid; users can paste multiple lines directly.
+            return raw
+                .Replace("\r\n", "\n")
+                .Replace('\r', '\n')
+                .Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(path => path.Trim().Trim('"'))
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private async Task<FileAddResult> AddFilesAsync(
+            IEnumerable<string> paths)
+        {
+            FileAddResult outcome = new FileAddResult();
+            if (IsBusy || isClosing)
+            {
+                if (!isClosing)
+                {
+                    SetStatus("当前任务尚未完成，请稍候。");
+                }
+                return outcome;
+            }
+
+            string[] candidates = (paths ?? new string[0])
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .ToArray();
+            if (candidates.Length == 0)
+            {
+                return outcome;
+            }
+
+            // Bound raw input separately from the real-file limit. This lets
+            // a pasted list contain harmless duplicates or missing paths
+            // without causing a valid file to be rejected before resolution.
+            if (candidates.Length > MaximumPathCandidates)
+            {
+                MessageBox.Show(
+                    this,
+                    "一次最多检查 " + MaximumPathCandidates +
+                    " 个路径；实际文件最多添加 " + MaximumFilesPerAdd +
+                    " 个，请分批处理。",
+                    "文件过多",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                foreach (string candidate in candidates)
+                {
+                    AddFailedPath(outcome, candidate);
+                }
+                return outcome;
             }
 
             isAddingFiles = true;
@@ -2026,44 +2181,138 @@ namespace FilePromptAIWin7
             extensionsButton.Enabled = false;
             progressBar.Visible = true;
             List<string> errors = new List<string>();
-
+            CancellationTokenSource addCancellation =
+                new CancellationTokenSource();
+            fileAddCancellation = addCancellation;
             try
             {
-                foreach (string path in files)
+                CancellationToken cancellationToken = addCancellation.Token;
+                SetStatus("正在检查文件路径...");
+                Task<FileResolutionResult> resolution = Task.Run(
+                    delegate
+                    {
+                        return ResolveExistingFiles(
+                            candidates,
+                            cancellationToken);
+                    },
+                    cancellationToken);
+                Task completed = await Task.WhenAny(
+                    resolution,
+                    Task.Delay(PathResolutionTimeoutMilliseconds));
+                if (!ReferenceEquals(completed, resolution))
                 {
+                    addCancellation.Cancel();
+                    SetStatus(
+                        "文件路径检查超时，请确认网络路径可访问后重试。");
+                    outcome.TimedOut = true;
+                    foreach (string candidate in candidates)
+                    {
+                        AddFailedPath(outcome, candidate);
+                    }
+                    return outcome;
+                }
+
+                FileResolutionResult resolved = await resolution;
+                foreach (string rejected in resolved.RejectedPaths)
+                {
+                    AddFailedPath(outcome, rejected);
+                }
+
+                if (resolved.TooManyFiles)
+                {
+                    MessageBox.Show(
+                        this,
+                        "规范化后一次最多添加 " + MaximumFilesPerAdd +
+                        " 个文件，请分批处理。",
+                        "文件过多",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    foreach (string candidate in candidates)
+                    {
+                        AddFailedPath(outcome, candidate);
+                    }
+
+                    return outcome;
+                }
+
+                if (resolved.Files.Count == 0)
+                {
+                    SetStatus(
+                        "没有找到可读取的文件；目录不会被自动扫描。");
+                    return outcome;
+                }
+
+                foreach (string path in resolved.Files)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
                     string displayName = Path.GetFileName(path);
                     SetStatus("正在提取：" + displayName);
                     try
                     {
                         InputItem item = await Task.Run(
-                            delegate { return extractor.ExtractFile(path); });
-                        AddInputItem(item);
+                            delegate { return extractor.ExtractFile(path); },
+                            cancellationToken);
+                        if (item != null)
+                        {
+                            item.SourcePath = path;
+                            if (AddInputItem(item))
+                            {
+                                outcome.AddedCount++;
+                            }
+                            else
+                            {
+                                outcome.SkippedCount++;
+                            }
+                        }
                     }
                     catch (Exception exception)
                     {
+                        if (exception is OperationCanceledException &&
+                            cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+
+                        AddFailedPath(outcome, path);
                         errors.Add(displayName + "：" + exception.Message);
                     }
                 }
             }
+            catch (OperationCanceledException)
+            {
+                if (!isClosing)
+                {
+                    SetStatus("文件读取已取消，请重新添加需要处理的文件。");
+                }
+            }
             finally
             {
+                if (ReferenceEquals(fileAddCancellation, addCancellation))
+                {
+                    fileAddCancellation = null;
+                }
+
+                addCancellation.Dispose();
                 isAddingFiles = false;
-                SetInputButtonsEnabled(true);
-                SetSessionNavigationEnabled(
-                    generationCancellation == null &&
-                    connectionTestCancellation == null);
-                testConnectionButton.Enabled =
-                    generationCancellation == null &&
-                    connectionTestCancellation == null &&
-                    HasCompleteConnectionSettings();
-                extensionsButton.Enabled = generationCancellation == null &&
-                    connectionTestCancellation == null;
-                progressBar.Visible = generationCancellation != null ||
-                    connectionTestCancellation != null;
-                UpdateInputStatus();
+                if (!isClosing && !IsDisposed && !Disposing)
+                {
+                    SetInputButtonsEnabled(true);
+                    SetSessionNavigationEnabled(
+                        generationCancellation == null &&
+                        connectionTestCancellation == null);
+                    testConnectionButton.Enabled =
+                        generationCancellation == null &&
+                        connectionTestCancellation == null &&
+                        HasCompleteConnectionSettings();
+                    extensionsButton.Enabled = generationCancellation == null &&
+                        connectionTestCancellation == null;
+                    progressBar.Visible = generationCancellation != null ||
+                        connectionTestCancellation != null;
+                    UpdateInputStatus();
+                }
             }
 
-            if (errors.Count > 0)
+            if (!isClosing && !IsDisposed && errors.Count > 0)
             {
                 MessageBox.Show(
                     "以下内容未能添加：\r\n\r\n" +
@@ -2071,6 +2320,91 @@ namespace FilePromptAIWin7
                     "部分文件处理失败",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
+            }
+            else if (!isClosing && !IsDisposed && outcome.SkippedCount > 0)
+            {
+                SetStatus(
+                    "已添加 " + outcome.AddedCount +
+                    " 个文件；已跳过 " + outcome.SkippedCount +
+                    " 个重复文件。");
+            }
+
+            return outcome;
+        }
+
+        private static FileResolutionResult ResolveExistingFiles(
+            IEnumerable<string> paths)
+        {
+            return ResolveExistingFiles(paths, CancellationToken.None);
+        }
+
+        private static FileResolutionResult ResolveExistingFiles(
+            IEnumerable<string> paths,
+            CancellationToken cancellationToken)
+        {
+            FileResolutionResult result = new FileResolutionResult();
+            List<string> normalizedPaths = new List<string>();
+            HashSet<string> seen = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (string path in paths ?? new string[0])
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    // File.Exists returns false for directories, so this never
+                    // expands or scans a folder supplied by the user.
+                    string fullPath = Path.GetFullPath(path);
+                    if (seen.Add(fullPath))
+                    {
+                        normalizedPaths.Add(fullPath);
+                    }
+                }
+                catch (Exception)
+                {
+                    result.RejectedPaths.Add(path);
+                }
+            }
+
+            foreach (string path in normalizedPaths)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    if (File.Exists(path))
+                    {
+                        result.Files.Add(path);
+                        if (result.Files.Count > MaximumFilesPerAdd)
+                        {
+                            result.TooManyFiles = true;
+                            return result;
+                        }
+                    }
+                    else
+                    {
+                        result.RejectedPaths.Add(path);
+                    }
+                }
+                catch (Exception)
+                {
+                    result.RejectedPaths.Add(path);
+                }
+            }
+
+            return result;
+        }
+
+        private static void AddFailedPath(
+            FileAddResult result,
+            string path)
+        {
+            if (result == null || string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            if (!result.FailedPaths.Contains(path))
+            {
+                result.FailedPaths.Add(path);
             }
         }
 
@@ -2130,13 +2464,25 @@ namespace FilePromptAIWin7
             }
         }
 
-        private void AddInputItem(InputItem item)
+        private bool AddInputItem(InputItem item)
         {
             if (item == null)
             {
-                return;
+                return false;
             }
 
+            string sourcePath = NormalizeSourcePath(item.SourcePath);
+            if (!string.IsNullOrEmpty(sourcePath) &&
+                inputItems.Any(existing => string.Equals(
+                    NormalizeSourcePath(
+                        existing == null ? null : existing.SourcePath),
+                    sourcePath,
+                    StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
+            item.SourcePath = sourcePath;
             inputItems.Add(item);
             ListViewItem row = new ListViewItem(item.Name);
             row.SubItems.Add(item.GetKindText());
@@ -2144,6 +2490,24 @@ namespace FilePromptAIWin7
             row.SubItems.Add(item.Note ?? string.Empty);
             row.Tag = item;
             inputListView.Items.Add(row);
+            return true;
+        }
+
+        private static string NormalizeSourcePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                return Path.GetFullPath(path);
+            }
+            catch (Exception)
+            {
+                return path.Trim();
+            }
         }
 
         private void OnRemoveClick(object sender, EventArgs args)
@@ -2269,21 +2633,25 @@ namespace FilePromptAIWin7
             List<InputItem> attachments = inputItems
                 .Where(item => item.Kind != InputKind.Text)
                 .ToList();
+            string systemPrompt = extensionSettings == null
+                ? string.Empty
+                : extensionSettings.BuildSystemPrompt();
+            ConversationContextSelection contextSelection =
+                ConversationContextBudget.SelectRecentCompleteTurns(
+                    session.Messages,
+                    MaximumConversationContextCharacters,
+                    ConversationContextBudget.CountCharacters(systemPrompt),
+                    ConversationContextBudget.CountCharacters(prompt),
+                    EstimateAttachmentCharacters(attachments));
+            bool historyWasTrimmed = contextSelection.WasTruncated;
             ModelRequest request = new ModelRequest();
             request.EndpointUrl = endpoint;
             request.ApiKey = key;
             request.ModelName = model;
             request.Prompt = prompt;
-            request.SystemPrompt = extensionSettings == null
-                ? string.Empty
-                : extensionSettings.BuildSystemPrompt();
+            request.SystemPrompt = systemPrompt;
             request.Attachments = attachments;
-            request.ConversationMessages = session.Messages == null
-                ? new List<ConversationMessage>()
-                : session.Messages
-                    .Where(message => message != null)
-                    .Select(message => message.Clone())
-                    .ToList();
+            request.ConversationMessages = contextSelection.Messages;
 
             SaveSettings();
             if (session.Messages == null || session.Messages.Count == 0)
@@ -2411,7 +2779,10 @@ namespace FilePromptAIWin7
                     " 字符" +
                     (promptUnchanged
                         ? string.Empty
-                        : "；已保留等待期间输入的下一条指令"));
+                        : "；已保留等待期间输入的下一条指令") +
+                    (historyWasTrimmed
+                        ? "；会话较长，已保留最近完整问答"
+                        : string.Empty));
                 promptTextBox.Focus();
             }
             catch (OperationCanceledException)
@@ -2954,6 +3325,14 @@ namespace FilePromptAIWin7
                 visible.AppendLine(" 项");
             }
 
+            if (inputItems.Any(item => item != null &&
+                item.Kind != InputKind.Text))
+            {
+                visible.AppendLine();
+                visible.Append(
+                    "图片或内联文件只随本轮发送；后续轮次需再次添加。");
+            }
+
             return visible.ToString().TrimEnd();
         }
 
@@ -3013,6 +3392,27 @@ namespace FilePromptAIWin7
                 }
             }
 
+            IList<InputItem> binaryItems = inputItems
+                .Where(item => item != null && item.Kind != InputKind.Text)
+                .ToList();
+            if (binaryItems.Count > 0)
+            {
+                result.AppendLine();
+                result.AppendLine(
+                    "以下图片或内联文件仅随本轮发送；后续轮次如需重新分析，" +
+                    "请再次主动添加：");
+                foreach (InputItem item in binaryItems)
+                {
+                    result.Append("- ");
+                    result.Append(item.Name ?? string.Empty);
+                    result.Append("（");
+                    result.Append(item.GetKindText());
+                    result.Append("，");
+                    result.Append(item.GetSizeText());
+                    result.AppendLine("）");
+                }
+            }
+
             if (truncated)
             {
                 result.AppendLine();
@@ -3021,6 +3421,40 @@ namespace FilePromptAIWin7
             }
 
             return result.ToString();
+        }
+
+        private static long EstimateAttachmentCharacters(
+            IList<InputItem> attachments)
+        {
+            long total = 0L;
+            foreach (InputItem item in attachments ??
+                new List<InputItem>())
+            {
+                if (item == null)
+                {
+                    continue;
+                }
+
+                long bytes = item.BinaryData == null
+                    ? 0L
+                    : item.BinaryData.LongLength;
+                // Base64 expands each 3-byte block to 4 characters. Add a
+                // small envelope allowance for data URI, filename and MIME.
+                long encoded = bytes > long.MaxValue - 2L
+                    ? long.MaxValue
+                    : ((bytes + 2L) / 3L) * 4L;
+                long metadata = 128L +
+                    ConversationContextBudget.CountCharacters(item.Name) +
+                    ConversationContextBudget.CountCharacters(item.MimeType);
+                long itemTotal = encoded > long.MaxValue - metadata
+                    ? long.MaxValue
+                    : encoded + metadata;
+                total = total > long.MaxValue - itemTotal
+                    ? long.MaxValue
+                    : total + itemTotal;
+            }
+
+            return total;
         }
 
         private void SetGeneratingState(bool generating)
@@ -3076,6 +3510,8 @@ namespace FilePromptAIWin7
                 connectionTestCancellation == null &&
                 !isAddingFiles;
             addFileButton.Enabled = actual;
+            pathTextBox.Enabled = actual;
+            readPathButton.Enabled = actual;
             pasteButton.Enabled = actual;
             removeButton.Enabled = actual;
             clearButton.Enabled = actual;
@@ -3176,55 +3612,81 @@ namespace FilePromptAIWin7
             }
         }
 
+        private ContextMenuStrip CreateExportMenu()
+        {
+            ContextMenuStrip menu = new ContextMenuStrip();
+            menu.Items.Add(CreateExportItem(
+                "最新回复 · Markdown",
+                delegate { ExportLatestText(true); }));
+            menu.Items.Add(CreateExportItem(
+                "最新回复 · 文本",
+                delegate { ExportLatestText(false); }));
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(CreateExportItem(
+                "最新回复 · Word",
+                delegate { ExportDocument(false, false); }));
+            menu.Items.Add(CreateExportItem(
+                "最新回复 · PDF",
+                delegate { ExportDocument(false, true); }));
+            menu.Items.Add(CreateExportItem(
+                "整个会话 · Word",
+                delegate { ExportDocument(true, false); }));
+            menu.Items.Add(CreateExportItem(
+                "整个会话 · PDF",
+                delegate { ExportDocument(true, true); }));
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(CreateExportItem(
+                "表格 · Excel 工作簿",
+                delegate { ExportTable(true); }));
+            menu.Items.Add(CreateExportItem(
+                "表格 · CSV",
+                delegate { ExportTable(false); }));
+            return menu;
+        }
+
+        private ToolStripMenuItem CreateExportItem(
+            string text,
+            EventHandler handler)
+        {
+            ToolStripMenuItem item = new ToolStripMenuItem(text);
+            item.Click += handler;
+            return item;
+        }
+
         private void OnSaveOutputClick(object sender, EventArgs args)
         {
-            string output = GetLatestAssistantOutput();
-            if (string.IsNullOrEmpty(output))
-            {
-                return;
-            }
-
-            using (SaveFileDialog dialog = new SaveFileDialog())
-            {
-                dialog.Title = "保存模型输出";
-                dialog.Filter =
-                    "Markdown 文件|*.md|文本文件|*.txt|所有文件|*.*";
-                dialog.FileName = "模型输出_" +
-                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".md";
-                if (dialog.ShowDialog(this) != DialogResult.OK)
-                {
-                    return;
-                }
-
-                try
-                {
-                    File.WriteAllText(
-                        dialog.FileName,
-                        output,
-                        new UTF8Encoding(true));
-                    SetStatus("最新回复已保存");
-                }
-                catch (Exception exception)
-                {
-                    ShowSaveError(exception);
-                }
-            }
+            ExportLatestText(true);
         }
 
         private void OnExportWordClick(object sender, EventArgs args)
         {
-            string conversation = BuildConversationMarkdown();
-            if (string.IsNullOrEmpty(conversation))
+            ExportDocument(false, false);
+        }
+
+        private void OnExportTableClick(object sender, EventArgs args)
+        {
+            ExportTable(true);
+        }
+
+        private void ExportLatestText(bool markdown)
+        {
+            string output = GetLatestAssistantOutput();
+            if (string.IsNullOrEmpty(output))
             {
                 return;
             }
 
+            string extension = markdown ? ".md" : ".txt";
             using (SaveFileDialog dialog = new SaveFileDialog())
             {
-                dialog.Title = "导出 Word 文档";
-                dialog.Filter = "Word 文档|*.docx";
-                dialog.FileName = "FilePromptAI会话_" +
-                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".docx";
+                dialog.Title = markdown ? "保存 Markdown 回复" : "保存文本回复";
+                dialog.Filter = markdown
+                    ? "Markdown 文件|*.md|所有文件|*.*"
+                    : "文本文件|*.txt|所有文件|*.*";
+                dialog.DefaultExt = extension.TrimStart('.');
+                dialog.AddExtension = true;
+                dialog.FileName = "模型输出_" +
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + extension;
                 if (dialog.ShowDialog(this) != DialogResult.OK)
                 {
                     return;
@@ -3232,10 +3694,11 @@ namespace FilePromptAIWin7
 
                 try
                 {
-                    DocxExporter.Export(
-                        conversation,
-                        dialog.FileName);
-                    SetStatus("Word 文档已导出");
+                    AtomicFile.WriteAllText(
+                        dialog.FileName,
+                        output,
+                        new UTF8Encoding(true));
+                    SetStatus(markdown ? "Markdown 已导出" : "文本已导出");
                 }
                 catch (Exception exception)
                 {
@@ -3244,7 +3707,56 @@ namespace FilePromptAIWin7
             }
         }
 
-        private void OnExportTableClick(object sender, EventArgs args)
+        private void ExportDocument(bool entireConversation, bool pdf)
+        {
+            string content = entireConversation
+                ? BuildConversationMarkdown()
+                : GetLatestAssistantOutput();
+            if (string.IsNullOrEmpty(content))
+            {
+                return;
+            }
+
+            string extension = pdf ? ".pdf" : ".docx";
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = (entireConversation ? "导出整个会话 · " :
+                    "导出最新回复 · ") + (pdf ? "PDF" : "Word");
+                dialog.Filter = pdf
+                    ? "PDF 文档|*.pdf"
+                    : "Word 文档|*.docx";
+                dialog.DefaultExt = extension.TrimStart('.');
+                dialog.AddExtension = true;
+                dialog.FileName = (entireConversation
+                    ? "FilePromptAI会话_"
+                    : "FilePromptAI回复_") +
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + extension;
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                try
+                {
+                    if (pdf)
+                    {
+                        PdfExporter.Export(content, dialog.FileName);
+                    }
+                    else
+                    {
+                        DocxExporter.Export(content, dialog.FileName);
+                    }
+
+                    SetStatus((pdf ? "PDF" : "Word") + " 已导出");
+                }
+                catch (Exception exception)
+                {
+                    ShowSaveError(exception);
+                }
+            }
+        }
+
+        private void ExportTable(bool xlsx)
         {
             string output = GetLatestAssistantOutput();
             if (string.IsNullOrEmpty(output))
@@ -3252,8 +3764,7 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            MarkdownDocument document =
-                MarkdownDocument.Parse(output);
+            MarkdownDocument document = MarkdownDocument.Parse(output);
             if (document.Tables == null || document.Tables.Count == 0)
             {
                 MessageBox.Show(
@@ -3264,12 +3775,17 @@ namespace FilePromptAIWin7
                 return;
             }
 
+            string extension = xlsx ? ".xlsx" : ".csv";
             using (SaveFileDialog dialog = new SaveFileDialog())
             {
-                dialog.Title = "导出表格";
-                dialog.Filter = "CSV 表格|*.csv";
+                dialog.Title = xlsx ? "导出 Excel 工作簿" : "导出 CSV 表格";
+                dialog.Filter = xlsx
+                    ? "Excel 工作簿|*.xlsx"
+                    : "CSV 表格|*.csv";
+                dialog.DefaultExt = extension.TrimStart('.');
+                dialog.AddExtension = true;
                 dialog.FileName = "FilePromptAI表格_" +
-                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv";
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + extension;
                 if (dialog.ShowDialog(this) != DialogResult.OK)
                 {
                     return;
@@ -3277,8 +3793,16 @@ namespace FilePromptAIWin7
 
                 try
                 {
-                    CsvExporter.Export(document, dialog.FileName);
-                    SetStatus("表格已导出为 CSV");
+                    if (xlsx)
+                    {
+                        XlsxExporter.Export(document, dialog.FileName);
+                    }
+                    else
+                    {
+                        CsvExporter.Export(document, dialog.FileName);
+                    }
+
+                    SetStatus(xlsx ? "Excel 工作簿已导出" : "CSV 已导出");
                 }
                 catch (Exception exception)
                 {
@@ -3309,7 +3833,10 @@ namespace FilePromptAIWin7
                 markdown.AppendLine(
                     message.Role == "assistant" ? "## 模型" : "## 你");
                 markdown.AppendLine();
-                markdown.AppendLine(FormatMessageForDisplay(message));
+                // Export the complete stored message. The on-screen transcript
+                // intentionally folds long user material, but a whole-session
+                // document must retain the source text and table data.
+                markdown.AppendLine(message.Content ?? string.Empty);
                 markdown.AppendLine();
             }
 
@@ -3327,6 +3854,8 @@ namespace FilePromptAIWin7
 
         private void OnFormClosing(object sender, FormClosingEventArgs args)
         {
+            isClosing = true;
+
             if (sessionSearchTimer != null)
             {
                 sessionSearchTimer.Stop();
@@ -3342,6 +3871,11 @@ namespace FilePromptAIWin7
             if (connectionTestCancellation != null)
             {
                 connectionTestCancellation.Cancel();
+            }
+
+            if (fileAddCancellation != null)
+            {
+                fileAddCancellation.Cancel();
             }
 
             SaveSettings();

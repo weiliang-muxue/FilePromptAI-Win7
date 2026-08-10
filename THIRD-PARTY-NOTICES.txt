@@ -11,6 +11,11 @@ Copyright (c) NPOI contributors
 License: Apache License 2.0 (version 2.7.4)
 https://github.com/nissl-lab/npoi
 
+PDFsharp and MigraDoc
+Copyright (c) empira Software GmbH and contributors
+License: MIT (version 1.50.5147)
+https://github.com/empira/PDFsharp
+
 Additional runtime dependencies
 --------------------------------
 

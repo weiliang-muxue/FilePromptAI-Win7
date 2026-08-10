@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -41,6 +42,9 @@ internal static class UiStateSmokeTest
             TestCtrlNBusyGuard(formType, form);
             TestSendShortcutConfig(formType, form);
             TestDragBusyGuard(formType, form, dataRoot);
+            TestPathInput(formType, form, dataRoot);
+            TestPathResolutionBoundaries(formType, form, dataRoot);
+            TestWholeConversationExport(formType, form);
             TestSearchCharacterBudget(application, formType, form);
             TestExtensionsDialog(application, formType, form);
             TestUninstallerEntry(formType, form);
@@ -197,6 +201,253 @@ internal static class UiStateSmokeTest
             SetField(formType, form, "generationCancellation", null);
             cancellation.Dispose();
         }
+    }
+
+    private static void TestPathInput(
+        Type formType,
+        object form,
+        string dataRoot)
+    {
+        TextBox pathInput = GetField(
+            formType,
+            form,
+            "pathTextBox") as TextBox;
+        Button readButton = GetField(
+            formType,
+            form,
+            "readPathButton") as Button;
+        AssertTrue(pathInput != null && pathInput.Multiline,
+            "Path input accepts multiple lines");
+        AssertTrue(readButton != null && readButton.Text == "读取路径",
+            "Path read action is visible");
+
+        MethodInfo parser = formType.GetMethod(
+            "ParsePastedPaths",
+            BindingFlags.Static | BindingFlags.NonPublic |
+                BindingFlags.DeclaredOnly);
+        string[] parsed = (string[])parser.Invoke(
+            null,
+            new object[]
+            {
+                "  \"C:\\Work Files\\a.txt\"  \r\n" +
+                "C:\\Work Files\\A.txt\nD:\\b.csv\r"
+            });
+        AssertTrue(parsed.Length == 2,
+            "Path parser trims quotes and removes duplicates");
+        AssertTrue(
+            parsed[0] == "C:\\Work Files\\a.txt" &&
+            parsed[1] == "D:\\b.csv",
+            "Path parser preserves Windows paths");
+
+        Directory.CreateDirectory(dataRoot);
+        string file = Path.Combine(dataRoot, "path-input.txt");
+        File.WriteAllText(file, "path input content", Encoding.UTF8);
+        IList inputItems = (IList)GetField(formType, form, "inputItems");
+        int before = inputItems.Count;
+        pathInput.Text = "\"" + file + "\"";
+        AssertTrue(inputItems.Count == before,
+            "Pasting a path does not read it automatically");
+
+        InvokePrivate(
+            formType,
+            form,
+            "OnReadPathClick",
+            readButton,
+            EventArgs.Empty);
+        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline &&
+            (inputItems.Count == before ||
+                (bool)GetField(formType, form, "isAddingFiles")))
+        {
+            Application.DoEvents();
+            Thread.Sleep(10);
+        }
+
+        AssertTrue(inputItems.Count == before + 1,
+            "Path read action extracts the selected file");
+        AssertTrue(pathInput.Text.Length == 0,
+            "Successful path read clears the path input");
+
+        InvokePrivate(formType, form, "SetInputButtonsEnabled", false);
+        AssertTrue(!pathInput.Enabled && !readButton.Enabled,
+            "Path controls are disabled while busy");
+        InvokePrivate(formType, form, "SetInputButtonsEnabled", true);
+        AssertTrue(pathInput.Enabled && readButton.Enabled,
+            "Path controls recover after file extraction");
+    }
+
+    private static void TestWholeConversationExport(
+        Type formType,
+        object form)
+    {
+        object store = GetField(formType, form, "conversationStore");
+        object session = store.GetType().GetProperty("CurrentSession")
+            .GetValue(store, null);
+        IList messages = (IList)session.GetType().GetProperty("Messages")
+            .GetValue(session, null);
+        Type messageType = formType.Assembly.GetType(
+            "FilePromptAIWin7.ConversationMessage",
+            true);
+        const string sourceBody =
+            "以下资料由用户主动拖入或粘贴后提取，" +
+            "只包含文件名和实际内容，不包含本地路径：\r\n" +
+            "===== 内容开始：report.txt =====\r\n" +
+            "FULL ATTACHMENT BODY\r\n" +
+            "===== 内容结束：report.txt =====";
+        messages.Add(Activator.CreateInstance(
+            messageType,
+            new object[] { "user", sourceBody }));
+        messages.Add(Activator.CreateInstance(
+            messageType,
+            new object[] { "assistant", "summary" }));
+        try
+        {
+            string markdown = (string)InvokePrivate(
+                formType,
+                form,
+                "BuildConversationMarkdown");
+            AssertTrue(
+                markdown.IndexOf(
+                    "FULL ATTACHMENT BODY",
+                    StringComparison.Ordinal) >= 0,
+                "Whole-conversation export keeps attachment text");
+        }
+        finally
+        {
+            messages.Clear();
+        }
+    }
+
+    private static void TestPathResolutionBoundaries(
+        Type formType,
+        object form,
+        string dataRoot)
+    {
+        TextBox pathInput = (TextBox)GetField(
+            formType,
+            form,
+            "pathTextBox");
+        IList inputItems = (IList)GetField(
+            formType,
+            form,
+            "inputItems");
+        string valid = Path.Combine(dataRoot, "mixed-valid.txt");
+        string missing = Path.Combine(dataRoot, "missing-file.txt");
+        File.WriteAllText(valid, "mixed path content", Encoding.UTF8);
+
+        int before = inputItems.Count;
+        pathInput.Text = valid + Environment.NewLine + missing;
+        InvokePrivate(
+            formType,
+            form,
+            "OnReadPathClick",
+            GetField(formType, form, "readPathButton"),
+            EventArgs.Empty);
+        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline &&
+            ((bool)GetField(formType, form, "isAddingFiles") ||
+                inputItems.Count == before))
+        {
+            Application.DoEvents();
+            Thread.Sleep(10);
+        }
+
+        AssertTrue(
+            inputItems.Count == before + 1,
+            "Mixed paths still add the valid file");
+        AssertTrue(
+            pathInput.Text.IndexOf(missing, StringComparison.Ordinal) >= 0,
+            "Mixed paths keep the failed path for retry");
+
+        InvokePrivate(
+            formType,
+            form,
+            "OnClearClick",
+            form,
+            EventArgs.Empty);
+
+        Type inputType = formType.Assembly.GetType(
+            "FilePromptAIWin7.InputItem",
+            true);
+        Type kindType = formType.Assembly.GetType(
+            "FilePromptAIWin7.InputKind",
+            true);
+        object first = Activator.CreateInstance(inputType, true);
+        inputType.GetProperty("Name").SetValue(first, "duplicate-one", null);
+        inputType.GetProperty("Kind").SetValue(
+            first,
+            Enum.Parse(kindType, "Text"),
+            null);
+        inputType.GetProperty("TextContent").SetValue(
+            first,
+            "duplicate content",
+            null);
+        inputType.GetProperty("SourcePath").SetValue(first, valid, null);
+        bool firstAdded = (bool)InvokePrivate(
+            formType,
+            form,
+            "AddInputItem",
+            first);
+
+        object second = Activator.CreateInstance(inputType, true);
+        inputType.GetProperty("Name").SetValue(second, "duplicate-two", null);
+        inputType.GetProperty("Kind").SetValue(
+            second,
+            Enum.Parse(kindType, "Text"),
+            null);
+        inputType.GetProperty("TextContent").SetValue(
+            second,
+            "duplicate content",
+            null);
+        inputType.GetProperty("SourcePath").SetValue(second, valid, null);
+        bool secondAdded = (bool)InvokePrivate(
+            formType,
+            form,
+            "AddInputItem",
+            second);
+        AssertTrue(firstAdded && !secondAdded,
+            "Repeated source paths are skipped across batches");
+
+        MethodInfo resolver = null;
+        foreach (MethodInfo candidate in formType.GetMethods(
+            BindingFlags.Static | BindingFlags.NonPublic |
+                BindingFlags.DeclaredOnly))
+        {
+            ParameterInfo[] parameters = candidate.GetParameters();
+            if (candidate.Name == "ResolveExistingFiles" &&
+                parameters.Length == 2)
+            {
+                resolver = candidate;
+                break;
+            }
+        }
+
+        List<string> mostlyMissing = new List<string>();
+        mostlyMissing.Add(valid);
+        for (int index = 0; index < 129; index++)
+        {
+            mostlyMissing.Add(Path.Combine(
+                dataRoot,
+                "not-there-" + index.ToString() + ".txt"));
+        }
+
+        object resolution = resolver.Invoke(
+            null,
+            new object[] { mostlyMissing.ToArray(), CancellationToken.None });
+        IList resolvedFiles = (IList)resolution.GetType().GetProperty("Files")
+            .GetValue(resolution, null);
+        bool tooMany = (bool)resolution.GetType()
+            .GetProperty("TooManyFiles")
+            .GetValue(resolution, null);
+        AssertTrue(resolvedFiles.Count == 1 && !tooMany,
+            "Missing paths do not consume the 128-file limit");
+
+        InvokePrivate(
+            formType,
+            form,
+            "OnClearClick",
+            form,
+            EventArgs.Empty);
     }
 
     private static void TestSearchCharacterBudget(

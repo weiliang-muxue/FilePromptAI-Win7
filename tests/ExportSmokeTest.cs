@@ -6,6 +6,10 @@ using System.Text;
 using System.Xml;
 
 using FilePromptAIWin7;
+using NPOI.SS.UserModel;
+using NPOI.XSSF.UserModel;
+using PdfSharp.Pdf;
+using PdfSharp.Pdf.IO;
 
 internal static class ExportSmokeTest
 {
@@ -18,6 +22,8 @@ internal static class ExportSmokeTest
             TestCsvFormulaNeutralizationAndAtomicWrite();
             TestDocxXmlAndNumbering();
             TestIndependentOrderedLists();
+            TestPdfExport();
+            TestXlsxExport();
             Console.WriteLine("PASS | export hardening");
             return 0;
         }
@@ -265,6 +271,185 @@ internal static class ExportSmokeTest
                 "<w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/>",
                 "second ordered list definition");
         }
+    }
+
+    private static void TestPdfExport()
+    {
+        string markdown =
+            "# PDF export\n\n" +
+            "A paragraph with Unicode \u4E2D\u6587 and a table.\n\n" +
+            "| Name | Value |\n| --- | --- |\n| one | two |";
+        byte[] content = PdfExporter.Create(markdown);
+        AssertTrue(content.Length > 500, "PDF has content");
+        string header = Encoding.ASCII.GetString(
+            content,
+            0,
+            Math.Min(content.Length, 8));
+        AssertTrue(header.StartsWith("%PDF-", StringComparison.Ordinal),
+            "PDF header");
+        string tail = Encoding.ASCII.GetString(
+            content,
+            Math.Max(0, content.Length - 32),
+            Math.Min(32, content.Length));
+        AssertTrue(tail.IndexOf("%%EOF", StringComparison.Ordinal) >= 0,
+            "PDF EOF marker");
+        string pdfText = Encoding.ASCII.GetString(content);
+        AssertTrue(
+            pdfText.IndexOf("/FontFile", StringComparison.Ordinal) >= 0,
+            "PDF embeds the selected font");
+        using (MemoryStream memory = new MemoryStream(content))
+        using (PdfDocument parsed = PdfReader.Open(
+            memory,
+            PdfDocumentOpenMode.ReadOnly))
+        {
+            AssertTrue(parsed.PageCount > 0, "PDF page structure");
+            AssertEqual(
+                "FilePrompt AI 导出文档",
+                parsed.Info.Title,
+                "PDF Unicode document title");
+        }
+
+        string outputPath = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "export-hardening.pdf");
+        PdfExporter.Export(markdown, outputPath);
+        AssertTrue(File.ReadAllBytes(outputPath).Length > 500,
+            "PDF atomic export");
+
+        byte[] original = Encoding.UTF8.GetBytes("original PDF content");
+        File.WriteAllBytes(outputPath, original);
+        bool failed = false;
+        using (FileStream locked = new FileStream(
+            outputPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read))
+        {
+            try
+            {
+                PdfExporter.Export(markdown, outputPath);
+            }
+            catch (IOException)
+            {
+                failed = true;
+            }
+        }
+
+        AssertTrue(failed, "locked PDF export fails safely");
+        AssertTrue(
+            Convert.ToBase64String(original) ==
+            Convert.ToBase64String(File.ReadAllBytes(outputPath)),
+            "failed PDF export preserves original file");
+    }
+
+    private static void TestXlsxExport()
+    {
+        string markdown =
+            "| Name | Value | Note |\n| --- | --- | --- |\n" +
+            "| \u4E2D\u6587 | =1+1 | before\u0000after |\n" +
+            "| line | text | first<br>second |\n\n" +
+            "| Second | Column |\n| --- | --- |\n| a | b |";
+        MarkdownDocument document = MarkdownDocument.Parse(markdown);
+        byte[] content = XlsxExporter.Create(document);
+        AssertTrue(content.Length > 1000, "XLSX has content");
+
+        using (MemoryStream memory = new MemoryStream(content))
+        using (ZipArchive archive = new ZipArchive(
+            memory,
+            ZipArchiveMode.Read,
+            false,
+            Encoding.UTF8))
+        {
+            AssertTrue(archive.GetEntry("[Content_Types].xml") != null,
+                "XLSX content types");
+            AssertTrue(archive.GetEntry("xl/worksheets/sheet1.xml") != null,
+                "XLSX first worksheet");
+            AssertTrue(archive.GetEntry("xl/worksheets/sheet2.xml") != null,
+                "XLSX second worksheet");
+
+            foreach (ZipArchiveEntry entry in archive.Entries)
+            {
+                if (!entry.FullName.EndsWith(".xml",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                XmlDocument parsed = new XmlDocument();
+                parsed.LoadXml(ReadEntry(entry));
+            }
+
+            ZipArchiveEntry sharedStrings = archive.GetEntry(
+                "xl/sharedStrings.xml");
+            if (sharedStrings != null)
+            {
+                AssertContains(
+                    ReadEntry(sharedStrings),
+                    "\u4E2D\u6587",
+                    "XLSX Unicode cell value");
+            }
+        }
+
+        using (MemoryStream memory = new MemoryStream(content))
+        using (XSSFWorkbook workbook = new XSSFWorkbook(memory, true))
+        {
+            AssertEqual(2, workbook.NumberOfSheets, "XLSX sheet count");
+            AssertEqual("表格 1", workbook.GetSheetName(0),
+                "XLSX first sheet name");
+            AssertEqual("表格 2", workbook.GetSheetName(1),
+                "XLSX second sheet name");
+
+            ISheet first = workbook.GetSheetAt(0);
+            IRow firstRow = first.GetRow(1);
+            AssertEqual("中文", firstRow.GetCell(0).StringCellValue,
+                "XLSX Unicode cell value");
+            AssertEqual(CellType.String, firstRow.GetCell(1).CellType,
+                "XLSX formula-looking value remains text");
+            AssertEqual("=1+1", firstRow.GetCell(1).StringCellValue,
+                "XLSX formula-looking text is preserved");
+            AssertEqual("before\uFFFDafter", firstRow.GetCell(2).StringCellValue,
+                "XLSX invalid control sanitization");
+            AssertEqual("first\nsecond",
+                first.GetRow(2).GetCell(2).StringCellValue,
+                "XLSX multiline cell value");
+            AssertTrue(first.PaneInformation != null,
+                "XLSX freeze pane metadata");
+            AssertEqual("a",
+                workbook.GetSheetAt(1).GetRow(1).GetCell(0).StringCellValue,
+                "XLSX second sheet content");
+        }
+
+        string outputPath = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "export-hardening.xlsx");
+        XlsxExporter.Export(document, outputPath);
+        AssertTrue(File.ReadAllBytes(outputPath).Length > 1000,
+            "XLSX atomic export");
+
+        byte[] original = Encoding.UTF8.GetBytes("original XLSX content");
+        File.WriteAllBytes(outputPath, original);
+        bool failed = false;
+        using (FileStream locked = new FileStream(
+            outputPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read))
+        {
+            try
+            {
+                XlsxExporter.Export(document, outputPath);
+            }
+            catch (IOException)
+            {
+                failed = true;
+            }
+        }
+
+        AssertTrue(failed, "locked XLSX export fails safely");
+        AssertTrue(
+            Convert.ToBase64String(original) ==
+            Convert.ToBase64String(File.ReadAllBytes(outputPath)),
+            "failed XLSX export preserves original file");
     }
 
     private static string ReadEntry(ZipArchiveEntry entry)

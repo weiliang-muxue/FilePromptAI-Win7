@@ -19,6 +19,9 @@ namespace FilePromptAIWin7
         public string MimeType { get; set; }
         public long OriginalBytes { get; set; }
         public string Note { get; set; }
+        // Set only for files explicitly added from a local path. It is used
+        // for duplicate detection and is never included in model payloads.
+        public string SourcePath { get; set; }
 
         public string GetKindText()
         {

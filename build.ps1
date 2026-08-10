@@ -63,6 +63,16 @@ $references = @(
     'System.Xml.Linq.dll'
 )
 
+$libraryReferences = @(
+    'MigraDoc.DocumentObjectModel-gdi.dll',
+    'MigraDoc.Rendering-gdi.dll',
+    'PdfSharp-gdi.dll',
+    'NPOI.Core.dll',
+    'NPOI.OOXML.dll',
+    'NPOI.OpenXml4Net.dll',
+    'NPOI.OpenXmlFormats.dll'
+)
+
 $compilerArguments = @(
     '/nologo',
     '/target:winexe',
@@ -81,6 +91,15 @@ if (Test-Path -LiteralPath $iconPath) {
 
 foreach ($reference in $references) {
     $compilerArguments += "/reference:$(Join-Path $frameworkRoot $reference)"
+}
+
+foreach ($reference in $libraryReferences) {
+    $referencePath = Join-Path $libraryRoot $reference
+    if (-not (Test-Path -LiteralPath $referencePath -PathType Leaf)) {
+        throw "Required application library was not found: $referencePath"
+    }
+
+    $compilerArguments += "/reference:$referencePath"
 }
 
 $compilerArguments += $sourceFiles

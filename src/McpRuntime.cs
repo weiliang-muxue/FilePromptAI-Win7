@@ -381,7 +381,7 @@ namespace FilePromptAIWin7
                         new Dictionary<string, object>
                         {
                             { "name", "FilePromptAIWin7" },
-                            { "version", "1.7.0" }
+                            { "version", "1.8.0" }
                         }
                     }
                 },

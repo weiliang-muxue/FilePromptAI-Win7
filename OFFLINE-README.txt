@@ -28,7 +28,7 @@ FilePrompt AI for Windows 7 离线完整版
 
 - WebView2、VC++ 运行库、Node.js、Python、Java。
 - Microsoft Word 或 Excel。Word/表格文件的读取和导出由 app 目录中的 DLL 完成。
-- PDF、Office、图片解析插件。所需的 28 个托管 DLL 已放在 app 目录。
+- PDF、Office、图片解析与导出组件。所需的 33 个托管 DLL 已放在 app 目录。
 
 必须保留 app 目录中的全部文件，不能只复制 FilePromptAI.exe。
 
@@ -36,8 +36,13 @@ FilePrompt AI for Windows 7 离线完整版
 --------
 
 - 多会话、会话搜索、会话备份/恢复和运行期草稿保留。
-- 连接自检、流式输出、Markdown 排版、资料预览。
-- Word 文档和 CSV 表格导出，不依赖 Microsoft Office。
+- 文件可直接拖入、选择，或粘贴文件路径后主动点击读取；不会后台扫描目录。
+- 连接自检、流式输出、Markdown 排版、资料预览和长会话上下文控制。
+- 文本资料正文会进入会话历史；图片和无文本内联文件只在当前轮发送，后续轮次
+  需要再次主动添加，不会根据路径自动重读。
+- 最新回复或整个会话可导出 Word/PDF，Markdown 表格可导出 Excel/CSV，
+  不依赖 Microsoft Office。
+- 网络请求具有超时、有限重试和异常流式结束检测，避免无限等待或保存半截回复。
 - 会话备份不包含 URL、API Key 或模型名称。
 - 可从剪贴板安装普通文本、SKILL.md 或 JSON 离线技能；程序不会扫描技能目录、
   执行技能脚本或访问扩展商店。

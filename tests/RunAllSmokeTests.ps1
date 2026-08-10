@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.7'
+    [string]$Version = '1.8'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,9 +18,11 @@ if ($LASTEXITCODE -ne 0) {
 $scripts = @(
     'RunApiSmokeTest.ps1',
     'RunApiHardeningSmokeTest.ps1',
+    'RunNetworkReliabilitySmokeTest.ps1',
     'RunToolLoopSmokeTest.ps1',
     'RunExtensionSettingsSmokeTest.ps1',
     'RunMcpRuntimeSmokeTest.ps1',
+    'RunConversationContextBudgetSmokeTest.ps1',
     'RunConversationStoreSmokeTest.ps1',
     'RunConversationBackupSmokeTest.ps1',
     'RunExportSmokeTest.ps1',
