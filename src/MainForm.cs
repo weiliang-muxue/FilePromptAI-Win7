@@ -32,6 +32,8 @@ namespace FilePromptAIWin7
         private readonly ConversationStore conversationStore;
         private readonly Dictionary<string, SessionDraft> sessionDrafts;
         private readonly ExtensionStore extensionStore;
+        private readonly ModelProfileStore modelProfileStore;
+        private IList<ModelProfile> modelProfiles;
         private ExtensionSettings extensionSettings;
 
         private TableLayoutPanel rootLayout;
@@ -130,6 +132,8 @@ namespace FilePromptAIWin7
             conversationStore = new ConversationStore();
             extensionStore = new ExtensionStore();
             extensionSettings = extensionStore.Load();
+            modelProfileStore = new ModelProfileStore();
+            modelProfiles = modelProfileStore.Load();
             sessionDrafts = new Dictionary<string, SessionDraft>(
                 StringComparer.OrdinalIgnoreCase);
 
@@ -146,6 +150,10 @@ namespace FilePromptAIWin7
             else if (!string.IsNullOrEmpty(extensionStore.LoadWarning))
             {
                 SetStatus(extensionStore.LoadWarning);
+            }
+            else if (!string.IsNullOrEmpty(modelProfileStore.LoadWarning))
+            {
+                SetStatus(modelProfileStore.LoadWarning);
             }
         }
 
@@ -425,6 +433,12 @@ namespace FilePromptAIWin7
             moreButton = CreateButton("更多", 64);
             moreButton.AccessibleName = "更多应用操作";
             ContextMenuStrip moreMenu = new ContextMenuStrip();
+            ToolStripMenuItem profilesItem =
+                new ToolStripMenuItem("模型配置...");
+            profilesItem.AccessibleName = "保存、选择或删除模型配置";
+            profilesItem.Click += OnModelProfilesClick;
+            moreMenu.Items.Add(profilesItem);
+            moreMenu.Items.Add(new ToolStripSeparator());
             ToolStripMenuItem uninstallItem =
                 new ToolStripMenuItem("卸载 FilePrompt AI...");
             uninstallItem.AccessibleName = "卸载 FilePrompt AI";
@@ -1789,6 +1803,75 @@ namespace FilePromptAIWin7
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
+        }
+
+        private void OnModelProfilesClick(object sender, EventArgs args)
+        {
+            using (ModelProfilesDialog dialog = new ModelProfilesDialog(
+                modelProfiles,
+                CreateCurrentModelProfile()))
+            {
+                DialogResult result = dialog.ShowDialog(this);
+                IList<ModelProfile> updatedProfiles = dialog.Profiles;
+                if (result == DialogResult.OK && dialog.Changed)
+                {
+                    try
+                    {
+                        modelProfileStore.Save(updatedProfiles);
+                        modelProfiles = updatedProfiles;
+                    }
+                    catch (Exception exception)
+                    {
+                        SetStatus("模型配置未能保存：" + exception.Message);
+                        MessageBox.Show(
+                            this,
+                            "模型配置未能保存：\r\n\r\n" + exception.Message,
+                            "模型配置",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                        return;
+                    }
+                }
+
+                if (result == DialogResult.OK && dialog.SelectedProfile != null)
+                {
+                    ApplyModelProfile(dialog.SelectedProfile);
+                    SetStatus("已切换模型配置：" + dialog.SelectedProfile.Name);
+                }
+
+            }
+        }
+
+        private ModelProfile CreateCurrentModelProfile()
+        {
+            return new ModelProfile
+            {
+                EndpointUrl = endpointTextBox == null
+                    ? string.Empty
+                    : endpointTextBox.Text.Trim(),
+                ApiKey = apiKeyTextBox == null
+                    ? string.Empty
+                    : apiKeyTextBox.Text.Trim(),
+                ModelName = modelTextBox == null
+                    ? string.Empty
+                    : modelTextBox.Text.Trim()
+            };
+        }
+
+        private void ApplyModelProfile(ModelProfile profile)
+        {
+            if (profile == null)
+            {
+                return;
+            }
+
+            endpointTextBox.Text = profile.EndpointUrl ?? string.Empty;
+            apiKeyTextBox.Text = profile.ApiKey ?? string.Empty;
+            modelTextBox.Text = profile.ModelName ?? string.Empty;
+            SaveSettings();
+            connectionStatusLabel.Text = BuildConnectionStatus();
+            testConnectionButton.Enabled = HasCompleteConnectionSettings();
+            SetSettingsExpanded(!HasCompleteConnectionSettings());
         }
 
         private async void OnTestConnectionClick(object sender, EventArgs args)

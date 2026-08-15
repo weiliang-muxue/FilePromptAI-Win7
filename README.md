@@ -4,14 +4,15 @@
 
 ## 当前发布
 
-当前版本为 **v1.10**。这是仓库和离线安装包的唯一维护版本；本次同步还修复了
-拖拽或文件选择批次中失败路径无法重试的问题：失败项会自动保留在路径输入框，
-修改后即可再次读取。最终离线包位于仓库外的 `exe` 目录，源码和构建脚本均在
-本仓库中，便于内网环境审计、重建和离线分发。
+当前版本为 **v1.11**。这是仓库和离线安装包的唯一维护版本；本次新增本地多模型
+配置，可保存、选择和删除多组完整 URL、API Key 与模型名称，其中 API Key 使用
+Windows DPAPI 当前用户加密。最终离线包位于仓库外的 `exe` 目录，源码和构建脚本
+均在本仓库中，便于内网环境审计、重建和离线分发。
 
 ## 当前功能
 
 - 配置完整请求 URL、API Key、模型名称。
+- 可在“更多”→“模型配置”保存多个内网模型预设，随时选择应用或删除；预设中的 API Key 使用 Windows DPAPI 加密。
 - 可从剪贴板安装本地技能；技能是离线保存的 system 指令，可独立启用或停用。
 - 支持本地 stdio 和 Streamable HTTP 两种 MCP；可粘贴标准 `mcpServers` JSON、
   测试连接、发现工具并完成多轮工具调用。
@@ -138,7 +139,7 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 
 ## Windows 7 离线完整版
 
-优先使用 `FilePromptAI-Win7-Full-v1.10.zip`。完整解压后运行
+优先使用 `FilePromptAI-Win7-Full-v1.11.zip`。完整解压后运行
 `Start-FilePromptAI.exe`，启动器会检测 .NET Framework 4.8；缺少时会调用包内
 经过微软数字签名的官方完整离线安装程序。安装过程不下载文件，也不需要访问
 互联网。不要只复制 `app` 目录中的 EXE。
@@ -186,7 +187,7 @@ Microsoft Authenticode 签名，并生成 `PACKAGE-CHECKSUMS-SHA256.txt`。仅�
 
 ## 测试
 
-构建、生成离线包并运行全部 18 组自动回归测试：
+构建、生成离线包并运行全部 21 组自动回归测试：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1

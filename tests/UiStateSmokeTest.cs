@@ -48,6 +48,7 @@ internal static class UiStateSmokeTest
             TestWholeConversationExport(formType, form);
             TestSearchCharacterBudget(application, formType, form);
             TestExtensionsDialog(application, formType, form);
+            TestModelProfilesDialog(application, formType, form);
             TestUninstallerEntry(formType, form);
             TestMcpApprovalArguments(application, formType, form);
             TestStdioStartupApproval(application, formType, form);
@@ -601,6 +602,84 @@ internal static class UiStateSmokeTest
         }
     }
 
+    private static void TestModelProfilesDialog(
+        Assembly application,
+        Type formType,
+        object form)
+    {
+        Button moreButton = GetField(
+            formType,
+            form,
+            "moreButton") as Button;
+        AssertTrue(
+            moreButton != null && moreButton.ContextMenuStrip != null,
+            "More menu exists for model profiles");
+        ToolStripItem profilesItem = null;
+        foreach (ToolStripItem item in moreButton.ContextMenuStrip.Items)
+        {
+            if (string.Equals(
+                item.Text,
+                "模型配置...",
+                StringComparison.Ordinal))
+            {
+                profilesItem = item;
+                break;
+            }
+        }
+        AssertTrue(profilesItem != null, "Model profiles menu entry exists");
+
+        Type profileType = application.GetType(
+            "FilePromptAIWin7.ModelProfile",
+            true);
+        Type listType = typeof(List<>).MakeGenericType(profileType);
+        IList profiles = (IList)Activator.CreateInstance(listType);
+        object profile = Activator.CreateInstance(profileType, true);
+        profileType.GetProperty("Name").SetValue(profile, "内网模型", null);
+        profileType.GetProperty("EndpointUrl").SetValue(
+            profile,
+            "https://127.0.0.1/v1/chat/completions",
+            null);
+        profileType.GetProperty("ApiKey").SetValue(profile, "test-key", null);
+        profileType.GetProperty("ModelName").SetValue(
+            profile,
+            "test-model",
+            null);
+        profiles.Add(profile);
+
+        Type dialogType = application.GetType(
+            "FilePromptAIWin7.ModelProfilesDialog",
+            true);
+        Form dialog = Activator.CreateInstance(
+            dialogType,
+            new object[] { profiles, profile }) as Form;
+        AssertTrue(dialog != null, "Model profiles dialog can be created");
+        try
+        {
+            dialog.CreateControl();
+            dialog.PerformLayout();
+            AssertTrue(
+                dialog.ClientSize.Width >= 640 &&
+                dialog.ClientSize.Height >= 390,
+                "Model profiles dialog size is stable");
+            AssertTrue(
+                FindControl<ListBox>(dialog, null) != null,
+                "Model profiles list exists");
+            AssertTrue(
+                FindControl<Button>(dialog, "新建") != null &&
+                FindControl<Button>(dialog, "删除") != null &&
+                FindControl<Button>(dialog, "保存配置") != null &&
+                FindControl<Button>(dialog, "保存并应用") != null,
+                "Model profile actions exist");
+            CheckBox showKey = FindControl<CheckBox>(dialog, "显示 Key");
+            AssertTrue(
+                showKey != null && !showKey.Checked,
+                "Model profile API key is hidden by default");
+        }
+        finally
+        {
+            dialog.Dispose();
+        }
+    }
     private static void TestUninstallerEntry(Type formType, object form)
     {
         Button moreButton = GetField(
@@ -611,14 +690,19 @@ internal static class UiStateSmokeTest
         AssertTrue(
             moreButton.ContextMenuStrip != null,
             "More menu exists");
-        ToolStripItem uninstallItem =
-            moreButton.ContextMenuStrip.Items.Count == 0
-                ? null
-                : moreButton.ContextMenuStrip.Items[0];
-        AssertTrue(
-            uninstallItem != null &&
-            uninstallItem.Text == "卸载 FilePrompt AI...",
-            "Uninstall entry exists");
+        ToolStripItem uninstallItem = null;
+        foreach (ToolStripItem item in moreButton.ContextMenuStrip.Items)
+        {
+            if (string.Equals(
+                item.Text,
+                "卸载 FilePrompt AI...",
+                StringComparison.Ordinal))
+            {
+                uninstallItem = item;
+                break;
+            }
+        }
+        AssertTrue(uninstallItem != null, "Uninstall entry exists");
     }
 
     private static T FindControl<T>(

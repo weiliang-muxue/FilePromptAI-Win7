@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.10'
+    [string]$Version = '1.11'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,6 +21,7 @@ $scripts = @(
     'RunNetworkReliabilitySmokeTest.ps1',
     'RunToolLoopSmokeTest.ps1',
     'RunExtensionSettingsSmokeTest.ps1',
+    'RunModelProfileSmokeTest.ps1',
     'RunMcpRuntimeSmokeTest.ps1',
     'RunConversationContextBudgetSmokeTest.ps1',
     'RunConversationStoreSmokeTest.ps1',
