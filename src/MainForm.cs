@@ -68,6 +68,7 @@ namespace FilePromptAIWin7
         private Button testConnectionButton;
         private Button extensionsButton;
         private Button moreButton;
+        private Button promptActionsButton;
         private ToolStripStatusLabel statusLabel;
         private ToolStripProgressBar progressBar;
         private System.Windows.Forms.Timer sessionSearchTimer;
@@ -711,6 +712,15 @@ namespace FilePromptAIWin7
                 UiTheme.AccentPressed;
             generateButton.Click += delegate { StartGeneration(); };
             generateButton.ContextMenuStrip = CreateSendShortcutMenu();
+            promptActionsButton = CreateButton("\u5feb\u6377\u6307\u4ee4", 84);
+            promptActionsButton.AccessibleName = "\u5e94\u7528\u5feb\u6377\u6307\u4ee4\u6a21\u677f";
+            promptActionsButton.ContextMenuStrip = CreatePromptActionsMenu();
+            promptActionsButton.Click += delegate
+            {
+                promptActionsButton.ContextMenuStrip.Show(
+                    promptActionsButton,
+                    new Point(0, promptActionsButton.Height));
+            };
             generateButton.AccessibleName = "发送（右键可配置快捷键）";
 
             stopButton = CreateButton("停止", 64);
@@ -736,6 +746,7 @@ namespace FilePromptAIWin7
                     new Point(0, saveOutputButton.Height));
             };
 
+            buttons.Controls.Add(promptActionsButton);
             buttons.Controls.Add(generateButton);
             buttons.Controls.Add(stopButton);
             buttons.Controls.Add(copyOutputButton);
@@ -765,11 +776,16 @@ namespace FilePromptAIWin7
             ToolStripMenuItem copyLatestItem =
                 new ToolStripMenuItem("复制最新回复");
             copyLatestItem.Click += OnCopyOutputClick;
+            ToolStripMenuItem loadPromptItem =
+                new ToolStripMenuItem("\u8f7d\u5165\u4e0a\u4e00\u6761\u6307\u4ee4");
+            loadPromptItem.Click += delegate { LoadLastPromptForEditing(); };
             ToolStripMenuItem selectAllItem =
                 new ToolStripMenuItem("全选");
             selectAllItem.Click += delegate { outputTextBox.SelectAll(); };
             outputMenu.Items.Add(copySelectionItem);
             outputMenu.Items.Add(copyLatestItem);
+            outputMenu.Items.Add(new ToolStripSeparator());
+            outputMenu.Items.Add(loadPromptItem);
             outputMenu.Items.Add(new ToolStripSeparator());
             outputMenu.Items.Add(selectAllItem);
             outputMenu.Opening += delegate
@@ -777,7 +793,8 @@ namespace FilePromptAIWin7
                 copySelectionItem.Enabled = outputTextBox.SelectionLength > 0;
                 copyLatestItem.Enabled =
                     !string.IsNullOrEmpty(GetLatestAssistantOutput());
-            };
+
+                loadPromptItem.Enabled = !IsBusy && HasLastUserMessage();            };
             outputTextBox.ContextMenuStrip = outputMenu;
 
             group.Controls.Add(outputTextBox);
@@ -1548,6 +1565,90 @@ namespace FilePromptAIWin7
             }
         }
 
+        private ContextMenuStrip CreatePromptActionsMenu()
+        {
+            ContextMenuStrip menu = new ContextMenuStrip();
+            AddPromptAction(menu, "\u603b\u7ed3\u5f53\u524d\u8d44\u6599", "\u8bf7\u603b\u7ed3\u5df2\u6dfb\u52a0\u8d44\u6599\uff0c\u7ed9\u51fa\u7ed3\u8bba\u3001\u5173\u952e\u4e8b\u5b9e\u548c\u5f85\u529e\u4e8b\u9879\u3002");
+            AddPromptAction(menu, "\u63d0\u53d6\u5173\u952e\u70b9", "\u8bf7\u63d0\u53d6\u5185\u5bb9\u7684\u5173\u952e\u70b9\uff0c\u6309\u91cd\u8981\u6027\u6392\u5e8f\u5e76\u6807\u51fa\u4e0d\u786e\u5b9a\u9879\u3002");
+            AddPromptAction(menu, "\u7ffb\u8bd1\u6210\u4e2d\u6587", "\u8bf7\u5c06\u5185\u5bb9\u51c6\u786e\u7ffb\u8bd1\u6210\u7b80\u4f53\u4e2d\u6587\uff0c\u4fdd\u7559\u6807\u9898\u3001\u8868\u683c\u548c\u4ee3\u7801\u683c\u5f0f\u3002");
+            AddPromptAction(menu, "\u7ffb\u8bd1\u6210\u82f1\u6587", "\u8bf7\u5c06\u5185\u5bb9\u7ffb\u8bd1\u6210\u81ea\u7136\u3001\u4e13\u4e1a\u7684\u82f1\u6587\uff0c\u4fdd\u7559\u539f\u6709\u7ed3\u6784\u3002");
+            AddPromptAction(menu, "\u751f\u6210 PPT \u5927\u7eb2", "\u8bf7\u5c06\u5185\u5bb9\u6574\u7406\u6210 PowerPoint \u6f14\u793a\u5927\u7eb2\uff0c\u6bcf\u9875\u5305\u542b\u6807\u9898\u3001\u8981\u70b9\u548c\u5efa\u8bae\u56fe\u8868\u3002");
+            AddPromptAction(menu, "\u751f\u6210 XMind \u7ed3\u6784", "\u8bf7\u5c06\u5185\u5bb9\u6574\u7406\u6210 XMind \u601d\u7ef4\u5bfc\u56fe\u5c42\u7ea7\uff0c\u53ea\u8f93\u51fa\u6e05\u6670\u7684\u6811\u72b6\u7ed3\u6784\u3002");
+            AddPromptAction(menu, "\u6574\u7406\u4e3a Markdown \u8868\u683c", "\u8bf7\u8bc6\u522b\u53ef\u7ed3\u6784\u5316\u7684\u4fe1\u606f\uff0c\u6574\u7406\u6210\u89c4\u8303\u7684 Markdown \u8868\u683c\u3002");
+            return menu;
+        }
+
+        private void AddPromptAction(ContextMenuStrip menu, string title, string prompt)
+        {
+            ToolStripMenuItem item = new ToolStripMenuItem(title);
+            item.Click += delegate { ApplyPromptTemplate(prompt); };
+            menu.Items.Add(item);
+        }
+
+        private void ApplyPromptTemplate(string template)
+        {
+            if (IsBusy || promptTextBox == null) { return; }
+            string existing = promptTextBox.Text ?? string.Empty;
+            promptTextBox.Text = string.IsNullOrWhiteSpace(existing)
+                ? (template ?? string.Empty)
+                : (template ?? string.Empty) + "\r\n\r\n" + existing;
+            SaveCurrentDraft();
+            promptTextBox.Focus();
+            promptTextBox.SelectionStart = promptTextBox.TextLength;
+            SetStatus("\u5feb\u6377\u6307\u4ee4\u5df2\u586b\u5165\u8f93\u5165\u6846\uff0c\u8bf7\u786e\u8ba4\u540e\u53d1\u9001");
+        }
+
+        private bool HasLastUserMessage()
+        {
+            ConversationSession session = conversationStore.CurrentSession;
+            if (session == null || session.Messages == null) { return false; }
+            for (int index = session.Messages.Count - 1; index >= 0; index--)
+            {
+                ConversationMessage message = session.Messages[index];
+                if (message != null && message.Role == "user" &&
+                    !string.IsNullOrWhiteSpace(message.Content)) { return true; }
+            }
+            return false;
+        }
+
+        private void LoadLastPromptForEditing()
+        {
+            if (IsBusy || promptTextBox == null) { return; }
+            ConversationSession session = conversationStore.CurrentSession;
+            ConversationMessage latest = null;
+            if (session != null && session.Messages != null)
+            {
+                for (int index = session.Messages.Count - 1; index >= 0; index--)
+                {
+                    ConversationMessage message = session.Messages[index];
+                    if (message != null && message.Role == "user" &&
+                        !string.IsNullOrWhiteSpace(message.Content))
+                    {
+                        latest = message;
+                        break;
+                    }
+                }
+            }
+            if (latest == null) { return; }
+
+            string content = latest.Content ?? string.Empty;
+            const string userHeader = "\u7528\u6237\u8981\u6c42\uff1a";
+            int start = content.IndexOf(userHeader, StringComparison.Ordinal);
+            if (start >= 0)
+            {
+                start += userHeader.Length;
+                while (start < content.Length &&
+                    (content[start] == '\r' || content[start] == '\n' || content[start] == ' ')) { start++; }
+                int end = content.IndexOf("\r\n\u4ee5\u4e0b\u8d44\u6599\u7531\u7528\u6237", start, StringComparison.Ordinal);
+                if (end < 0) { end = content.IndexOf("\n\u4ee5\u4e0b\u8d44\u6599\u7531\u7528\u6237", start, StringComparison.Ordinal); }
+                content = end >= 0 ? content.Substring(start, end - start) : content.Substring(start);
+            }
+            promptTextBox.Text = content.Trim();
+            SaveCurrentDraft();
+            promptTextBox.Focus();
+            promptTextBox.SelectionStart = promptTextBox.TextLength;
+            SetStatus("\u4e0a\u4e00\u6761\u6307\u4ee4\u5df2\u8f7d\u5165\uff0c\u53ef\u7f16\u8f91\u540e\u91cd\u65b0\u53d1\u9001");
+        }
         private ContextMenuStrip CreateSendShortcutMenu()
         {
             ContextMenuStrip menu = new ContextMenuStrip();
@@ -3475,6 +3576,7 @@ namespace FilePromptAIWin7
         {
             generateButton.Enabled = !generating;
             stopButton.Enabled = generating;
+            promptActionsButton.Enabled = !generating && !isAddingFiles;
             SetInputButtonsEnabled(!generating && !isAddingFiles);
             SetSessionNavigationEnabled(!generating && !isAddingFiles);
             deleteSessionButton.Enabled = !generating &&

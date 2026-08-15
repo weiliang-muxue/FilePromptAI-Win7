@@ -4,7 +4,7 @@ FilePrompt AI for Windows 7 离线完整版
 版本说明
 --------
 
-当前包为 FilePrompt AI v1.9，也是当前唯一维护版本。拖拽或文件选择时无法读取
+当前包为 FilePrompt AI v1.10，也是当前唯一维护版本。拖拽或文件选择时无法读取
 的路径会保留在路径输入框中，修正后可直接重试；源码仓库与离线包按同一版本构建。
 
 使用方法
@@ -110,3 +110,9 @@ Offline export formats
 Word, PDF, Excel/CSV, PowerPoint (.pptx) and XMind (.xmind) exports are generated
 from bundled local code and DLLs. They do not require Microsoft Office, XMind,
 WebView2, Node.js, Python, Java, NuGet, or an Internet connection.
+Prompt actions and editable resend
+----------------------------------
+
+The shortcut menu is local-only: it fills a prompt template and never sends
+without the user's explicit action. The output context menu can load the last
+user instruction for editing and resubmission.

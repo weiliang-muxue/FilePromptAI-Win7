@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -41,6 +41,7 @@ internal static class UiStateSmokeTest
 
             TestCtrlNBusyGuard(formType, form);
             TestSendShortcutConfig(formType, form);
+            TestPromptActions(formType, form);
             TestDragBusyGuard(formType, form, dataRoot);
             TestPathInput(formType, form, dataRoot);
             TestPathResolutionBoundaries(formType, form, dataRoot);
@@ -166,6 +167,56 @@ internal static class UiStateSmokeTest
         }
     }
 
+    private static void TestPromptActions(Type formType, object form)
+    {
+        Button actionsButton = GetField(
+            formType,
+            form,
+            "promptActionsButton") as Button;
+        AssertTrue(actionsButton != null, "Prompt actions button exists");
+        ContextMenuStrip menu = actionsButton.ContextMenuStrip;
+        AssertTrue(menu != null && menu.Items.Count >= 7,
+            "Prompt actions menu has common tasks");
+        ToolStripMenuItem first = menu.Items[0] as ToolStripMenuItem;
+        AssertTrue(first != null && first.Enabled,
+            "Prompt action item is enabled");
+        first.PerformClick();
+        RichTextBox prompt = GetField(
+            formType,
+            form,
+            "promptTextBox") as RichTextBox;
+        AssertTrue(prompt != null && prompt.Text.Length > 0,
+            "Prompt action fills the prompt box");
+        prompt.Clear();
+
+        object store = GetField(formType, form, "conversationStore");
+        object session = store.GetType().GetProperty("CurrentSession")
+            .GetValue(store, null);
+        IList messages = (IList)session.GetType().GetProperty("Messages")
+            .GetValue(session, null);
+        Type messageType = formType.Assembly.GetType(
+            "FilePromptAIWin7.ConversationMessage",
+            true);
+        messages.Add(Activator.CreateInstance(
+            messageType,
+            new object[]
+            {
+                "user",
+                "\u7528\u6237\u8981\u6c42\uff1aoriginal instruction\r\n" +
+                "\u4ee5\u4e0b\u8d44\u6599\u7531\u7528\u6237\u4e3b\u52a8\u6dfb\u52a0"
+            }));
+        try
+        {
+            InvokePrivate(formType, form, "LoadLastPromptForEditing");
+            AssertTrue(prompt.Text == "original instruction",
+                "Last user prompt loads for editing");
+        }
+        finally
+        {
+            messages.Clear();
+            prompt.Clear();
+        }
+    }
     private static void TestDragBusyGuard(
         Type formType,
         object form,
