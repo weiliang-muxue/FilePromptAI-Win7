@@ -4,7 +4,7 @@
 
 ## 当前发布
 
-当前版本为 **v1.8**。这是仓库和离线安装包的唯一维护版本；本次同步还修复了
+当前版本为 **v1.9**。这是仓库和离线安装包的唯一维护版本；本次同步还修复了
 拖拽或文件选择批次中失败路径无法重试的问题：失败项会自动保留在路径输入框，
 修改后即可再次读取。最终离线包位于仓库外的 `exe` 目录，源码和构建脚本均在
 本仓库中，便于内网环境审计、重建和离线分发。
@@ -138,7 +138,7 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 
 ## Windows 7 离线完整版
 
-优先使用 `FilePromptAI-Win7-Full-v1.8.zip`。完整解压后运行
+优先使用 `FilePromptAI-Win7-Full-v1.9.zip`。完整解压后运行
 `Start-FilePromptAI.exe`，启动器会检测 .NET Framework 4.8；缺少时会调用包内
 经过微软数字签名的官方完整离线安装程序。安装过程不下载文件，也不需要访问
 互联网。不要只复制 `app` 目录中的 EXE。
@@ -194,3 +194,11 @@ powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1
 
 界面截图测试单独运行 `tests\CaptureUiSmokeTest.ps1`，支持正常窗口、最小窗口和
 125% 物理尺寸预览。
+
+## Offline export formats
+
+- Word and PDF export remain built in and require no Microsoft Office installation.
+- Markdown tables export to Excel workbooks or CSV files using bundled offline DLLs.
+- Added PowerPoint `.pptx` export for the latest reply or the whole conversation.
+- Added XMind `.xmind` mind-map export from headings, lists, paragraphs, code and tables.
+- PPTX and XMind packages are generated locally; no network request or online installer is used.

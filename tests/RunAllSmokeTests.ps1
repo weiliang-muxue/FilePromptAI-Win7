@@ -26,6 +26,8 @@ $scripts = @(
     'RunConversationStoreSmokeTest.ps1',
     'RunConversationBackupSmokeTest.ps1',
     'RunExportSmokeTest.ps1',
+    'RunPresentationMindMapSmokeTest.ps1',
+    'RunXMindExportSmokeTest.ps1',
     'RunExtractorSmokeTest.ps1',
     'RunExtractorHardeningSmokeTest.ps1',
     'RunMarkdownRendererSmokeTest.ps1',

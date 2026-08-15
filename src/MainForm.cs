@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Diagnostics;
@@ -3648,6 +3648,19 @@ namespace FilePromptAIWin7
             menu.Items.Add(CreateExportItem(
                 "整个会话 · PDF",
                 delegate { ExportDocument(true, true); }));
+
+            menu.Items.Add(CreateExportItem(
+                "\u6700\u65b0\u56de\u590d \u00b7 PowerPoint",
+                delegate { ExportPresentation(false); }));
+            menu.Items.Add(CreateExportItem(
+                "\u6574\u4e2a\u4f1a\u8bdd \u00b7 PowerPoint",
+                delegate { ExportPresentation(true); }));
+            menu.Items.Add(CreateExportItem(
+                "\u6700\u65b0\u56de\u590d \u00b7 XMind \u601d\u7ef4\u5bfc\u56fe",
+                delegate { ExportMindMap(false); }));
+            menu.Items.Add(CreateExportItem(
+                "\u6574\u4e2a\u4f1a\u8bdd \u00b7 XMind \u601d\u7ef4\u5bfc\u56fe",
+                delegate { ExportMindMap(true); }));
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(CreateExportItem(
                 "表格 · Excel 工作簿",
@@ -3770,6 +3783,81 @@ namespace FilePromptAIWin7
             }
         }
 
+        private void ExportPresentation(bool entireConversation)
+        {
+            string content = entireConversation
+                ? BuildConversationMarkdown()
+                : GetLatestAssistantOutput();
+            if (string.IsNullOrEmpty(content))
+            {
+                return;
+            }
+
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = (entireConversation ? "\u5bfc\u51fa\u6574\u4e2a\u4f1a\u8bdd \u00b7 " :
+                    "\u5bfc\u51fa\u6700\u65b0\u56de\u590d \u00b7 ") + "PowerPoint";
+                dialog.Filter = "PowerPoint \u6f14\u793a\u6587\u7a3f|*.pptx";
+                dialog.DefaultExt = "pptx";
+                dialog.AddExtension = true;
+                dialog.FileName = (entireConversation
+                    ? "FilePromptAI\u4f1a\u8bdd_"
+                    : "FilePromptAI\u56de\u590d_") +
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".pptx";
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                try
+                {
+                    PptxExporter.Export(content, dialog.FileName);
+                    SetStatus("PowerPoint \u5df2\u5bfc\u51fa");
+                }
+                catch (Exception exception)
+                {
+                    ShowSaveError(exception);
+                }
+            }
+        }
+
+        private void ExportMindMap(bool entireConversation)
+        {
+            string content = entireConversation
+                ? BuildConversationMarkdown()
+                : GetLatestAssistantOutput();
+            if (string.IsNullOrEmpty(content))
+            {
+                return;
+            }
+
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = (entireConversation ? "\u5bfc\u51fa\u6574\u4e2a\u4f1a\u8bdd \u00b7 " :
+                    "\u5bfc\u51fa\u6700\u65b0\u56de\u590d \u00b7 ") + "XMind \u601d\u7ef4\u5bfc\u56fe";
+                dialog.Filter = "XMind \u601d\u7ef4\u5bfc\u56fe|*.xmind";
+                dialog.DefaultExt = "xmind";
+                dialog.AddExtension = true;
+                dialog.FileName = (entireConversation
+                    ? "FilePromptAI\u4f1a\u8bdd_"
+                    : "FilePromptAI\u56de\u590d_") +
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".xmind";
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                try
+                {
+                    XMindExporter.Export(content, dialog.FileName);
+                    SetStatus("XMind \u601d\u7ef4\u5bfc\u56fe\u5df2\u5bfc\u51fa");
+                }
+                catch (Exception exception)
+                {
+                    ShowSaveError(exception);
+                }
+            }
+        }
         private void ExportTable(bool xlsx)
         {
             string output = GetLatestAssistantOutput();
