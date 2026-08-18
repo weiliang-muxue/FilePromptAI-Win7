@@ -1,14 +1,34 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
 internal static class UiStateSmokeTest
 {
+    private const int EmGetScrollPosition = 0x04DD;
+    private const int EmSetScrollPosition = 0x04DE;
+    private static Exception uiThreadException;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(
+        IntPtr windowHandle,
+        int message,
+        IntPtr wordParameter,
+        ref NativePoint longParameter);
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -31,6 +51,16 @@ internal static class UiStateSmokeTest
             Environment.SetEnvironmentVariable(
                 "FILEPROMPTAI_DATA_ROOT",
                 dataRoot);
+            Application.SetUnhandledExceptionMode(
+                UnhandledExceptionMode.CatchException);
+            Application.ThreadException += delegate(
+                object sender,
+                ThreadExceptionEventArgs eventArgs)
+            {
+                uiThreadException = eventArgs.Exception;
+                Console.Error.WriteLine("UI THREAD EXCEPTION");
+                Console.Error.WriteLine(eventArgs.Exception);
+            };
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Assembly application = Assembly.LoadFrom(applicationPath);
@@ -39,12 +69,16 @@ internal static class UiStateSmokeTest
                 true);
             form = Activator.CreateInstance(formType, true);
 
+            TestWorkspaceLayoutAndIncrementalTranscript(formType, form);
+            ThrowIfUiThreadException();
             TestCtrlNBusyGuard(formType, form);
             TestSendShortcutConfig(formType, form);
             TestPromptActions(formType, form);
             TestDragBusyGuard(formType, form, dataRoot);
             TestPathInput(formType, form, dataRoot);
+            ThrowIfUiThreadException();
             TestPathResolutionBoundaries(formType, form, dataRoot);
+            ThrowIfUiThreadException();
             TestWholeConversationExport(formType, form);
             TestSearchCharacterBudget(application, formType, form);
             TestExtensionsDialog(application, formType, form);
@@ -56,6 +90,7 @@ internal static class UiStateSmokeTest
                 application,
                 formType,
                 form);
+            ThrowIfUiThreadException();
             Console.WriteLine("PASS | UI state hardening");
             return 0;
         }
@@ -87,6 +122,253 @@ internal static class UiStateSmokeTest
             {
                 // Temporary state can be removed on the next run.
             }
+        }
+    }
+
+    private static void TestWorkspaceLayoutAndIncrementalTranscript(
+        Type formType,
+        object form)
+    {
+        AssertTrue(
+            !(bool)GetField(formType, form, "settingsExpanded"),
+            "Connection settings are hidden by default");
+        RowStyle settingsRow = GetField(
+            formType,
+            form,
+            "settingsRowStyle") as RowStyle;
+        AssertTrue(
+            settingsRow != null && settingsRow.Height == 0F,
+            "Hidden settings do not consume workspace height");
+        RowStyle inputsRow = GetField(
+            formType,
+            form,
+            "inputsAreaRowStyle") as RowStyle;
+        RowStyle promptRow = GetField(
+            formType,
+            form,
+            "promptAreaRowStyle") as RowStyle;
+        AssertTrue(
+            inputsRow != null && inputsRow.Height >= 130F &&
+                promptRow != null && promptRow.Height >= 90F,
+            "Attachment and prompt rows keep usable minimum heights");
+        RichTextBox output = GetField(
+            formType,
+            form,
+            "outputTextBox") as RichTextBox;
+        ListView inputList = GetField(
+            formType,
+            form,
+            "inputListView") as ListView;
+        Label contextSummary = GetField(
+            formType,
+            form,
+            "contextSummaryLabel") as Label;
+        ToolTip contextToolTip = GetField(
+            formType,
+            form,
+            "contextSummaryToolTip") as ToolTip;
+        AssertTrue(
+            contextSummary != null &&
+                contextSummary.AccessibleName == "当前会话上下文摘要" &&
+                contextSummary.Text.IndexOf(
+                    "条消息",
+                    StringComparison.Ordinal) >= 0,
+            "Context summary is visible in the workspace header");
+        int extensionOffset = contextSummary.Text.IndexOf(
+            "技能",
+            StringComparison.Ordinal);
+        int historyOffset = contextSummary.Text.IndexOf(
+            "历史",
+            StringComparison.Ordinal);
+        AssertTrue(
+            extensionOffset >= 0 && historyOffset > extensionOffset &&
+                contextToolTip != null &&
+                contextToolTip.GetToolTip(contextSummary) ==
+                    contextSummary.Text &&
+                contextSummary.AccessibleDescription == contextSummary.Text,
+            "Compact summary prioritizes extensions and exposes full text");
+
+        Form window = form as Form;
+        AssertTrue(
+            window != null && output != null && inputList != null,
+            "Main workspace controls exist");
+        Size originalSize = window.Size;
+        window.Show();
+        Application.DoEvents();
+        IntPtr inputListHandle = inputList.Handle;
+        window.Size = window.MinimumSize;
+        InvokePrivate(formType, form, "SetSettingsExpanded", true);
+        Application.DoEvents();
+        InvokePrivate(formType, form, "UpdateConversationAreaRows");
+        Application.DoEvents();
+        AssertTrue(
+            output.Height >= 32,
+            "Transcript remains visible with settings open at minimum size");
+        InvokePrivate(formType, form, "SetSettingsExpanded", false);
+        window.Size = originalSize;
+        Application.DoEvents();
+        AssertTrue(
+            inputList.IsHandleCreated && inputList.Handle == inputListHandle,
+            "Responsive column sizing keeps the drag-drop handle stable");
+
+        object store = GetField(formType, form, "conversationStore");
+        object session = store.GetType().GetProperty("CurrentSession")
+            .GetValue(store, null);
+        IList messages = (IList)session.GetType().GetProperty("Messages")
+            .GetValue(session, null);
+        Type messageType = formType.Assembly.GetType(
+            "FilePromptAIWin7.ConversationMessage",
+            true);
+        const string previousAnswer = "unique previous answer";
+        StringBuilder longAnswer = new StringBuilder(previousAnswer);
+        for (int line = 0; line < 180; line++)
+        {
+            longAnswer.Append("\r\nscroll verification line ");
+            longAnswer.Append(line);
+        }
+        messages.Clear();
+        messages.Add(Activator.CreateInstance(
+            messageType,
+            new object[] { "user", "previous question" }));
+        messages.Add(Activator.CreateInstance(
+            messageType,
+            new object[] { "assistant", longAnswer.ToString() }));
+        InvokePrivate(formType, form, "LoadCurrentSession");
+
+        AssertTrue(
+            output != null && CountOccurrences(output.Text, previousAnswer) == 1,
+            "Existing transcript is rendered once");
+        int previousAnswerStart = output.Text.IndexOf(
+            previousAnswer,
+            StringComparison.Ordinal);
+        output.Select(previousAnswerStart, previousAnswer.Length);
+        output.SelectionBackColor = Color.LemonChiffon;
+
+        InvokePrivate(
+            formType,
+            form,
+            "PrepareStreamingTurn",
+            session,
+            "next question");
+        AssertTrue(
+            CountOccurrences(output.Text, previousAnswer) == 1,
+            "Starting a turn does not redraw duplicate history");
+        output.Select(previousAnswerStart, previousAnswer.Length);
+        AssertTrue(
+            output.SelectionBackColor.ToArgb() ==
+                Color.LemonChiffon.ToArgb(),
+            "Starting a turn preserves existing transcript formatting");
+
+        CancellationTokenSource cancellation = new CancellationTokenSource();
+        try
+        {
+            SetField(formType, form, "generationCancellation", cancellation);
+            SetField(formType, form, "activeGenerationSequence", 41);
+            SetField(formType, form, "followStreamTail", false);
+            SetField(
+                formType,
+                form,
+                "streamedResponse",
+                new StringBuilder());
+            output.Select(previousAnswerStart, previousAnswer.Length);
+            SetScrollPosition(output, 220);
+            NativePoint scrollBeforeFlush = GetScrollPosition(output);
+            AssertTrue(
+                scrollBeforeFlush.Y > 0,
+                "Transcript has a measurable historical scroll position");
+            InvokePrivate(
+                formType,
+                form,
+                "AppendOutputForGeneration",
+                "current chunk",
+                41);
+            InvokePrivate(
+                formType,
+                form,
+                "AppendOutputForGeneration",
+                "stale chunk",
+                40);
+            InvokePrivate(
+                formType,
+                form,
+                "FlushPendingOutput");
+            NativePoint scrollAfterFlush = GetScrollPosition(output);
+            AssertTrue(
+                output.Text.IndexOf(
+                    "current chunk",
+                    StringComparison.Ordinal) >= 0 &&
+                output.Text.IndexOf(
+                    "stale chunk",
+                    StringComparison.Ordinal) < 0,
+                "Stale stream chunks are ignored");
+            AssertScrollPreserved(
+                scrollBeforeFlush,
+                scrollAfterFlush,
+                "Streaming flush preserves the historical viewport");
+
+            NativePoint scrollBeforeFinalize = GetScrollPosition(output);
+            InvokePrivate(
+                formType,
+                form,
+                "FinalizeStreamingTurn",
+                "用户要求：\r\nnext question",
+                "## final answer");
+            NativePoint scrollAfterFinalize = GetScrollPosition(output);
+            AssertTrue(
+                CountOccurrences(output.Text, previousAnswer) == 1 &&
+                output.Text.IndexOf(
+                    "final answer",
+                    StringComparison.Ordinal) >= 0,
+                "Only the current assistant block is finalized");
+            AssertScrollPreserved(
+                scrollBeforeFinalize,
+                scrollAfterFinalize,
+                "Finalizing a turn preserves the historical viewport");
+
+            NativePoint scrollBeforeFinalRemoval = GetScrollPosition(output);
+            InvokePrivate(
+                formType,
+                form,
+                "RemoveStreamingTurnPreview",
+                session);
+            NativePoint scrollAfterFinalRemoval = GetScrollPosition(output);
+            AssertScrollPreserved(
+                scrollBeforeFinalRemoval,
+                scrollAfterFinalRemoval,
+                "Removing a preview preserves the historical viewport");
+            InvokePrivate(
+                formType,
+                form,
+                "PrepareStreamingTurn",
+                session,
+                "cancelled question");
+            output.Select(previousAnswerStart, previousAnswer.Length);
+            SetField(formType, form, "followStreamTail", false);
+            SetScrollPosition(output, 260);
+            NativePoint scrollBeforeCancel = GetScrollPosition(output);
+            InvokePrivate(
+                formType,
+                form,
+                "RemoveStreamingTurnPreview",
+                session);
+            NativePoint scrollAfterCancel = GetScrollPosition(output);
+            AssertTrue(
+                output.SelectionStart == previousAnswerStart &&
+                    CountOccurrences(output.Text, previousAnswer) == 1,
+                "Cancelling a turn preserves the historical selection");
+            AssertScrollPreserved(
+                scrollBeforeCancel,
+                scrollAfterCancel,
+                "Cancelling a turn preserves the historical viewport");
+        }
+        finally
+        {
+            SetField(formType, form, "activeGenerationSequence", 0);
+            SetField(formType, form, "generationCancellation", null);
+            SetField(formType, form, "streamedResponse", null);
+            cancellation.Dispose();
+            messages.Clear();
+            InvokePrivate(formType, form, "LoadCurrentSession");
         }
     }
 
@@ -309,7 +591,8 @@ internal static class UiStateSmokeTest
         DateTime deadline = DateTime.UtcNow.AddSeconds(10);
         while (DateTime.UtcNow < deadline &&
             (inputItems.Count == before ||
-                (bool)GetField(formType, form, "isAddingFiles")))
+                (bool)GetField(formType, form, "isAddingFiles") ||
+                pathInput.Text.Length > 0))
         {
             Application.DoEvents();
             Thread.Sleep(10);
@@ -1110,6 +1393,79 @@ internal static class UiStateSmokeTest
         }
 
         return current;
+    }
+
+    private static void ThrowIfUiThreadException()
+    {
+        if (uiThreadException == null)
+        {
+            return;
+        }
+
+        Exception captured = uiThreadException;
+        uiThreadException = null;
+        throw new InvalidOperationException(
+            "Unhandled exception on the WinForms UI thread.",
+            captured);
+    }
+
+    private static NativePoint GetScrollPosition(RichTextBox textBox)
+    {
+        NativePoint position = new NativePoint();
+        SendMessage(
+            textBox.Handle,
+            EmGetScrollPosition,
+            IntPtr.Zero,
+            ref position);
+        return position;
+    }
+
+    private static void SetScrollPosition(RichTextBox textBox, int y)
+    {
+        NativePoint position = new NativePoint();
+        position.Y = y;
+        SendMessage(
+            textBox.Handle,
+            EmSetScrollPosition,
+            IntPtr.Zero,
+            ref position);
+        Application.DoEvents();
+    }
+
+    private static void AssertScrollPreserved(
+        NativePoint before,
+        NativePoint after,
+        string name)
+    {
+        AssertTrue(
+            Math.Abs(before.X - after.X) <= 2 &&
+                Math.Abs(before.Y - after.Y) <= 2,
+            name + " (before=" + before.X + "," + before.Y +
+                "; after=" + after.X + "," + after.Y + ")");
+    }
+
+    private static int CountOccurrences(string value, string needle)
+    {
+        if (string.IsNullOrEmpty(value) || string.IsNullOrEmpty(needle))
+        {
+            return 0;
+        }
+
+        int count = 0;
+        int offset = 0;
+        while (offset <= value.Length - needle.Length)
+        {
+            int index = value.IndexOf(needle, offset, StringComparison.Ordinal);
+            if (index < 0)
+            {
+                break;
+            }
+
+            count++;
+            offset = index + needle.Length;
+        }
+
+        return count;
     }
 
     private static void AssertTrue(bool condition, string name)

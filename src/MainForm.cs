@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,6 +26,9 @@ namespace FilePromptAIWin7
         // for JSON, tool definitions, and provider-specific envelope fields.
         private const long MaximumConversationContextCharacters = 48000L;
         private const float ExpandedSettingsHeight = 94F;
+        private const float MinimumOutputAreaHeight = 104F;
+        private const int EmGetScrollPosition = 0x04DD;
+        private const int EmSetScrollPosition = 0x04DE;
 
         private readonly FileContentExtractor extractor;
         private readonly ModelClient modelClient;
@@ -33,12 +37,16 @@ namespace FilePromptAIWin7
         private readonly Dictionary<string, SessionDraft> sessionDrafts;
         private readonly ExtensionStore extensionStore;
         private readonly ModelProfileStore modelProfileStore;
+        private readonly object streamOutputSync;
         private IList<ModelProfile> modelProfiles;
         private ExtensionSettings extensionSettings;
 
         private TableLayoutPanel rootLayout;
         private TableLayoutPanel workspaceLayout;
+        private TableLayoutPanel conversationArea;
         private RowStyle settingsRowStyle;
+        private RowStyle inputsAreaRowStyle;
+        private RowStyle promptAreaRowStyle;
         private Control settingsPanel;
         private TextBox endpointTextBox;
         private TextBox apiKeyTextBox;
@@ -47,6 +55,8 @@ namespace FilePromptAIWin7
         private ListBox sessionListBox;
         private Label sessionTitleLabel;
         private Label connectionStatusLabel;
+        private Label contextSummaryLabel;
+        private ToolTip contextSummaryToolTip;
         private ListView inputListView;
         private RichTextBox promptTextBox;
         private RichTextBox outputTextBox;
@@ -74,15 +84,28 @@ namespace FilePromptAIWin7
         private ToolStripStatusLabel statusLabel;
         private ToolStripProgressBar progressBar;
         private System.Windows.Forms.Timer sessionSearchTimer;
+        private System.Windows.Forms.Timer contextSummaryTimer;
+        private System.Windows.Forms.Timer streamFlushTimer;
 
         private CancellationTokenSource generationCancellation;
         private CancellationTokenSource connectionTestCancellation;
         private CancellationTokenSource fileAddCancellation;
         private StringBuilder streamedResponse;
+        private StringBuilder pendingStreamOutput;
+        private string renderedSessionId;
+        private int renderedMessageCount;
+        private long renderedSessionCharacterEstimate;
+        private long extensionPromptCharacterEstimate;
+        private int streamedTurnStart;
+        private int streamedContentStart;
+        private int generationSequence;
+        private volatile int activeGenerationSequence;
         private bool isAddingFiles;
         private bool isClosing;
         private bool isLoadingSession;
+        private bool isUpdatingConversationRows;
         private bool settingsExpanded;
+        private bool followStreamTail;
         private string sendShortcutMode;
         private GroupBox promptGroup;
 
@@ -97,6 +120,20 @@ namespace FilePromptAIWin7
                 Items = new List<InputItem>();
             }
         }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativePoint
+        {
+            public int X;
+            public int Y;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(
+            IntPtr windowHandle,
+            int message,
+            IntPtr wordParameter,
+            ref NativePoint longParameter);
 
         private sealed class FileResolutionResult
         {
@@ -132,10 +169,17 @@ namespace FilePromptAIWin7
             conversationStore = new ConversationStore();
             extensionStore = new ExtensionStore();
             extensionSettings = extensionStore.Load();
+            extensionPromptCharacterEstimate =
+                CalculateExtensionPromptCharacterEstimate(extensionSettings);
             modelProfileStore = new ModelProfileStore();
             modelProfiles = modelProfileStore.Load();
+            streamOutputSync = new object();
+            pendingStreamOutput = new StringBuilder();
             sessionDrafts = new Dictionary<string, SessionDraft>(
                 StringComparer.OrdinalIgnoreCase);
+            renderedMessageCount = -1;
+            streamedTurnStart = -1;
+            streamedContentStart = -1;
 
             InitializeWindow();
             BuildInterface();
@@ -161,15 +205,15 @@ namespace FilePromptAIWin7
         {
             Text = WindowTitle;
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(880, 520);
+            MinimumSize = new Size(900, 540);
             Rectangle workingArea = Screen.PrimaryScreen.WorkingArea;
             Size = new Size(
                 Math.Max(
                     MinimumSize.Width,
-                    Math.Min(1120, workingArea.Width - 32)),
+                    Math.Min(1280, workingArea.Width - 32)),
                 Math.Max(
                     MinimumSize.Height,
-                    Math.Min(640, workingArea.Height - 32)));
+                    Math.Min(760, workingArea.Height - 32)));
             Font = new Font("Microsoft YaHei", 9F, FontStyle.Regular);
             BackColor = UiTheme.WindowBackground;
             AutoScaleMode = AutoScaleMode.None;
@@ -201,13 +245,23 @@ namespace FilePromptAIWin7
             rootLayout.ColumnCount = 2;
             rootLayout.RowCount = 1;
             rootLayout.ColumnStyles.Add(
-                new ColumnStyle(SizeType.Absolute, 232F));
+                new ColumnStyle(SizeType.Absolute, 248F));
             rootLayout.ColumnStyles.Add(
                 new ColumnStyle(SizeType.Percent, 100F));
             Controls.Add(rootLayout);
 
             rootLayout.Controls.Add(CreateSessionSidebar(), 0, 0);
             rootLayout.Controls.Add(CreateWorkspace(), 1, 0);
+            contextSummaryTimer = new System.Windows.Forms.Timer();
+            contextSummaryTimer.Interval = 250;
+            contextSummaryTimer.Tick += delegate
+            {
+                contextSummaryTimer.Stop();
+                UpdateContextSummary();
+            };
+            streamFlushTimer = new System.Windows.Forms.Timer();
+            streamFlushTimer.Interval = 40;
+            streamFlushTimer.Tick += delegate { FlushPendingOutput(); };
             Shown += delegate { ResizeInputColumns(); };
         }
 
@@ -341,12 +395,14 @@ namespace FilePromptAIWin7
             workspaceLayout.Dock = DockStyle.Fill;
             workspaceLayout.Padding = new Padding(10, 0, 0, 0);
             workspaceLayout.ColumnCount = 1;
-            workspaceLayout.RowCount = 4;
+            workspaceLayout.RowCount = 5;
             workspaceLayout.RowStyles.Add(
                 new RowStyle(SizeType.Absolute, 52F));
             settingsRowStyle = new RowStyle(
                 SizeType.Absolute,
-                ExpandedSettingsHeight);
+                0F);
+            workspaceLayout.RowStyles.Add(
+                new RowStyle(SizeType.Absolute, 40F));
             workspaceLayout.RowStyles.Add(settingsRowStyle);
             workspaceLayout.RowStyles.Add(
                 new RowStyle(SizeType.Percent, 100F));
@@ -354,11 +410,13 @@ namespace FilePromptAIWin7
                 new RowStyle(SizeType.Absolute, 24F));
 
             settingsPanel = CreateSettingsPanel();
-            settingsExpanded = true;
+            settingsExpanded = false;
+            settingsPanel.Visible = false;
             workspaceLayout.Controls.Add(CreateHeader(), 0, 0);
-            workspaceLayout.Controls.Add(settingsPanel, 0, 1);
-            workspaceLayout.Controls.Add(CreateConversationArea(), 0, 2);
-            workspaceLayout.Controls.Add(CreateStatusBar(), 0, 3);
+            workspaceLayout.Controls.Add(CreateContextSummaryPanel(), 0, 1);
+            workspaceLayout.Controls.Add(settingsPanel, 0, 2);
+            workspaceLayout.Controls.Add(CreateConversationArea(), 0, 3);
+            workspaceLayout.Controls.Add(CreateStatusBar(), 0, 4);
             return workspaceLayout;
         }
 
@@ -423,7 +481,7 @@ namespace FilePromptAIWin7
             extensionsButton.AccessibleName = "管理离线技能和 MCP 服务";
             extensionsButton.Click += OnExtensionsClick;
 
-            toggleSettingsButton = CreateButton("收起配置", 84);
+            toggleSettingsButton = CreateButton("连接设置", 84);
             toggleSettingsButton.AccessibleName = "展开或收起连接配置";
             toggleSettingsButton.Click += delegate
             {
@@ -458,6 +516,47 @@ namespace FilePromptAIWin7
             actions.Controls.Add(moreButton);
             panel.Controls.Add(titlePanel, 0, 0);
             panel.Controls.Add(actions, 1, 0);
+            return panel;
+        }
+
+        private Control CreateContextSummaryPanel()
+        {
+            Panel panel = new Panel();
+            panel.Dock = DockStyle.Fill;
+            panel.BackColor = UiTheme.PanelAltBackground;
+            panel.Padding = new Padding(10, 4, 10, 4);
+            panel.Margin = new Padding(0, 0, 0, 4);
+
+            TableLayoutPanel layout = new TableLayoutPanel();
+            layout.Dock = DockStyle.Fill;
+            layout.ColumnCount = 2;
+            layout.RowCount = 1;
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 66F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+
+            Label heading = new Label();
+            heading.Text = "上下文";
+            heading.Dock = DockStyle.Fill;
+            heading.TextAlign = ContentAlignment.MiddleLeft;
+            heading.ForeColor = UiTheme.Accent;
+            heading.Font = new Font(Font, FontStyle.Bold);
+
+            contextSummaryLabel = new Label();
+            contextSummaryLabel.Text = "模型未配置 · 0 条消息 · 0 项资料";
+            contextSummaryLabel.Dock = DockStyle.Fill;
+            contextSummaryLabel.TextAlign = ContentAlignment.MiddleLeft;
+            contextSummaryLabel.ForeColor = UiTheme.TextSecondary;
+            contextSummaryLabel.AutoEllipsis = true;
+            contextSummaryLabel.AccessibleName = "当前会话上下文摘要";
+            contextSummaryToolTip = new ToolTip();
+            contextSummaryToolTip.InitialDelay = 300;
+            contextSummaryToolTip.ReshowDelay = 100;
+            contextSummaryToolTip.AutoPopDelay = 15000;
+            contextSummaryToolTip.ShowAlways = true;
+
+            layout.Controls.Add(heading, 0, 0);
+            layout.Controls.Add(contextSummaryLabel, 1, 0);
+            panel.Controls.Add(layout);
             return panel;
         }
 
@@ -521,18 +620,94 @@ namespace FilePromptAIWin7
 
         private Control CreateConversationArea()
         {
-            TableLayoutPanel area = new TableLayoutPanel();
-            area.Dock = DockStyle.Fill;
-            area.ColumnCount = 1;
-            area.RowCount = 3;
-            area.RowStyles.Add(new RowStyle(SizeType.Percent, 34F));
-            area.RowStyles.Add(new RowStyle(SizeType.Percent, 22F));
-            area.RowStyles.Add(new RowStyle(SizeType.Percent, 44F));
+            conversationArea = new TableLayoutPanel();
+            conversationArea.Dock = DockStyle.Fill;
+            conversationArea.ColumnCount = 1;
+            conversationArea.RowCount = 3;
+            conversationArea.RowStyles.Add(
+                new RowStyle(SizeType.Percent, 100F));
+            inputsAreaRowStyle = new RowStyle(SizeType.Absolute, 140F);
+            promptAreaRowStyle = new RowStyle(SizeType.Absolute, 112F);
+            conversationArea.RowStyles.Add(inputsAreaRowStyle);
+            conversationArea.RowStyles.Add(promptAreaRowStyle);
 
-            area.Controls.Add(CreateInputsPanel(), 0, 0);
-            area.Controls.Add(CreatePromptPanel(), 0, 1);
-            area.Controls.Add(CreateOutputPanel(), 0, 2);
-            return area;
+            conversationArea.Controls.Add(CreateOutputPanel(), 0, 0);
+            conversationArea.Controls.Add(CreateInputsPanel(), 0, 1);
+            conversationArea.Controls.Add(CreatePromptPanel(), 0, 2);
+            conversationArea.Resize += delegate
+            {
+                UpdateConversationAreaRows();
+            };
+            return conversationArea;
+        }
+
+        private void UpdateConversationAreaRows()
+        {
+            if (conversationArea == null || inputsAreaRowStyle == null ||
+                promptAreaRowStyle == null || isUpdatingConversationRows)
+            {
+                return;
+            }
+
+            isUpdatingConversationRows = true;
+            try
+            {
+                int height = conversationArea.ClientSize.Height;
+                float desiredInputsHeight;
+                float desiredPromptHeight;
+                if (height >= 520)
+                {
+                    desiredInputsHeight = 150F;
+                    desiredPromptHeight = 120F;
+                }
+                else if (height >= 410)
+                {
+                    desiredInputsHeight = 140F;
+                    desiredPromptHeight = 106F;
+                }
+                else
+                {
+                    desiredInputsHeight = 130F;
+                    desiredPromptHeight = 90F;
+                }
+
+                float bottomBudget = Math.Max(
+                    0F,
+                    height - MinimumOutputAreaHeight);
+                if (desiredInputsHeight + desiredPromptHeight > bottomBudget)
+                {
+                    // Preserve the transcript while settings consume vertical
+                    // space; secondary inputs recover after settings close.
+                    desiredPromptHeight = Math.Min(
+                        desiredPromptHeight,
+                        Math.Max(56F, bottomBudget * 0.42F));
+                    desiredPromptHeight = Math.Min(
+                        desiredPromptHeight,
+                        bottomBudget);
+                    desiredPromptHeight = (float)Math.Floor(
+                        desiredPromptHeight);
+                    desiredInputsHeight = Math.Max(
+                        0F,
+                        (float)Math.Floor(
+                            bottomBudget - desiredPromptHeight));
+                }
+
+                if (Math.Abs(
+                    inputsAreaRowStyle.Height - desiredInputsHeight) >= 0.5F)
+                {
+                    inputsAreaRowStyle.Height = desiredInputsHeight;
+                }
+
+                if (Math.Abs(
+                    promptAreaRowStyle.Height - desiredPromptHeight) >= 0.5F)
+                {
+                    promptAreaRowStyle.Height = desiredPromptHeight;
+                }
+            }
+            finally
+            {
+                isUpdatingConversationRows = false;
+            }
         }
 
         private Control CreateInputsPanel()
@@ -670,8 +845,7 @@ namespace FilePromptAIWin7
             inputListView.Columns[3].Width = noteWidth;
             if (inputListView.IsHandleCreated)
             {
-                inputListView.Scrollable = false;
-                inputListView.Scrollable = true;
+                inputListView.Invalidate();
             }
         }
 
@@ -682,6 +856,13 @@ namespace FilePromptAIWin7
             promptGroup.Dock = DockStyle.Fill;
             promptGroup.ForeColor = UiTheme.TextSecondary;
 
+            TableLayoutPanel layout = new TableLayoutPanel();
+            layout.Dock = DockStyle.Fill;
+            layout.ColumnCount = 1;
+            layout.RowCount = 2;
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 35F));
+
             promptTextBox = new RichTextBox();
             promptTextBox.Dock = DockStyle.Fill;
             promptTextBox.BorderStyle = BorderStyle.FixedSingle;
@@ -689,6 +870,10 @@ namespace FilePromptAIWin7
             promptTextBox.DetectUrls = false;
             promptTextBox.BackColor = Color.White;
             promptTextBox.AccessibleName = "文字描述或指令";
+            promptTextBox.TextChanged += delegate
+            {
+                ScheduleContextSummaryUpdate();
+            };
             promptTextBox.KeyDown += delegate(object sender, KeyEventArgs args)
             {
                 if (args.KeyCode == Keys.Enter &&
@@ -698,7 +883,62 @@ namespace FilePromptAIWin7
                     StartGeneration();
                 }
             };
-            promptGroup.Controls.Add(promptTextBox);
+
+            TableLayoutPanel actions = new TableLayoutPanel();
+            actions.Dock = DockStyle.Fill;
+            actions.ColumnCount = 2;
+            actions.RowCount = 1;
+            actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            actions.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            promptActionsButton = CreateButton("快捷指令", 84);
+            promptActionsButton.AccessibleName = "应用快捷指令模板";
+            promptActionsButton.ContextMenuStrip = CreatePromptActionsMenu();
+            promptActionsButton.Click += delegate
+            {
+                promptActionsButton.ContextMenuStrip.Show(
+                    promptActionsButton,
+                    new Point(0, promptActionsButton.Height));
+            };
+            promptActionsButton.Anchor = AnchorStyles.Left;
+
+            FlowLayoutPanel sendActions = new FlowLayoutPanel();
+            sendActions.Dock = DockStyle.Fill;
+            sendActions.AutoSize = true;
+            sendActions.WrapContents = false;
+            sendActions.FlowDirection = FlowDirection.LeftToRight;
+            sendActions.Margin = new Padding(0);
+
+            stopButton = CreateButton("停止", 64);
+            stopButton.Enabled = false;
+            stopButton.Click += delegate
+            {
+                if (generationCancellation != null)
+                {
+                    generationCancellation.Cancel();
+                }
+            };
+
+            generateButton = CreateButton("发送", 80);
+            generateButton.BackColor = UiTheme.Accent;
+            generateButton.ForeColor = Color.White;
+            generateButton.FlatStyle = FlatStyle.Flat;
+            generateButton.FlatAppearance.BorderSize = 0;
+            generateButton.FlatAppearance.MouseOverBackColor =
+                UiTheme.AccentHover;
+            generateButton.FlatAppearance.MouseDownBackColor =
+                UiTheme.AccentPressed;
+            generateButton.Click += delegate { StartGeneration(); };
+            generateButton.ContextMenuStrip = CreateSendShortcutMenu();
+            generateButton.AccessibleName = "发送（右键可配置快捷键）";
+
+            sendActions.Controls.Add(stopButton);
+            sendActions.Controls.Add(generateButton);
+            actions.Controls.Add(promptActionsButton, 0, 0);
+            actions.Controls.Add(sendActions, 1, 0);
+            layout.Controls.Add(promptTextBox, 0, 0);
+            layout.Controls.Add(actions, 0, 1);
+            promptGroup.Controls.Add(layout);
             return promptGroup;
         }
 
@@ -715,38 +955,6 @@ namespace FilePromptAIWin7
             buttons.Padding = new Padding(2, 1, 2, 0);
             buttons.WrapContents = false;
 
-            generateButton = CreateButton("发送", 80);
-            generateButton.BackColor = UiTheme.Accent;
-            generateButton.ForeColor = Color.White;
-            generateButton.FlatStyle = FlatStyle.Flat;
-            generateButton.FlatAppearance.BorderSize = 0;
-            generateButton.FlatAppearance.MouseOverBackColor =
-                UiTheme.AccentHover;
-            generateButton.FlatAppearance.MouseDownBackColor =
-                UiTheme.AccentPressed;
-            generateButton.Click += delegate { StartGeneration(); };
-            generateButton.ContextMenuStrip = CreateSendShortcutMenu();
-            promptActionsButton = CreateButton("\u5feb\u6377\u6307\u4ee4", 84);
-            promptActionsButton.AccessibleName = "\u5e94\u7528\u5feb\u6377\u6307\u4ee4\u6a21\u677f";
-            promptActionsButton.ContextMenuStrip = CreatePromptActionsMenu();
-            promptActionsButton.Click += delegate
-            {
-                promptActionsButton.ContextMenuStrip.Show(
-                    promptActionsButton,
-                    new Point(0, promptActionsButton.Height));
-            };
-            generateButton.AccessibleName = "发送（右键可配置快捷键）";
-
-            stopButton = CreateButton("停止", 64);
-            stopButton.Enabled = false;
-            stopButton.Click += delegate
-            {
-                if (generationCancellation != null)
-                {
-                    generationCancellation.Cancel();
-                }
-            };
-
             copyOutputButton = CreateButton("复制回复", 76);
             copyOutputButton.Click += OnCopyOutputClick;
             saveOutputButton = CreateButton("导出文件", 86);
@@ -760,9 +968,6 @@ namespace FilePromptAIWin7
                     new Point(0, saveOutputButton.Height));
             };
 
-            buttons.Controls.Add(promptActionsButton);
-            buttons.Controls.Add(generateButton);
-            buttons.Controls.Add(stopButton);
             buttons.Controls.Add(copyOutputButton);
             buttons.Controls.Add(saveOutputButton);
 
@@ -775,6 +980,37 @@ namespace FilePromptAIWin7
             outputTextBox.Font = new Font("Microsoft YaHei", 9F);
             outputTextBox.HideSelection = false;
             outputTextBox.AccessibleName = "模型输出";
+            outputTextBox.MouseWheel += delegate
+            {
+                if (activeGenerationSequence != 0)
+                {
+                    followStreamTail = false;
+                }
+            };
+            outputTextBox.MouseDown += delegate
+            {
+                if (activeGenerationSequence != 0)
+                {
+                    followStreamTail = false;
+                }
+            };
+            outputTextBox.KeyDown += delegate(object sender, KeyEventArgs args)
+            {
+                if (activeGenerationSequence == 0)
+                {
+                    return;
+                }
+
+                if (args.KeyCode == Keys.End && args.Control)
+                {
+                    followStreamTail = true;
+                }
+                else if (args.KeyCode == Keys.Up ||
+                    args.KeyCode == Keys.PageUp || args.KeyCode == Keys.Home)
+                {
+                    followStreamTail = false;
+                }
+            };
 
             ContextMenuStrip outputMenu = new ContextMenuStrip();
             ToolStripMenuItem copySelectionItem =
@@ -897,14 +1133,10 @@ namespace FilePromptAIWin7
             if (toggleSettingsButton != null)
             {
                 toggleSettingsButton.Text = expanded
-                    ? "收起配置"
-                    : "连接配置";
+                    ? "收起设置"
+                    : "连接设置";
             }
 
-            if (workspaceLayout != null)
-            {
-                workspaceLayout.PerformLayout();
-            }
         }
 
         private bool HasCompleteConnectionSettings()
@@ -1213,17 +1445,27 @@ namespace FilePromptAIWin7
             sessionTitleLabel.Text = session.Title;
             connectionStatusLabel.Text = BuildConnectionStatus();
             RenderConversation(session);
+            UpdateContextSummary();
             UpdateSessionButtons();
         }
 
         private void RenderConversation(ConversationSession session)
         {
             outputTextBox.Clear();
+            renderedSessionId = session == null ? null : session.Id;
+            renderedMessageCount = session == null || session.Messages == null
+                ? 0
+                : session.Messages.Count;
+            renderedSessionCharacterEstimate =
+                CalculateSessionCharacterEstimate(session);
+            streamedTurnStart = -1;
+            streamedContentStart = -1;
             if (session == null || session.Messages == null ||
                 session.Messages.Count == 0)
             {
                 AppendEmptyConversation();
                 UpdateOutputButtons(generationCancellation != null);
+                UpdateContextSummary();
                 return;
             }
 
@@ -1255,6 +1497,7 @@ namespace FilePromptAIWin7
             outputTextBox.SelectionStart = outputTextBox.TextLength;
             outputTextBox.ScrollToCaret();
             UpdateOutputButtons(generationCancellation != null);
+            UpdateContextSummary();
         }
 
         private void AppendEmptyConversation()
@@ -1308,6 +1551,168 @@ namespace FilePromptAIWin7
 
             outputTextBox.SelectionColor = UiTheme.TextPrimary;
             outputTextBox.SelectionFont = outputTextBox.Font;
+        }
+
+        private void PrepareStreamingTurn(
+            ConversationSession session,
+            string visibleUserMessage)
+        {
+            int messageCount = session == null || session.Messages == null
+                ? 0
+                : session.Messages.Count;
+            bool currentViewMatches = session != null &&
+                string.Equals(
+                    renderedSessionId,
+                    session.Id,
+                    StringComparison.OrdinalIgnoreCase) &&
+                renderedMessageCount == messageCount;
+            if (!currentViewMatches ||
+                (messageCount > 0 && outputTextBox.TextLength == 0))
+            {
+                RenderConversation(session);
+            }
+
+            if (messageCount == 0)
+            {
+                outputTextBox.Clear();
+            }
+
+            streamedTurnStart = outputTextBox.TextLength;
+            followStreamTail = true;
+            AppendTranscriptMessage(
+                "你",
+                visibleUserMessage,
+                UiTheme.RoleUser);
+            AppendTranscriptHeader(
+                "模型",
+                UiTheme.RoleAssistant);
+            streamedContentStart = outputTextBox.TextLength;
+            outputTextBox.SelectionStart = outputTextBox.TextLength;
+            outputTextBox.ScrollToCaret();
+        }
+
+        private void FinalizeStreamingTurn(
+            string userContent,
+            string assistantContent)
+        {
+            if (outputTextBox == null || streamedTurnStart < 0 ||
+                streamedTurnStart > outputTextBox.TextLength)
+            {
+                return;
+            }
+
+            int previousSelectionStart = outputTextBox.SelectionStart;
+            int previousSelectionLength = outputTextBox.SelectionLength;
+            NativePoint previousScrollPosition =
+                GetRichTextScrollPosition(outputTextBox);
+            bool restoreView = !followStreamTail;
+            outputTextBox.SuspendLayout();
+            try
+            {
+                outputTextBox.Select(
+                    streamedTurnStart,
+                    outputTextBox.TextLength - streamedTurnStart);
+                outputTextBox.SelectedText = string.Empty;
+                outputTextBox.SelectionStart = outputTextBox.TextLength;
+                outputTextBox.SelectionLength = 0;
+                AppendTranscriptMessage(
+                    "你",
+                    FormatMessageForDisplay(
+                        new ConversationMessage(
+                            "user",
+                            userContent ?? string.Empty)),
+                    UiTheme.RoleUser);
+                AppendTranscriptMessage(
+                    "模型",
+                    assistantContent ?? string.Empty,
+                    UiTheme.RoleAssistant,
+                    true);
+                outputTextBox.SelectionStart = outputTextBox.TextLength;
+                outputTextBox.SelectionLength = 0;
+                if (followStreamTail)
+                {
+                    outputTextBox.ScrollToCaret();
+                }
+                else
+                {
+                    outputTextBox.Select(
+                        Math.Min(
+                            previousSelectionStart,
+                            outputTextBox.TextLength),
+                        Math.Min(
+                            previousSelectionLength,
+                            Math.Max(
+                                0,
+                                outputTextBox.TextLength -
+                                    previousSelectionStart)));
+                }
+            }
+            finally
+            {
+                outputTextBox.ResumeLayout(true);
+            }
+
+            if (restoreView)
+            {
+                SetRichTextScrollPosition(
+                    outputTextBox,
+                    previousScrollPosition);
+            }
+        }
+
+        private void RemoveStreamingTurnPreview(
+            ConversationSession session)
+        {
+            if (outputTextBox == null || streamedTurnStart < 0 ||
+                streamedTurnStart > outputTextBox.TextLength)
+            {
+                RenderConversation(session);
+                return;
+            }
+
+            int previousSelectionStart = outputTextBox.SelectionStart;
+            int previousSelectionLength = outputTextBox.SelectionLength;
+            NativePoint previousScrollPosition =
+                GetRichTextScrollPosition(outputTextBox);
+            bool restoreView = !followStreamTail;
+            outputTextBox.Select(
+                streamedTurnStart,
+                outputTextBox.TextLength - streamedTurnStart);
+            outputTextBox.SelectedText = string.Empty;
+            if (outputTextBox.TextLength == 0 &&
+                (session == null || session.Messages == null ||
+                    session.Messages.Count == 0))
+            {
+                AppendEmptyConversation();
+            }
+
+            outputTextBox.SelectionStart = outputTextBox.TextLength;
+            outputTextBox.SelectionLength = 0;
+            if (followStreamTail)
+            {
+                outputTextBox.ScrollToCaret();
+            }
+            else
+            {
+                outputTextBox.Select(
+                    Math.Min(previousSelectionStart, outputTextBox.TextLength),
+                    Math.Min(
+                        previousSelectionLength,
+                        Math.Max(
+                            0,
+                            outputTextBox.TextLength -
+                                previousSelectionStart)));
+            }
+            if (restoreView)
+            {
+                SetRichTextScrollPosition(
+                    outputTextBox,
+                    previousScrollPosition);
+            }
+            streamedTurnStart = -1;
+            streamedContentStart = -1;
+            UpdateOutputButtons(false);
+            UpdateContextSummary();
         }
 
         private static string FormatMessageForDisplay(
@@ -1401,6 +1806,129 @@ namespace FilePromptAIWin7
             return "配置就绪 · " + model;
         }
 
+        private string BuildContextSummary()
+        {
+            ConversationSession session = conversationStore.CurrentSession;
+            int messageCount = session == null || session.Messages == null
+                ? 0
+                : session.Messages.Count;
+            string model = modelTextBox == null
+                ? string.Empty
+                : modelTextBox.Text.Trim();
+            if (string.IsNullOrWhiteSpace(model))
+            {
+                model = "未配置模型";
+            }
+
+            long currentTurnCharacters = promptTextBox == null
+                ? 0L
+                : promptTextBox.TextLength;
+            bool cachedSession = session != null &&
+                string.Equals(
+                    renderedSessionId,
+                    session.Id,
+                    StringComparison.OrdinalIgnoreCase) &&
+                renderedMessageCount == messageCount;
+            long historyCharacters;
+            if (cachedSession)
+            {
+                historyCharacters = renderedSessionCharacterEstimate;
+            }
+            else
+            {
+                historyCharacters = CalculateSessionCharacterEstimate(session);
+            }
+
+            foreach (InputItem item in inputItems)
+            {
+                if (item != null && item.Kind == InputKind.Text)
+                {
+                    currentTurnCharacters += string.IsNullOrEmpty(
+                        item.TextContent)
+                        ? 0L
+                        : item.TextContent.Length;
+                }
+            }
+
+            currentTurnCharacters += extensionPromptCharacterEstimate;
+            currentTurnCharacters += EstimateAttachmentCharacters(
+                inputItems
+                    .Where(item => item != null &&
+                        item.Kind != InputKind.Text)
+                    .ToList());
+
+            return "模型 " + model +
+                "  ·  " + messageCount + " 条消息" +
+                "  ·  " + BuildExtensionSummary() +
+                "  ·  本轮资料 " + inputItems.Count + " 项" +
+                "  ·  历史约 " + historyCharacters.ToString("N0") +
+                " 字符  ·  本轮约 " + currentTurnCharacters.ToString("N0") +
+                " 字符  ·  上限 " +
+                MaximumConversationContextCharacters.ToString("N0") +
+                " 字符";
+        }
+
+        private void UpdateContextSummary()
+        {
+            if (contextSummaryLabel != null)
+            {
+                string summary = BuildContextSummary();
+                contextSummaryLabel.Text = summary;
+                contextSummaryLabel.AccessibleDescription = summary;
+                if (contextSummaryToolTip != null)
+                {
+                    contextSummaryToolTip.SetToolTip(
+                        contextSummaryLabel,
+                        summary);
+                }
+            }
+        }
+
+        private void ScheduleContextSummaryUpdate()
+        {
+            if (contextSummaryTimer == null)
+            {
+                UpdateContextSummary();
+                return;
+            }
+
+            contextSummaryTimer.Stop();
+            contextSummaryTimer.Start();
+        }
+
+        private static long CalculateSessionCharacterEstimate(
+            ConversationSession session)
+        {
+            long total = 0L;
+            if (session == null || session.Messages == null)
+            {
+                return total;
+            }
+
+            foreach (ConversationMessage message in session.Messages)
+            {
+                if (message != null &&
+                    !string.IsNullOrEmpty(message.Content))
+                {
+                    total += message.Content.Length;
+                }
+            }
+
+            return total;
+        }
+
+        private static long CalculateExtensionPromptCharacterEstimate(
+            ExtensionSettings settings)
+        {
+            if (settings == null)
+            {
+                return 0L;
+            }
+
+            string prompt = settings.BuildSystemPrompt();
+            return string.IsNullOrEmpty(prompt) ? 0L : prompt.Length;
+        }
+
         private void OnConnectionSettingChanged(object sender, EventArgs args)
         {
             if (connectionStatusLabel != null &&
@@ -1415,6 +1943,8 @@ namespace FilePromptAIWin7
                     !IsBusy &&
                     HasCompleteConnectionSettings();
             }
+
+            ScheduleContextSummaryUpdate();
         }
 
         private void UpdateSessionButtons()
@@ -1459,7 +1989,8 @@ namespace FilePromptAIWin7
             UpdateSendShortcutMenuChecks();
             connectionStatusLabel.Text = BuildConnectionStatus();
             testConnectionButton.Enabled = HasCompleteConnectionSettings();
-            SetSettingsExpanded(!HasCompleteConnectionSettings());
+            SetSettingsExpanded(false);
+            UpdateContextSummary();
         }
 
         private void SaveSettings()
@@ -1723,6 +2254,10 @@ namespace FilePromptAIWin7
                     {
                         extensionStore.Save(candidate);
                         extensionSettings = candidate.Clone();
+                        extensionPromptCharacterEstimate =
+                            CalculateExtensionPromptCharacterEstimate(
+                                extensionSettings);
+                        UpdateContextSummary();
                         SetStatus(
                             "新建或导入的 MCP 默认停用，需手动勾选启用 · " +
                             "扩展已保存 · " + BuildExtensionSummary());
@@ -1871,7 +2406,8 @@ namespace FilePromptAIWin7
             SaveSettings();
             connectionStatusLabel.Text = BuildConnectionStatus();
             testConnectionButton.Enabled = HasCompleteConnectionSettings();
-            SetSettingsExpanded(!HasCompleteConnectionSettings());
+            SetSettingsExpanded(false);
+            UpdateContextSummary();
         }
 
         private async void OnTestConnectionClick(object sender, EventArgs args)
@@ -2763,6 +3299,7 @@ namespace FilePromptAIWin7
                 " 项（文本 " + textCount +
                 "、图片 " + imageCount +
                 "、文件 " + fileCount + "）");
+            UpdateContextSummary();
         }
 
         private async void StartGeneration()
@@ -2852,26 +3389,28 @@ namespace FilePromptAIWin7
             request.ConversationMessages = contextSelection.Messages;
 
             SaveSettings();
-            if (session.Messages == null || session.Messages.Count == 0)
+            PrepareStreamingTurn(session, visibleUserMessage);
+            lock (streamOutputSync)
             {
-                outputTextBox.Clear();
+                streamedResponse = new StringBuilder();
+                pendingStreamOutput.Length = 0;
             }
-            else
+            generationCancellation = new CancellationTokenSource();
+            generationSequence++;
+            if (generationSequence <= 0)
             {
-                RenderConversation(session);
+                generationSequence = 1;
             }
 
-            AppendTranscriptMessage(
-                "你",
-                visibleUserMessage,
-                UiTheme.RoleUser);
-            AppendTranscriptHeader(
-                "模型",
-                UiTheme.RoleAssistant);
-            streamedResponse = new StringBuilder();
-            generationCancellation = new CancellationTokenSource();
+            activeGenerationSequence = generationSequence;
+            if (streamFlushTimer != null)
+            {
+                streamFlushTimer.Start();
+            }
+
             SetGeneratingState(true);
             connectionStatusLabel.Text = "正在请求 · " + model;
+            UpdateContextSummary();
             McpRuntime mcpRuntime = null;
             bool stdioStartupRejected = false;
 
@@ -2936,11 +3475,10 @@ namespace FilePromptAIWin7
                         generationCancellation.Token);
                 }
 
-                if (streamedResponse.Length == 0 &&
-                    !string.IsNullOrEmpty(result))
-                {
-                    AppendOutput(result);
-                }
+                string accumulatedResponse = DeactivateStreamingOutput();
+                string finalResponse = !string.IsNullOrEmpty(result)
+                    ? result
+                    : accumulatedResponse;
 
                 string updatedTitle = BuildAutoTitle(session, instruction);
                 bool saved = conversationStore.AddTurn(
@@ -2948,7 +3486,7 @@ namespace FilePromptAIWin7
                     new ConversationMessage("user", prompt),
                     new ConversationMessage(
                         "assistant",
-                        result ?? streamedResponse.ToString()),
+                        finalResponse),
                     updatedTitle);
                 if (!saved)
                 {
@@ -2956,6 +3494,15 @@ namespace FilePromptAIWin7
                         "当前会话已不存在，生成结果未能保存。");
                 }
 
+                FinalizeStreamingTurn(prompt, finalResponse);
+                renderedSessionId = session.Id;
+                renderedMessageCount = session.Messages == null
+                    ? 0
+                    : session.Messages.Count;
+                renderedSessionCharacterEstimate =
+                    CalculateSessionCharacterEstimate(session);
+                streamedTurnStart = -1;
+                streamedContentStart = -1;
                 RefreshSessionList();
                 sessionTitleLabel.Text = session.Title;
                 ClearDraft(session.Id);
@@ -2970,10 +3517,10 @@ namespace FilePromptAIWin7
 
                 inputItems.Clear();
                 inputListView.Items.Clear();
-                RenderConversation(session);
+                UpdateContextSummary();
                 SetStatus(
                     "生成完成，共 " +
-                    (result == null ? 0 : result.Length).ToString("N0") +
+                    finalResponse.Length.ToString("N0") +
                     " 字符" +
                     (promptUnchanged
                         ? string.Empty
@@ -2985,14 +3532,16 @@ namespace FilePromptAIWin7
             }
             catch (OperationCanceledException)
             {
-                RenderConversation(session);
+                DeactivateStreamingOutput();
+                RemoveStreamingTurnPreview(session);
                 SetStatus(stdioStartupRejected
                     ? "已拒绝启动本地 MCP，本次生成已取消。"
                     : "已停止，本次内容未写入会话。");
             }
             catch (ModelCallException exception)
             {
-                RenderConversation(session);
+                DeactivateStreamingOutput();
+                RemoveStreamingTurnPreview(session);
                 SetStatus("生成失败");
                 MessageBox.Show(
                     exception.Message,
@@ -3002,7 +3551,8 @@ namespace FilePromptAIWin7
             }
             catch (McpException exception)
             {
-                RenderConversation(session);
+                DeactivateStreamingOutput();
+                RemoveStreamingTurnPreview(session);
                 SetStatus("MCP 调用失败");
                 MessageBox.Show(
                     this,
@@ -3013,7 +3563,8 @@ namespace FilePromptAIWin7
             }
             catch (Exception exception)
             {
-                RenderConversation(session);
+                DeactivateStreamingOutput();
+                RemoveStreamingTurnPreview(session);
                 SetStatus("生成失败");
                 MessageBox.Show(
                     "发生错误：" + exception.Message,
@@ -3023,6 +3574,7 @@ namespace FilePromptAIWin7
             }
             finally
             {
+                DeactivateStreamingOutput();
                 if (mcpRuntime != null)
                 {
                     mcpRuntime.Dispose();
@@ -3033,10 +3585,16 @@ namespace FilePromptAIWin7
                     generationCancellation.Dispose();
                     generationCancellation = null;
                 }
-
-                streamedResponse = null;
+                lock (streamOutputSync)
+                {
+                    streamedResponse = null;
+                    pendingStreamOutput.Length = 0;
+                }
+                streamedTurnStart = -1;
+                streamedContentStart = -1;
                 SetGeneratingState(false);
                 connectionStatusLabel.Text = BuildConnectionStatus();
+                UpdateContextSummary();
             }
         }
 
@@ -3720,6 +4278,24 @@ namespace FilePromptAIWin7
             }
         }
 
+        private string DeactivateStreamingOutput()
+        {
+            activeGenerationSequence = 0;
+            if (streamFlushTimer != null)
+            {
+                streamFlushTimer.Stop();
+            }
+
+            lock (streamOutputSync)
+            {
+                string accumulated = streamedResponse == null
+                    ? string.Empty
+                    : streamedResponse.ToString();
+                pendingStreamOutput.Length = 0;
+                return accumulated;
+            }
+        }
+
         private void AppendOutput(string value)
         {
             if (string.IsNullOrEmpty(value) || IsDisposed)
@@ -3727,28 +4303,116 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            if (InvokeRequired)
+            int sequence = activeGenerationSequence;
+            if (sequence == 0)
             {
-                try
-                {
-                    BeginInvoke(new Action<string>(AppendOutput), value);
-                }
-                catch (InvalidOperationException)
-                {
-                    // Window is closing.
-                }
-
                 return;
             }
 
-            if (streamedResponse != null)
+            AppendOutputForGeneration(value, sequence);
+        }
+
+        private void AppendOutputForGeneration(string value, int sequence)
+        {
+            if (string.IsNullOrEmpty(value) || IsDisposed ||
+                sequence == 0 || sequence != activeGenerationSequence)
             {
-                streamedResponse.Append(value);
+                return;
             }
 
-            outputTextBox.AppendText(value);
+            lock (streamOutputSync)
+            {
+                if (sequence != activeGenerationSequence ||
+                    streamedResponse == null)
+                {
+                    return;
+                }
+
+                streamedResponse.Append(value);
+                pendingStreamOutput.Append(value);
+            }
+        }
+
+        private void FlushPendingOutput()
+        {
+            if (outputTextBox == null || IsDisposed)
+            {
+                return;
+            }
+
+            int sequence = activeGenerationSequence;
+            string value;
+            lock (streamOutputSync)
+            {
+                if (sequence == 0 ||
+                    sequence != activeGenerationSequence ||
+                    pendingStreamOutput.Length == 0)
+                {
+                    return;
+                }
+
+                value = pendingStreamOutput.ToString();
+                pendingStreamOutput.Length = 0;
+            }
+
+            int previousSelectionStart = outputTextBox.SelectionStart;
+            int previousSelectionLength = outputTextBox.SelectionLength;
+            NativePoint previousScrollPosition =
+                GetRichTextScrollPosition(outputTextBox);
             outputTextBox.SelectionStart = outputTextBox.TextLength;
-            outputTextBox.ScrollToCaret();
+            outputTextBox.SelectionLength = 0;
+            outputTextBox.AppendText(value);
+            if (followStreamTail)
+            {
+                outputTextBox.SelectionStart = outputTextBox.TextLength;
+                outputTextBox.ScrollToCaret();
+            }
+            else
+            {
+                outputTextBox.Select(
+                    Math.Min(previousSelectionStart, outputTextBox.TextLength),
+                    Math.Min(
+                        previousSelectionLength,
+                        Math.Max(
+                            0,
+                            outputTextBox.TextLength -
+                                previousSelectionStart)));
+                SetRichTextScrollPosition(
+                    outputTextBox,
+                    previousScrollPosition);
+            }
+        }
+
+        private static NativePoint GetRichTextScrollPosition(
+            RichTextBox textBox)
+        {
+            NativePoint position = new NativePoint();
+            if (textBox != null && textBox.IsHandleCreated)
+            {
+                SendMessage(
+                    textBox.Handle,
+                    EmGetScrollPosition,
+                    IntPtr.Zero,
+                    ref position);
+            }
+
+            return position;
+        }
+
+        private static void SetRichTextScrollPosition(
+            RichTextBox textBox,
+            NativePoint position)
+        {
+            if (textBox == null || !textBox.IsHandleCreated)
+            {
+                return;
+            }
+
+            SendMessage(
+                textBox.Handle,
+                EmSetScrollPosition,
+                IntPtr.Zero,
+                ref position);
         }
 
         private void SetStatus(string value)
@@ -4148,6 +4812,32 @@ namespace FilePromptAIWin7
                 sessionSearchTimer.Stop();
                 sessionSearchTimer.Dispose();
                 sessionSearchTimer = null;
+            }
+
+            if (streamFlushTimer != null)
+            {
+                streamFlushTimer.Stop();
+                streamFlushTimer.Dispose();
+                streamFlushTimer = null;
+            }
+
+            if (contextSummaryTimer != null)
+            {
+                contextSummaryTimer.Stop();
+                contextSummaryTimer.Dispose();
+                contextSummaryTimer = null;
+            }
+
+            if (contextSummaryToolTip != null)
+            {
+                contextSummaryToolTip.Dispose();
+                contextSummaryToolTip = null;
+            }
+
+            activeGenerationSequence = 0;
+            lock (streamOutputSync)
+            {
+                pendingStreamOutput.Length = 0;
             }
 
             if (generationCancellation != null)
