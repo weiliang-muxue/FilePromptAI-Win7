@@ -27,6 +27,10 @@ namespace FilePromptAIWin7
         private const long MaximumConversationContextCharacters = 48000L;
         private const float ExpandedSettingsHeight = 94F;
         private const float MinimumOutputAreaHeight = 104F;
+        // The compact composer still keeps both the action and path rows
+        // usable; only the empty ListView is collapsed.
+        private const float CompactInputsHeight = 96F;
+        private const float ExpandedInputsHeight = 150F;
         private const int EmGetScrollPosition = 0x04DD;
         private const int EmSetScrollPosition = 0x04DE;
 
@@ -48,6 +52,7 @@ namespace FilePromptAIWin7
         private RowStyle inputsAreaRowStyle;
         private RowStyle promptAreaRowStyle;
         private Control settingsPanel;
+        private Control inputsPanel;
         private TextBox endpointTextBox;
         private TextBox apiKeyTextBox;
         private TextBox modelTextBox;
@@ -240,12 +245,12 @@ namespace FilePromptAIWin7
         {
             rootLayout = new TableLayoutPanel();
             rootLayout.Dock = DockStyle.Fill;
-            rootLayout.Padding = new Padding(8);
+            rootLayout.Padding = new Padding(0);
             rootLayout.BackColor = BackColor;
             rootLayout.ColumnCount = 2;
             rootLayout.RowCount = 1;
             rootLayout.ColumnStyles.Add(
-                new ColumnStyle(SizeType.Absolute, 248F));
+                new ColumnStyle(SizeType.Absolute, 236F));
             rootLayout.ColumnStyles.Add(
                 new ColumnStyle(SizeType.Percent, 100F));
             Controls.Add(rootLayout);
@@ -270,7 +275,8 @@ namespace FilePromptAIWin7
             Panel panel = new Panel();
             panel.Dock = DockStyle.Fill;
             panel.BackColor = UiTheme.SidebarBackground;
-            panel.Padding = new Padding(10);
+            panel.BorderStyle = BorderStyle.FixedSingle;
+            panel.Padding = new Padding(12);
 
             TableLayoutPanel layout = new TableLayoutPanel();
             layout.Dock = DockStyle.Fill;
@@ -280,7 +286,7 @@ namespace FilePromptAIWin7
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
 
             Label brand = new Label();
             brand.Text = "FILEPROMPT AI";
@@ -344,45 +350,67 @@ namespace FilePromptAIWin7
             sessionListBox.ForeColor = UiTheme.TextPrimary;
             sessionListBox.IntegralHeight = false;
             sessionListBox.DrawMode = DrawMode.OwnerDrawFixed;
-            sessionListBox.ItemHeight = 48;
+            sessionListBox.ItemHeight = 52;
             sessionListBox.DrawItem += OnSessionDrawItem;
             sessionListBox.SelectedIndexChanged += OnSessionSelected;
+
+            renameSessionButton = CreateButton("重命名", 96);
+            renameSessionButton.Click += OnRenameSessionClick;
+            deleteSessionButton = CreateButton("删除", 96);
+            deleteSessionButton.ForeColor = UiTheme.Danger;
+            deleteSessionButton.Click += OnDeleteSessionClick;
+            backupSessionsButton = CreateButton("备份", 96);
+            backupSessionsButton.Click += OnBackupSessionsClick;
+            restoreSessionsButton = CreateButton("恢复", 96);
+            restoreSessionsButton.Click += OnRestoreSessionsClick;
+
+            ContextMenuStrip sessionMenu = new ContextMenuStrip();
+            ToolStripMenuItem renameItem =
+                new ToolStripMenuItem("重命名会话...");
+            renameItem.Click += OnRenameSessionClick;
+            ToolStripMenuItem deleteItem =
+                new ToolStripMenuItem("删除当前会话...");
+            deleteItem.ForeColor = UiTheme.Danger;
+            deleteItem.Click += OnDeleteSessionClick;
+            ToolStripMenuItem backupItem =
+                new ToolStripMenuItem("备份全部会话...");
+            backupItem.Click += OnBackupSessionsClick;
+            ToolStripMenuItem restoreItem =
+                new ToolStripMenuItem("恢复会话备份...");
+            restoreItem.Click += OnRestoreSessionsClick;
+            sessionMenu.Items.Add(renameItem);
+            sessionMenu.Items.Add(deleteItem);
+            sessionMenu.Items.Add(new ToolStripSeparator());
+            sessionMenu.Items.Add(backupItem);
+            sessionMenu.Items.Add(restoreItem);
+            sessionMenu.Opening += delegate
+            {
+                bool hasSession = conversationStore.CurrentSession != null;
+                renameItem.Enabled = hasSession && !IsBusy;
+                deleteItem.Enabled = hasSession &&
+                    conversationStore.Sessions.Count > 1 && !IsBusy;
+                backupItem.Enabled = hasSession && !IsBusy;
+                restoreItem.Enabled = !IsBusy;
+            };
+            sessionListBox.ContextMenuStrip = sessionMenu;
             layout.Controls.Add(sessionListBox, 0, 3);
 
             TableLayoutPanel actions = new TableLayoutPanel();
             actions.Dock = DockStyle.Fill;
-            actions.ColumnCount = 2;
-            actions.RowCount = 2;
+            actions.ColumnCount = 1;
+            actions.RowCount = 1;
             actions.ColumnStyles.Add(
-                new ColumnStyle(SizeType.Percent, 50F));
-            actions.ColumnStyles.Add(
-                new ColumnStyle(SizeType.Percent, 50F));
-            actions.RowStyles.Add(
-                new RowStyle(SizeType.Percent, 50F));
-            actions.RowStyles.Add(
-                new RowStyle(SizeType.Percent, 50F));
-
-            renameSessionButton = CreateButton("重命名", 96);
-            renameSessionButton.Dock = DockStyle.Fill;
-            renameSessionButton.Click += OnRenameSessionClick;
-
-            deleteSessionButton = CreateButton("删除", 96);
-            deleteSessionButton.Dock = DockStyle.Fill;
-            deleteSessionButton.ForeColor = UiTheme.Danger;
-            deleteSessionButton.Click += OnDeleteSessionClick;
-
-            backupSessionsButton = CreateButton("备份", 96);
-            backupSessionsButton.Dock = DockStyle.Fill;
-            backupSessionsButton.Click += OnBackupSessionsClick;
-
-            restoreSessionsButton = CreateButton("恢复", 96);
-            restoreSessionsButton.Dock = DockStyle.Fill;
-            restoreSessionsButton.Click += OnRestoreSessionsClick;
-
-            actions.Controls.Add(renameSessionButton, 0, 0);
-            actions.Controls.Add(deleteSessionButton, 1, 0);
-            actions.Controls.Add(backupSessionsButton, 0, 1);
-            actions.Controls.Add(restoreSessionsButton, 1, 1);
+                new ColumnStyle(SizeType.Percent, 100F));
+            Button sessionActionsButton = CreateButton("会话管理", 120);
+            sessionActionsButton.Dock = DockStyle.Fill;
+            sessionActionsButton.AccessibleName = "打开会话管理菜单";
+            sessionActionsButton.Click += delegate
+            {
+                sessionMenu.Show(
+                    sessionActionsButton,
+                    new Point(0, -sessionMenu.Height));
+            };
+            actions.Controls.Add(sessionActionsButton, 0, 0);
             layout.Controls.Add(actions, 0, 4);
 
             panel.Controls.Add(layout);
@@ -393,7 +421,7 @@ namespace FilePromptAIWin7
         {
             workspaceLayout = new TableLayoutPanel();
             workspaceLayout.Dock = DockStyle.Fill;
-            workspaceLayout.Padding = new Padding(10, 0, 0, 0);
+            workspaceLayout.Padding = new Padding(16, 12, 16, 8);
             workspaceLayout.ColumnCount = 1;
             workspaceLayout.RowCount = 5;
             workspaceLayout.RowStyles.Add(
@@ -417,6 +445,10 @@ namespace FilePromptAIWin7
             workspaceLayout.Controls.Add(settingsPanel, 0, 2);
             workspaceLayout.Controls.Add(CreateConversationArea(), 0, 3);
             workspaceLayout.Controls.Add(CreateStatusBar(), 0, 4);
+            workspaceLayout.Resize += delegate
+            {
+                UpdateHeaderActionsLayout();
+            };
             return workspaceLayout;
         }
 
@@ -496,6 +528,24 @@ namespace FilePromptAIWin7
             profilesItem.AccessibleName = "保存、选择或删除模型配置";
             profilesItem.Click += OnModelProfilesClick;
             moreMenu.Items.Add(profilesItem);
+            ToolStripMenuItem testItem =
+                new ToolStripMenuItem("测试模型连接");
+            testItem.AccessibleName = "测试当前模型连接";
+            testItem.Click += OnTestConnectionClick;
+            moreMenu.Items.Add(testItem);
+            ToolStripMenuItem extensionsItem =
+                new ToolStripMenuItem("技能 / MCP...");
+            extensionsItem.AccessibleName = "管理离线技能和 MCP 服务";
+            extensionsItem.Click += OnExtensionsClick;
+            moreMenu.Items.Add(extensionsItem);
+            ToolStripMenuItem settingsItem =
+                new ToolStripMenuItem("连接设置...");
+            settingsItem.AccessibleName = "展开或收起连接配置";
+            settingsItem.Click += delegate
+            {
+                SetSettingsExpanded(!settingsExpanded);
+            };
+            moreMenu.Items.Add(settingsItem);
             moreMenu.Items.Add(new ToolStripSeparator());
             ToolStripMenuItem uninstallItem =
                 new ToolStripMenuItem("卸载 FilePrompt AI...");
@@ -511,12 +561,28 @@ namespace FilePromptAIWin7
             };
 
             actions.Controls.Add(extensionsButton);
-            actions.Controls.Add(testConnectionButton);
             actions.Controls.Add(toggleSettingsButton);
             actions.Controls.Add(moreButton);
             panel.Controls.Add(titlePanel, 0, 0);
             panel.Controls.Add(actions, 1, 0);
+            UpdateHeaderActionsLayout();
             return panel;
+        }
+
+        private void UpdateHeaderActionsLayout()
+        {
+            if (workspaceLayout == null || extensionsButton == null ||
+                toggleSettingsButton == null || moreButton == null)
+            {
+                return;
+            }
+
+            // At the minimum supported width, keep the title and context
+            // visible and expose the secondary actions from one menu.
+            bool compact = workspaceLayout.ClientSize.Width < 720;
+            extensionsButton.Visible = !compact;
+            toggleSettingsButton.Visible = !compact;
+            moreButton.Text = compact ? "菜单" : "更多";
         }
 
         private Control CreateContextSummaryPanel()
@@ -542,10 +608,12 @@ namespace FilePromptAIWin7
             heading.Font = new Font(Font, FontStyle.Bold);
 
             contextSummaryLabel = new Label();
-            contextSummaryLabel.Text = "模型未配置 · 0 条消息 · 0 项资料";
+            contextSummaryLabel.Text =
+                "模型未配置 · 0 条消息 · 技能 0 · MCP 0 · 资料 0 · 历史 0 · 本轮 0 · 上限 48,000";
             contextSummaryLabel.Dock = DockStyle.Fill;
             contextSummaryLabel.TextAlign = ContentAlignment.MiddleLeft;
             contextSummaryLabel.ForeColor = UiTheme.TextSecondary;
+            contextSummaryLabel.Font = new Font(Font.FontFamily, 8.5F);
             contextSummaryLabel.AutoEllipsis = true;
             contextSummaryLabel.AccessibleName = "当前会话上下文摘要";
             contextSummaryToolTip = new ToolTip();
@@ -626,7 +694,9 @@ namespace FilePromptAIWin7
             conversationArea.RowCount = 3;
             conversationArea.RowStyles.Add(
                 new RowStyle(SizeType.Percent, 100F));
-            inputsAreaRowStyle = new RowStyle(SizeType.Absolute, 140F);
+            inputsAreaRowStyle = new RowStyle(
+                SizeType.Absolute,
+                CompactInputsHeight);
             promptAreaRowStyle = new RowStyle(SizeType.Absolute, 112F);
             conversationArea.RowStyles.Add(inputsAreaRowStyle);
             conversationArea.RowStyles.Add(promptAreaRowStyle);
@@ -653,21 +723,25 @@ namespace FilePromptAIWin7
             try
             {
                 int height = conversationArea.ClientSize.Height;
+                bool hasInputItems = inputItems != null &&
+                    inputItems.Count > 0;
                 float desiredInputsHeight;
                 float desiredPromptHeight;
                 if (height >= 520)
                 {
-                    desiredInputsHeight = 150F;
+                    desiredInputsHeight = hasInputItems
+                        ? ExpandedInputsHeight
+                        : CompactInputsHeight;
                     desiredPromptHeight = 120F;
                 }
                 else if (height >= 410)
                 {
-                    desiredInputsHeight = 140F;
+                    desiredInputsHeight = hasInputItems ? 132F : 90F;
                     desiredPromptHeight = 106F;
                 }
                 else
                 {
-                    desiredInputsHeight = 130F;
+                    desiredInputsHeight = hasInputItems ? 112F : 84F;
                     desiredPromptHeight = 90F;
                 }
 
@@ -703,6 +777,20 @@ namespace FilePromptAIWin7
                 {
                     promptAreaRowStyle.Height = desiredPromptHeight;
                 }
+
+                if (inputListView != null)
+                {
+                    // The composer remains a drop target through its parent
+                    // group when the empty attachment list is collapsed.
+                    inputListView.Visible = hasInputItems;
+                }
+                if (inputsPanel != null)
+                {
+                    inputsPanel.Text = hasInputItems
+                        ? "输入资料  ·  " + inputItems.Count +
+                            " 项已添加  ·  可继续拖入或粘贴"
+                        : "输入资料  ·  拖入文件或粘贴内容  ·  当前为空";
+                }
             }
             finally
             {
@@ -713,12 +801,22 @@ namespace FilePromptAIWin7
         private Control CreateInputsPanel()
         {
             GroupBox group = new GroupBox();
-            group.Text = "输入资料  ·  拖入文件或粘贴内容";
+            inputsPanel = group;
+            group.Text = "输入资料  ·  拖入文件或粘贴内容  ·  当前为空";
             group.Dock = DockStyle.Fill;
             group.ForeColor = UiTheme.TextSecondary;
             group.AllowDrop = true;
             group.DragEnter += OnDragEnter;
             group.DragDrop += OnDragDrop;
+            if (contextSummaryToolTip != null)
+            {
+                contextSummaryToolTip.SetToolTip(
+                    group,
+                    "路径需点击读取；只发送用户主动添加的内容和文件名，不会后台扫描目录。\r\n" +
+                    "有资料时会自动展开列表，发送后仍可手工移除。\r\n" +
+                    "拖拽文件到此区域或点击“添加文件”均可。\r\n" +
+                    "路径输入支持每行一个文件。" );
+            }
 
             TableLayoutPanel buttons = new TableLayoutPanel();
             buttons.Dock = DockStyle.Top;
@@ -737,12 +835,15 @@ namespace FilePromptAIWin7
             addFileButton = CreateButton("添加文件", 84);
             addFileButton.Click += OnAddFileClick;
             pathTextBox = new TextBox();
+            // Keep pasted multi-line path lists supported while using a
+            // compact vertical editor; horizontal scrolling made the field
+            // look like an empty bar at the minimum window size.
             pathTextBox.Multiline = true;
             pathTextBox.AcceptsReturn = false;
             pathTextBox.WordWrap = false;
-            pathTextBox.ScrollBars = ScrollBars.Horizontal;
+            pathTextBox.ScrollBars = ScrollBars.Vertical;
             pathTextBox.Dock = DockStyle.Fill;
-            pathTextBox.Margin = new Padding(3, 2, 3, 2);
+            pathTextBox.Margin = new Padding(3, 3, 3, 3);
             pathTextBox.AccessibleName = "文件路径（可粘贴多个，每行一个）";
             readPathButton = CreateButton("读取路径", 80);
             readPathButton.Click += OnReadPathClick;
@@ -753,18 +854,10 @@ namespace FilePromptAIWin7
             clearButton = CreateButton("清空", 64);
             clearButton.Click += OnClearClick;
 
-            Label hint = new Label();
-            hint.Text = "路径需点击读取；只发送内容和文件名";
-            hint.AutoSize = true;
-            hint.TextAlign = ContentAlignment.MiddleLeft;
-            hint.ForeColor = UiTheme.TextMuted;
-            hint.Margin = new Padding(10, 7, 3, 0);
-
             actionRow.Controls.Add(addFileButton);
             actionRow.Controls.Add(pasteButton);
             actionRow.Controls.Add(removeButton);
             actionRow.Controls.Add(clearButton);
-            actionRow.Controls.Add(hint);
 
             TableLayoutPanel pathRow = new TableLayoutPanel();
             pathRow.Dock = DockStyle.Fill;
@@ -945,7 +1038,7 @@ namespace FilePromptAIWin7
         private Control CreateOutputPanel()
         {
             GroupBox group = new GroupBox();
-            group.Text = "模型输出";
+            group.Text = "对话";
             group.Dock = DockStyle.Fill;
             group.ForeColor = UiTheme.TextSecondary;
 
@@ -975,11 +1068,11 @@ namespace FilePromptAIWin7
             outputTextBox.Dock = DockStyle.Fill;
             outputTextBox.ReadOnly = true;
             outputTextBox.BackColor = Color.White;
-            outputTextBox.BorderStyle = BorderStyle.FixedSingle;
+            outputTextBox.BorderStyle = BorderStyle.None;
             outputTextBox.DetectUrls = true;
             outputTextBox.Font = new Font("Microsoft YaHei", 9F);
             outputTextBox.HideSelection = false;
-            outputTextBox.AccessibleName = "模型输出";
+            outputTextBox.AccessibleName = "当前会话对话记录";
             outputTextBox.MouseWheel += delegate
             {
                 if (activeGenerationSequence != 0)
@@ -1263,6 +1356,12 @@ namespace FilePromptAIWin7
 
             if (selected)
             {
+                using (SolidBrush accentBrush = new SolidBrush(UiTheme.Accent))
+                {
+                    args.Graphics.FillRectangle(
+                        accentBrush,
+                        new Rectangle(args.Bounds.Left, args.Bounds.Top, 3, args.Bounds.Height));
+                }
                 args.DrawFocusRectangle();
             }
         }
@@ -1857,15 +1956,16 @@ namespace FilePromptAIWin7
                         item.Kind != InputKind.Text)
                     .ToList());
 
+            // Keep the default line scannable at 900px. The tooltip and
+            // AccessibleDescription retain the full character estimates.
             return "模型 " + model +
                 "  ·  " + messageCount + " 条消息" +
                 "  ·  " + BuildExtensionSummary() +
-                "  ·  本轮资料 " + inputItems.Count + " 项" +
-                "  ·  历史约 " + historyCharacters.ToString("N0") +
-                " 字符  ·  本轮约 " + currentTurnCharacters.ToString("N0") +
-                " 字符  ·  上限 " +
-                MaximumConversationContextCharacters.ToString("N0") +
-                " 字符";
+                "  ·  资料 " + inputItems.Count + " 项" +
+                "  ·  历史 " + historyCharacters.ToString("N0") +
+                "  ·  本轮 " + currentTurnCharacters.ToString("N0") +
+                "  ·  上限 " +
+                MaximumConversationContextCharacters.ToString("N0");
         }
 
         private void UpdateContextSummary()
@@ -3299,6 +3399,7 @@ namespace FilePromptAIWin7
                 " 项（文本 " + textCount +
                 "、图片 " + imageCount +
                 "、文件 " + fileCount + "）");
+            UpdateConversationAreaRows();
             UpdateContextSummary();
         }
 

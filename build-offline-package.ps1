@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.12',
+    [string]$Version = '1.13',
     [switch]$StageOnly
 )
 

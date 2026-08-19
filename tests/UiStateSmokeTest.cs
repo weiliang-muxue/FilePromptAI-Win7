@@ -148,9 +148,10 @@ internal static class UiStateSmokeTest
             form,
             "promptAreaRowStyle") as RowStyle;
         AssertTrue(
-            inputsRow != null && inputsRow.Height >= 130F &&
+            inputsRow != null && inputsRow.Height >= 84F &&
+                inputsRow.Height <= 100F &&
                 promptRow != null && promptRow.Height >= 90F,
-            "Attachment and prompt rows keep usable minimum heights");
+            "Empty attachment tray stays compact while the prompt remains usable");
         RichTextBox output = GetField(
             formType,
             form,
@@ -192,10 +193,68 @@ internal static class UiStateSmokeTest
         AssertTrue(
             window != null && output != null && inputList != null,
             "Main workspace controls exist");
+        Button extensionsButton = GetField(
+            formType,
+            form,
+            "extensionsButton") as Button;
+        Button toggleSettingsButton = GetField(
+            formType,
+            form,
+            "toggleSettingsButton") as Button;
+        Button moreButton = GetField(
+            formType,
+            form,
+            "moreButton") as Button;
+        AssertTrue(
+            extensionsButton != null && toggleSettingsButton != null &&
+                moreButton != null,
+            "Header workspace actions exist");
         Size originalSize = window.Size;
         window.Show();
         Application.DoEvents();
+        window.Size = window.MinimumSize;
+        InvokePrivate(formType, form, "UpdateHeaderActionsLayout");
+        Application.DoEvents();
+        AssertTrue(
+            !extensionsButton.Visible && !toggleSettingsButton.Visible &&
+                moreButton.Visible && moreButton.Text == "菜单",
+            "Narrow workspace collapses secondary header actions");
+        window.Size = originalSize;
+        InvokePrivate(formType, form, "UpdateHeaderActionsLayout");
+        Application.DoEvents();
         IntPtr inputListHandle = inputList.Handle;
+        Type inputItemType = formType.Assembly.GetType(
+            "FilePromptAIWin7.InputItem",
+            true);
+        Type inputKindType = formType.Assembly.GetType(
+            "FilePromptAIWin7.InputKind",
+            true);
+        object inputItem = Activator.CreateInstance(inputItemType, true);
+        inputItemType.GetProperty("Name").SetValue(
+            inputItem,
+            "layout-check.txt",
+            null);
+        inputItemType.GetProperty("Kind").SetValue(
+            inputItem,
+            Enum.Parse(inputKindType, "Text"),
+            null);
+        inputItemType.GetProperty("TextContent").SetValue(
+            inputItem,
+            "layout verification",
+            null);
+        AssertTrue(
+            (bool)InvokePrivate(formType, form, "AddInputItem", inputItem),
+            "Attachment tray accepts a pasted item");
+        InvokePrivate(formType, form, "UpdateInputStatus");
+        Application.DoEvents();
+        AssertTrue(
+            inputsRow.Height >= 120F && inputList.Visible,
+            "Attachment tray expands when an item is present");
+        InvokePrivate(formType, form, "OnClearClick", form, EventArgs.Empty);
+        Application.DoEvents();
+        AssertTrue(
+            inputsRow.Height <= 100F && !inputList.Visible,
+            "Attachment tray collapses after items are cleared");
         window.Size = window.MinimumSize;
         InvokePrivate(formType, form, "SetSettingsExpanded", true);
         Application.DoEvents();
@@ -897,6 +956,11 @@ internal static class UiStateSmokeTest
         AssertTrue(
             moreButton != null && moreButton.ContextMenuStrip != null,
             "More menu exists for model profiles");
+        AssertTrue(
+            ContainsMenuText(moreButton.ContextMenuStrip, "测试模型连接") &&
+                ContainsMenuText(moreButton.ContextMenuStrip, "技能 / MCP...") &&
+                ContainsMenuText(moreButton.ContextMenuStrip, "连接设置..."),
+            "More menu keeps connection and extension actions available");
         ToolStripItem profilesItem = null;
         foreach (ToolStripItem item in moreButton.ContextMenuStrip.Items)
         {
@@ -1012,6 +1076,26 @@ internal static class UiStateSmokeTest
         }
 
         return null;
+    }
+
+    private static bool ContainsMenuText(
+        ContextMenuStrip menu,
+        string text)
+    {
+        if (menu == null)
+        {
+            return false;
+        }
+
+        foreach (ToolStripItem item in menu.Items)
+        {
+            if (string.Equals(item.Text, text, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void TestMcpApprovalArguments(
