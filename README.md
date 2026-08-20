@@ -4,16 +4,18 @@
 
 ## 当前发布
 
-当前版本为 **v1.13**。这是仓库和离线安装包的唯一维护版本；界面采用左侧会话导航、
-右侧会话记录和底部消息编辑器布局，连接设置默认隐藏，顶部操作会在窄窗口收进菜单。
-空资料区自动压缩，有资料时展开；发送新消息时只追加和更新本轮内容，不再清空并重画已有历史。
+当前版本为 **v1.14**。这是仓库和离线安装包的唯一维护版本；界面采用左侧会话导航、
+右侧会话记录和底部消息编辑器布局；模型、技能/MCP、会话和维护选项
+统一收进左侧“设置”窗口，不占用主工作区。
+附件列表直接收进底部消息编辑器：通过“+ 添加”选择文件、粘贴内容或打开路径窗口，
+有资料时才展开；发送新消息时只追加和更新本轮内容，不再清空并重画已有历史。
 最终离线包位于仓库外的 `exe` 目录，源码和构建脚本均在本仓库中，便于内网环境
 审计、重建和离线分发。
 
 ## 当前功能
 
 - 配置完整请求 URL、API Key、模型名称。
-- 可在“更多”→“模型配置”保存多个内网模型预设，随时选择应用或删除；预设中的 API Key 使用 Windows DPAPI 加密。
+- 可在左侧“设置”→“模型连接”→“模型配置...”保存多个内网模型预设，随时选择应用或删除；预设中的 API Key 使用 Windows DPAPI 加密。
 - 可从剪贴板安装本地技能；技能是离线保存的 system 指令，可独立启用或停用。
 - 支持本地 stdio 和 Streamable HTTP 两种 MCP；可粘贴标准 `mcpServers` JSON、
   测试连接、发现工具并完成多轮工具调用。
@@ -21,36 +23,49 @@
   工具调用默认也逐次确认。
 - 可拖入、选择多个本地文件，也可粘贴一个或多个文件路径后主动点击读取；
   不扫描目录，不会仅因粘贴路径就在后台读取。
+- Windows 7 只注册一个始终可见的专用拖放区，避免子控件句柄变化导致
+  `DragDrop 注册失败`；拖放不可用时仍可用文件选择器或路径读取。
 - 从剪贴板粘贴文字、图片或资源管理器中复制的文件。
 - 本地提取文本/代码、PDF、DOC/DOCX、RTF、XLS/XLSX。
 - PNG、JPEG、BMP、GIF、TIFF 图片压缩后以内联 Base64 提交。
+- 当前运行期跨会话草稿合计最多保留 20 MB 二进制附件，避免 Win7 32 位进程内存耗尽；
+  超限时需先发送或移除已有附件。
 - 模型只收到文件名、提取出的内容和内联数据，不会收到本地路径。
 - 文本资料正文会随会话历史保留；图片和无文本内联文件只发送当前轮，后续轮次
   若需再次查看请主动重新添加，程序不会偷偷从本地路径重读。
 - 支持流式输出、停止、复制结果和保存为 Markdown/文本文件。
 - 会话历史固定在右侧上方并占据主要空间；新回复只更新当前问答，过期流式分片会
   被丢弃，不会再次追加到已经完成的回复后面。
-- 窗口缩放和最小尺寸下资料列表保持拖拽句柄稳定；连接设置展开时仍保留可见输出区，
+- 窗口缩放和最小尺寸下专用拖放入口保持句柄稳定，对话记录和输入框仍然可见；
   完整上下文摘要可通过悬停提示和无障碍描述查看。
 - 支持多会话、新建/重命名/删除会话，并在后续提问中携带当前会话历史；
   超长会话按预算保留最近的完整问答轮次，不拆分单条消息。
+- 当前轮的文字描述、技能提示和提取文件正文也共同遵守 48,000 字符预算；
+  文件正文超出时保留开头并加入明确截断标记，避免模型返回上下文超限错误。
 - 可搜索会话标题和近期内容；会话切换时保留当前运行期内尚未发送的草稿。
-- 可独立测试 URL、Key、模型连接，不写入会话；连接设置启动时默认隐藏，验证失败时
-  会自动展开以便修正。
+- 可在“设置”→“模型连接”中独立测试 URL、Key、模型连接，不写入会话；
+  验证失败时会定位到对应输入项。
 - 模型回复按标题、列表、代码块和 Markdown 表格排版显示。
 - 双击或按 Enter 可预览已主动添加的文字/图片，不会重新读取本地文件。
 - 全部会话可备份为 `.fpc` 并合并恢复；备份不包含 URL、API Key 或模型配置。
-- 可把最新回复或整个会话导出为 Word（`.docx`）和 PDF；回答包含 Markdown
-  表格时可导出为 Excel 工作簿（`.xlsx`）或 CSV。
+- 可把最新回复或整个会话导出为 Word（`.docx`）、PDF、PowerPoint（`.pptx`）
+  和 XMind（`.xmind`）；回答包含 Markdown 表格时可导出为 Excel 工作簿
+  （`.xlsx`）或 CSV。全部导出均在本机完成。
+- 底部“快捷指令”可填入总结、提炼、翻译、PPT 大纲、XMind 结构和 Markdown
+  表格模板；右键对话记录可载入上一条用户指令进行编辑重发，模板不会自动发送。
 - API Key 使用 Windows DPAPI 加密后保存在当前用户的本地配置目录。
 - MCP 的命令、参数、工作目录、环境变量、URL 和请求头整体使用 Windows DPAPI
   加密保存；不会把这些连接配置作为提示词发给模型。
 - 完整请求 URL 不跟随 3xx 重定向，避免把用户资料转发到其他地址。
-- 网络请求具有响应头超时、流式空闲超时和有限重试；异常中断的流式响应不会
-  被误判为完整答案。
+- 网络请求具有响应头超时、流式空闲超时和有限重试；附件请求使用 120 秒等待上限，
+  任何二进制附件请求都不会自动重复上传。HTTP 400/413/415/422 会显示服务端信息以及
+  本轮附件名称、类型和大小；二进制数据在 Base64 序列化前后均检查 32 MB 请求上限。
 - 会话按完整问答轮次原子保存；保存失败会回滚，重复启动会切回现有窗口。
+- 会话文件损坏时先在同目录重命名保留；若文件被占用而无法安全保留，程序进入
+  只读保护且绝不覆盖原文件。
+- 关闭程序时若仍有未发送文字、已添加资料或运行中的任务，会默认阻止误退出并要求确认。
 - 对异常 Office XML、极端 Excel 列号和 CSV 公式内容进行安全限制与转义。
-- 完整离线包包含独立卸载器；主窗口“更多”菜单也可启动卸载。
+- 完整离线包包含独立卸载器；左侧“设置”→“维护”也可启动卸载。
 
 ## 固定接口格式
 
@@ -81,10 +96,12 @@ Content-Type: application/json
 启用技能后，程序会在最前面增加 `system` 消息。启用并成功连接 MCP 后，程序
 使用 Chat Completions 的 `tools`、`tool_choice: "auto"`、assistant
 `tool_calls` 和 `tool` 结果消息完成最多 8 轮调用；自定义模型接口需兼容这些字段。
+若首轮包含二进制附件，后续工具回合只保留附件名称、类型和大小的文字占位，
+不会再次发送 Base64 数据。
 
 ## 离线技能与 MCP
 
-主窗口右上角的“技能 / MCP”入口完全在本机工作，不访问扩展商店，也不会下载
+左侧“设置”→“技能与 MCP”入口完全在本机工作，不访问扩展商店，也不会下载
 依赖。
 
 技能只能手工新建或从剪贴板安装，不会扫描技能目录。剪贴板可直接放普通文本、
@@ -145,7 +162,7 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 
 ## Windows 7 离线完整版
 
-优先使用 `FilePromptAI-Win7-Full-v1.13.zip`。完整解压后运行
+优先使用 `FilePromptAI-Win7-Full-v1.14.zip`。完整解压后运行
 `Start-FilePromptAI.exe`，启动器会检测 .NET Framework 4.8；缺少时会调用包内
 经过微软数字签名的官方完整离线安装程序。安装过程不下载文件，也不需要访问
 互联网。不要只复制 `app` 目录中的 EXE。
@@ -155,8 +172,8 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 实际生成内容时，电脑仍需能够访问用户填写的完整请求 URL；该地址可以是内网
 模型服务，不要求连接公网。
 
-卸载时运行 `Uninstall-FilePromptAI.exe`，或在主窗口选择“更多”→
-“卸载 FilePrompt AI...”。卸载器只删除校验清单内且内容未被修改的程序文件，
+卸载时运行 `Uninstall-FilePromptAI.exe`，或在左侧“设置”→“维护”中选择
+“卸载程序...”。卸载器只删除校验清单内且内容未被修改的程序文件，
 不会递归删除发布目录中的额外文件。用户配置和会话默认保留，只有明确勾选并
 再次确认后才删除。
 
@@ -201,18 +218,3 @@ powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1
 
 界面截图测试单独运行 `tests\CaptureUiSmokeTest.ps1`，支持正常窗口、最小窗口和
 125% 物理尺寸预览。
-
-## Offline export formats
-
-- Word and PDF export remain built in and require no Microsoft Office installation.
-- Markdown tables export to Excel workbooks or CSV files using bundled offline DLLs.
-- Added PowerPoint `.pptx` export for the latest reply or the whole conversation.
-- Added XMind `.xmind` mind-map export from headings, lists, paragraphs, code and tables.
-- PPTX and XMind packages are generated locally; no network request or online installer is used.
-## prompt actions and editable resend
-
-- The output toolbar includes offline prompt actions for summaries, key points,
-  translation, PPT outlines, XMind structures, and Markdown tables.
-- Actions only fill the local prompt box; the user confirms and sends manually.
-- The output context menu can load the last user instruction for editing and a
-  new submission, matching the safer edit-and-resend workflow used by desktop AI clients.

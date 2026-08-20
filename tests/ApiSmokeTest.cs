@@ -270,6 +270,25 @@ internal static class ApiSmokeTest
             SensitiveLocalPath,
             null);
         attachments.Add(imageItem);
+
+        object fileItem = Activator.CreateInstance(itemType, true);
+        itemType.GetProperty("Name").SetValue(
+            fileItem,
+            "scan.pdf",
+            null);
+        itemType.GetProperty("Kind").SetValue(
+            fileItem,
+            Enum.Parse(itemType.GetProperty("Kind").PropertyType, "File"),
+            null);
+        itemType.GetProperty("MimeType").SetValue(
+            fileItem,
+            "application/pdf",
+            null);
+        itemType.GetProperty("BinaryData").SetValue(
+            fileItem,
+            new byte[] { 5, 6, 7, 8 },
+            null);
+        attachments.Add(fileItem);
         return attachments;
     }
 
@@ -306,6 +325,7 @@ internal static class ApiSmokeTest
         results.HistoryOrder = HasHistoryInOrder(messages);
         results.CurrentContent = HasCurrentContent(messages);
         results.InlineImage = HasInlineImage(messages);
+        results.InlineFile = HasInlineFile(messages);
         results.NoLocalPath = requestBody.IndexOf(
             SensitiveLocalPath,
             StringComparison.OrdinalIgnoreCase) < 0 &&
@@ -420,7 +440,7 @@ internal static class ApiSmokeTest
     private static bool HasCurrentContent(IList messages)
     {
         IList parts = GetCurrentParts(messages);
-        if (parts == null || parts.Count != 2)
+        if (parts == null || parts.Count != 3)
         {
             return false;
         }
@@ -439,7 +459,7 @@ internal static class ApiSmokeTest
     private static bool HasInlineImage(IList messages)
     {
         IList parts = GetCurrentParts(messages);
-        if (parts == null || parts.Count != 2)
+        if (parts == null || parts.Count != 3)
         {
             return false;
         }
@@ -457,6 +477,30 @@ internal static class ApiSmokeTest
         return image != null &&
             Convert.ToString(image["url"]) ==
                 "data:image/png;base64,AQIDBA==";
+    }
+
+    private static bool HasInlineFile(IList messages)
+    {
+        IList parts = GetCurrentParts(messages);
+        if (parts == null || parts.Count != 3)
+        {
+            return false;
+        }
+
+        IDictionary<string, object> filePart =
+            parts[2] as IDictionary<string, object>;
+        if (filePart == null ||
+            Convert.ToString(filePart["type"]) != "file")
+        {
+            return false;
+        }
+
+        IDictionary<string, object> file =
+            filePart["file"] as IDictionary<string, object>;
+        return file != null &&
+            Convert.ToString(file["filename"]) == "scan.pdf" &&
+            Convert.ToString(file["file_data"]) ==
+                "data:application/pdf;base64,BQYHCA==";
     }
 
     private static IList GetCurrentParts(IList messages)
@@ -664,6 +708,7 @@ internal static class ApiSmokeTest
         public bool HistoryOrder { get; set; }
         public bool CurrentContent { get; set; }
         public bool InlineImage { get; set; }
+        public bool InlineFile { get; set; }
         public bool NoLocalPath { get; set; }
         public bool SingleProtocol { get; set; }
         public bool SseOutput { get; set; }
@@ -674,7 +719,8 @@ internal static class ApiSmokeTest
             {
                 return ExactUrl && BearerKey && Model && Stream &&
                     SystemPromptOrder && HistoryOrder && CurrentContent &&
-                    InlineImage && NoLocalPath && SingleProtocol && SseOutput;
+                    InlineImage && InlineFile && NoLocalPath &&
+                    SingleProtocol && SseOutput;
             }
         }
 
@@ -688,6 +734,7 @@ internal static class ApiSmokeTest
             PrintResult("History order", HistoryOrder);
             PrintResult("Current authorized content", CurrentContent);
             PrintResult("Inline pasted image", InlineImage);
+            PrintResult("Inline PDF file", InlineFile);
             PrintResult("No local path disclosure", NoLocalPath);
             PrintResult("Chat protocol only", SingleProtocol);
             PrintResult("SSE output", SseOutput);

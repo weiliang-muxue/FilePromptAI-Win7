@@ -29,10 +29,14 @@ namespace FilePromptAIWin7
         private const int MaximumToolArgumentsCharacters = 1024 * 1024;
         private const int MaximumToolResultCharacters = 1024 * 1024;
         private const int MaximumToolTranscriptCharacters = 8 * 1024 * 1024;
-        private const int MaximumRequestCharacters = 32 * 1024 * 1024;
+        private const long MaximumRequestBytes = 32L * 1024L * 1024L;
+        private const long MinimumRequestEnvelopeBytes = 256L * 1024L;
+        private const int MaximumDisplayedServerErrorCharacters = 2000;
         private const int MaximumResponseCharacters = 8 * 1024 * 1024;
         private const long MaximumResponseBytes = 16L * 1024L * 1024L;
         private const int DefaultResponseHeadersTimeoutMilliseconds = 30000;
+        private const int DefaultAttachmentResponseHeadersTimeoutMilliseconds =
+            120000;
         private const int DefaultResponseReadIdleTimeoutMilliseconds = 60000;
         private const int DefaultMaximumRequestAttempts = 3;
         private const int DefaultRetryBaseDelayMilliseconds = 500;
@@ -41,6 +45,7 @@ namespace FilePromptAIWin7
         private readonly HttpClient client;
         private readonly JavaScriptSerializer json;
         private readonly TimeSpan responseHeadersTimeout;
+        private readonly TimeSpan attachmentResponseHeadersTimeout;
         private readonly TimeSpan responseReadIdleTimeout;
         private readonly int maximumRequestAttempts;
         private readonly TimeSpan retryBaseDelay;
@@ -52,7 +57,8 @@ namespace FilePromptAIWin7
                 DefaultResponseReadIdleTimeoutMilliseconds,
                 DefaultMaximumRequestAttempts,
                 DefaultRetryBaseDelayMilliseconds,
-                DefaultMaximumRetryAfterMilliseconds)
+                DefaultMaximumRetryAfterMilliseconds,
+                DefaultAttachmentResponseHeadersTimeoutMilliseconds)
         {
         }
 
@@ -62,6 +68,25 @@ namespace FilePromptAIWin7
             int maximumRequestAttempts,
             int retryBaseDelayMilliseconds,
             int maximumRetryAfterMilliseconds)
+            : this(
+                responseHeadersTimeoutMilliseconds,
+                responseReadIdleTimeoutMilliseconds,
+                maximumRequestAttempts,
+                retryBaseDelayMilliseconds,
+                maximumRetryAfterMilliseconds,
+                Math.Max(
+                    responseHeadersTimeoutMilliseconds,
+                    DefaultAttachmentResponseHeadersTimeoutMilliseconds))
+        {
+        }
+
+        internal ModelClient(
+            int responseHeadersTimeoutMilliseconds,
+            int responseReadIdleTimeoutMilliseconds,
+            int maximumRequestAttempts,
+            int retryBaseDelayMilliseconds,
+            int maximumRetryAfterMilliseconds,
+            int attachmentResponseHeadersTimeoutMilliseconds)
         {
             if (responseHeadersTimeoutMilliseconds <= 0)
             {
@@ -93,6 +118,12 @@ namespace FilePromptAIWin7
                     "maximumRetryAfterMilliseconds");
             }
 
+            if (attachmentResponseHeadersTimeoutMilliseconds <= 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    "attachmentResponseHeadersTimeoutMilliseconds");
+            }
+
             HttpClientHandler handler = new HttpClientHandler();
             handler.AutomaticDecompression =
                 DecompressionMethods.GZip | DecompressionMethods.Deflate;
@@ -104,6 +135,8 @@ namespace FilePromptAIWin7
             client.Timeout = TimeSpan.FromMilliseconds(Timeout.Infinite);
             responseHeadersTimeout = TimeSpan.FromMilliseconds(
                 responseHeadersTimeoutMilliseconds);
+            attachmentResponseHeadersTimeout = TimeSpan.FromMilliseconds(
+                attachmentResponseHeadersTimeoutMilliseconds);
             responseReadIdleTimeout = TimeSpan.FromMilliseconds(
                 responseReadIdleTimeoutMilliseconds);
             this.maximumRequestAttempts = maximumRequestAttempts;
@@ -147,7 +180,7 @@ namespace FilePromptAIWin7
                     throw new OperationCanceledException(cancellationToken);
                 }
 
-                throw CreateNetworkException(exception);
+                throw CreateNetworkException(exception, request);
             }
             catch (IOException exception)
             {
@@ -168,9 +201,10 @@ namespace FilePromptAIWin7
                 throw;
             }
 
-            if (!IsStreamUnsupported(firstError))
+            if (HasBinaryAttachments(request) ||
+                !IsStreamUnsupported(firstError))
             {
-                throw CreateUserFacingException(firstError);
+                throw CreateUserFacingException(firstError, request);
             }
 
             Notify(onStatus, "接口不支持流式输出，正在改用普通请求…");
@@ -195,7 +229,7 @@ namespace FilePromptAIWin7
                     throw new OperationCanceledException(cancellationToken);
                 }
 
-                throw CreateNetworkException(exception);
+                throw CreateNetworkException(exception, request);
             }
             catch (IOException exception)
             {
@@ -216,7 +250,7 @@ namespace FilePromptAIWin7
                 throw;
             }
 
-            throw CreateUserFacingException(secondError);
+            throw CreateUserFacingException(secondError, request);
         }
 
         public async Task<string> GenerateWithToolsAsync(
@@ -245,6 +279,9 @@ namespace FilePromptAIWin7
 
             EndpointAttempt attempt = BuildExactAttempt(request.EndpointUrl);
             ToolSet toolSet = BuildToolSet(tools);
+            ValidateBinaryAttachmentBudget(
+                request,
+                toolSet.EstimatedBytes);
             List<object> messages = BuildInitialMessages(request, true);
             HashSet<string> toolCallIds = new HashSet<string>(
                 StringComparer.Ordinal);
@@ -303,6 +340,13 @@ namespace FilePromptAIWin7
                             "本次生成请求的工具调用总数超过 64 个，已停止。");
                     }
 
+                    if (toolRounds == 0 && HasBinaryAttachments(request))
+                    {
+                        ReplaceBinaryAttachmentsForToolFollowUp(
+                            messages,
+                            request);
+                    }
+
                     messages.Add(response.AssistantMessage);
                     foreach (ModelToolCall toolCall in response.ToolCalls)
                     {
@@ -340,7 +384,7 @@ namespace FilePromptAIWin7
             }
             catch (AttemptException exception)
             {
-                throw CreateUserFacingException(exception);
+                throw CreateUserFacingException(exception, request);
             }
             catch (HttpRequestException exception)
             {
@@ -349,7 +393,7 @@ namespace FilePromptAIWin7
                     throw new OperationCanceledException(cancellationToken);
                 }
 
-                throw CreateNetworkException(exception);
+                throw CreateNetworkException(exception, request);
             }
             catch (IOException exception)
             {
@@ -400,7 +444,7 @@ namespace FilePromptAIWin7
             }
             catch (AttemptException exception)
             {
-                throw CreateUserFacingException(exception);
+                throw CreateUserFacingException(exception, request);
             }
             catch (HttpRequestException exception)
             {
@@ -409,7 +453,7 @@ namespace FilePromptAIWin7
                     throw new OperationCanceledException(cancellationToken);
                 }
 
-                throw CreateNetworkException(exception);
+                throw CreateNetworkException(exception, request);
             }
             catch (IOException exception)
             {
@@ -440,13 +484,10 @@ namespace FilePromptAIWin7
             CancellationToken cancellationToken)
         {
             string payload = BuildPayload(request, stream);
-            if (payload.Length > MaximumRequestCharacters)
-            {
-                throw new ModelCallException(
-                    "模型请求内容超过 32 MB 安全限制，请减少资料或会话内容。");
-            }
+            EnsureSerializedRequestSize(payload, HasBinaryAttachments(request));
 
             bool emittedDelta = false;
+            bool hasBinaryAttachments = HasBinaryAttachments(request);
             Action<string> trackedDelta = delegate(string value)
             {
                 emittedDelta = true;
@@ -472,7 +513,8 @@ namespace FilePromptAIWin7
                 }
                 catch (AttemptException exception)
                 {
-                    if (emittedDelta ||
+                    if (hasBinaryAttachments ||
+                        emittedDelta ||
                         attemptNumber >= maximumRequestAttempts ||
                         !CanRetry(exception))
                     {
@@ -483,7 +525,8 @@ namespace FilePromptAIWin7
                 }
                 catch (ConnectionAttemptException)
                 {
-                    if (emittedDelta ||
+                    if (hasBinaryAttachments ||
+                        emittedDelta ||
                         attemptNumber >= maximumRequestAttempts)
                     {
                         throw;
@@ -527,6 +570,7 @@ namespace FilePromptAIWin7
 
                 HttpResponseMessage response = await SendForHeadersAsync(
                     message,
+                    GetResponseHeadersTimeout(request),
                     cancellationToken).ConfigureAwait(false);
                 using (response)
                 using (CancellationTokenRegistration registration =
@@ -622,6 +666,7 @@ namespace FilePromptAIWin7
             string payload,
             CancellationToken cancellationToken)
         {
+            bool hasBinaryAttachments = HasBinaryAttachments(request);
             for (int attemptNumber = 1;
                 attemptNumber <= maximumRequestAttempts;
                 attemptNumber++)
@@ -638,7 +683,8 @@ namespace FilePromptAIWin7
                 }
                 catch (AttemptException exception)
                 {
-                    if (attemptNumber >= maximumRequestAttempts ||
+                    if (hasBinaryAttachments ||
+                        attemptNumber >= maximumRequestAttempts ||
                         !CanRetry(exception))
                     {
                         throw;
@@ -648,7 +694,8 @@ namespace FilePromptAIWin7
                 }
                 catch (ConnectionAttemptException)
                 {
-                    if (attemptNumber >= maximumRequestAttempts)
+                    if (hasBinaryAttachments ||
+                        attemptNumber >= maximumRequestAttempts)
                     {
                         throw;
                     }
@@ -689,6 +736,7 @@ namespace FilePromptAIWin7
 
                 HttpResponseMessage response = await SendForHeadersAsync(
                     message,
+                    GetResponseHeadersTimeout(request),
                     cancellationToken).ConfigureAwait(false);
                 using (response)
                 using (CancellationTokenRegistration registration =
@@ -772,13 +820,14 @@ namespace FilePromptAIWin7
 
         private async Task<HttpResponseMessage> SendForHeadersAsync(
             HttpRequestMessage message,
+            TimeSpan headersTimeout,
             CancellationToken cancellationToken)
         {
             using (CancellationTokenSource timeoutCancellation =
                 CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken))
             {
-                timeoutCancellation.CancelAfter(responseHeadersTimeout);
+                timeoutCancellation.CancelAfter(headersTimeout);
                 try
                 {
                     return await client.SendAsync(
@@ -795,7 +844,7 @@ namespace FilePromptAIWin7
 
                     throw new ConnectionAttemptException(
                         "连接或等待响应头超时（" +
-                        FormatSeconds(responseHeadersTimeout) + " 秒）。",
+                        FormatSeconds(headersTimeout) + " 秒）。",
                         exception);
                 }
                 catch (HttpRequestException exception)
@@ -1272,6 +1321,157 @@ namespace FilePromptAIWin7
             }
         }
 
+        private TimeSpan GetResponseHeadersTimeout(ModelRequest request)
+        {
+            return HasBinaryAttachments(request)
+                ? attachmentResponseHeadersTimeout
+                : responseHeadersTimeout;
+        }
+
+        private static bool HasBinaryAttachments(ModelRequest request)
+        {
+            return request != null &&
+                HasBinaryAttachments(request.Attachments);
+        }
+
+        private static bool HasBinaryAttachments(
+            IEnumerable<InputItem> attachments)
+        {
+            if (attachments == null)
+            {
+                return false;
+            }
+
+            foreach (InputItem item in attachments)
+            {
+                if (item != null && item.BinaryData != null &&
+                    item.BinaryData.Length > 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void ValidateBinaryAttachmentBudget(
+            ModelRequest request,
+            long additionalEstimatedBytes)
+        {
+            if (request == null || !HasBinaryAttachments(request))
+            {
+                return;
+            }
+
+            long estimatedBytes = AddSaturated(
+                MinimumRequestEnvelopeBytes,
+                Math.Max(0L, additionalEstimatedBytes));
+            estimatedBytes = AddSaturated(
+                estimatedBytes,
+                EstimateRequestTextBytes(request));
+            int attachmentCount = 0;
+            foreach (InputItem item in request.Attachments ??
+                new List<InputItem>())
+            {
+                if (item == null || item.BinaryData == null ||
+                    item.BinaryData.Length == 0)
+                {
+                    continue;
+                }
+
+                attachmentCount++;
+                long sourceBytes = item.BinaryData.LongLength;
+                long base64Bytes = ((sourceBytes + 2L) / 3L) * 4L;
+                long metadataBytes = 512L +
+                    Encoding.UTF8.GetByteCount(item.Name ?? string.Empty) +
+                    Encoding.UTF8.GetByteCount(item.MimeType ?? string.Empty);
+                estimatedBytes = AddSaturated(
+                    estimatedBytes,
+                    AddSaturated(base64Bytes, metadataBytes));
+            }
+
+            if (estimatedBytes > MaximumRequestBytes)
+            {
+                throw new ModelCallException(
+                    "附件编码后预计约 " +
+                    FormatMegabytes(estimatedBytes) +
+                    " MB，超过模型请求 32 MB 安全限制。" +
+                    "请减少附件数量或缩小文件后重试。" +
+                    (attachmentCount > 0
+                        ? "（当前二进制附件 " +
+                            attachmentCount.ToString(
+                                CultureInfo.InvariantCulture) + " 个）"
+                        : string.Empty));
+            }
+        }
+
+        private static long EstimateRequestTextBytes(ModelRequest request)
+        {
+            long total = 0L;
+            total = AddSaturated(
+                total,
+                Encoding.UTF8.GetByteCount(request.ModelName ?? string.Empty));
+            total = AddSaturated(
+                total,
+                Encoding.UTF8.GetByteCount(request.SystemPrompt ?? string.Empty));
+            total = AddSaturated(
+                total,
+                Encoding.UTF8.GetByteCount(request.Prompt ?? string.Empty));
+            foreach (ConversationMessage message in request.ConversationMessages ??
+                new List<ConversationMessage>())
+            {
+                if (message != null)
+                {
+                    total = AddSaturated(
+                        total,
+                        Encoding.UTF8.GetByteCount(
+                            message.Content ?? string.Empty));
+                }
+            }
+
+            return total;
+        }
+
+        private static void EnsureSerializedRequestSize(
+            string payload,
+            bool hasBinaryAttachments)
+        {
+            long payloadBytes = Encoding.UTF8.GetByteCount(
+                payload ?? string.Empty);
+            if (payloadBytes <= MaximumRequestBytes)
+            {
+                return;
+            }
+
+            throw new ModelCallException(
+                hasBinaryAttachments
+                    ? "附件编码后的模型请求约 " +
+                        FormatMegabytes(payloadBytes) +
+                        " MB，超过 32 MB 安全限制。" +
+                        "请减少附件数量、缩小文件或新建会话后重试。"
+                    : "模型请求约 " +
+                        FormatMegabytes(payloadBytes) +
+                        " MB，超过 32 MB 安全限制。" +
+                        "请减少资料或会话内容。");
+        }
+
+        private static long AddSaturated(long left, long right)
+        {
+            if (left < 0L || right < 0L || left > long.MaxValue - right)
+            {
+                return long.MaxValue;
+            }
+
+            return left + right;
+        }
+
+        private static string FormatMegabytes(long bytes)
+        {
+            return (bytes / 1024d / 1024d).ToString(
+                "0.0",
+                CultureInfo.InvariantCulture);
+        }
+
         private string BuildPayload(ModelRequest request, bool stream)
         {
             Dictionary<string, object> root = new Dictionary<string, object>();
@@ -1362,14 +1562,40 @@ namespace FilePromptAIWin7
             root["tools"] = tools;
             root["tool_choice"] = "auto";
             string payload = json.Serialize(root);
-            if (payload.Length > MaximumRequestCharacters)
-            {
-                throw new ModelCallException(
-                    "包含工具和会话历史的请求超过 32 MB 安全限制，" +
-                    "请新建会话或减少附件。");
-            }
+            EnsureSerializedRequestSize(
+                payload,
+                HasBinaryAttachments(request));
 
             return payload;
+        }
+
+        private static void ReplaceBinaryAttachmentsForToolFollowUp(
+            IList<object> messages,
+            ModelRequest request)
+        {
+            if (messages == null || messages.Count == 0 ||
+                !HasBinaryAttachments(request))
+            {
+                return;
+            }
+
+            IDictionary<string, object> currentMessage =
+                messages[messages.Count - 1] as IDictionary<string, object>;
+            if (currentMessage == null ||
+                !string.Equals(
+                    GetString(currentMessage, "role"),
+                    "user",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ModelCallException(
+                    "无法安全准备附件请求的工具后续回合。");
+            }
+
+            currentMessage["content"] =
+                (request.Prompt ?? string.Empty) +
+                "\r\n\r\n[二进制附件已在本轮首次请求中提供。" +
+                "为避免自动重复上传，后续 MCP 工具回合只保留附件信息。]" +
+                BuildBinaryAttachmentSummary(request);
         }
 
         private ToolSet BuildToolSet(IList<McpToolDefinition> tools)
@@ -1477,7 +1703,10 @@ namespace FilePromptAIWin7
             return new ToolSet
             {
                 Payload = payload.ToArray(),
-                Names = names
+                Names = names,
+                EstimatedBytes = AddSaturated(
+                    combinedCharacters * 3L,
+                    payload.Count * 256L)
             };
         }
 
@@ -2045,6 +2274,12 @@ namespace FilePromptAIWin7
 
         private static string ExtractErrorMessage(object parsed)
         {
+            string text = parsed as string;
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                return LimitServerErrorMessage(text);
+            }
+
             IDictionary<string, object> root = AsDictionary(parsed);
             if (root == null)
             {
@@ -2055,7 +2290,34 @@ namespace FilePromptAIWin7
             string message = GetString(error, "message");
             if (!string.IsNullOrEmpty(message))
             {
-                return message;
+                return LimitServerErrorMessage(message);
+            }
+
+            string errorText = GetValue(root, "error") as string;
+            if (!string.IsNullOrWhiteSpace(errorText))
+            {
+                return LimitServerErrorMessage(errorText);
+            }
+
+            message = GetString(root, "message");
+            if (!string.IsNullOrWhiteSpace(message))
+            {
+                return LimitServerErrorMessage(message);
+            }
+
+            object detailValue = GetValue(root, "detail");
+            string detail = detailValue as string;
+            if (!string.IsNullOrWhiteSpace(detail))
+            {
+                return LimitServerErrorMessage(detail);
+            }
+
+            IDictionary<string, object> detailObject =
+                AsDictionary(detailValue);
+            detail = GetString(detailObject, "message");
+            if (!string.IsNullOrWhiteSpace(detail))
+            {
+                return LimitServerErrorMessage(detail);
             }
 
             string type = GetString(root, "type");
@@ -2065,11 +2327,65 @@ namespace FilePromptAIWin7
                 message = GetString(root, "message");
                 if (!string.IsNullOrEmpty(message))
                 {
-                    return message;
+                    return LimitServerErrorMessage(message);
                 }
             }
 
             return string.Empty;
+        }
+
+        private string ExtractErrorMessageFromBody(string body)
+        {
+            if (string.IsNullOrWhiteSpace(body))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                string parsedMessage = ExtractErrorMessage(
+                    Deserialize(body));
+                if (!string.IsNullOrWhiteSpace(parsedMessage))
+                {
+                    return parsedMessage;
+                }
+            }
+            catch
+            {
+                // A proxy may return a plain-text error instead of JSON.
+            }
+
+            string trimmed = body.Trim();
+            if (trimmed.StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.StartsWith("<html", StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Empty;
+            }
+
+            return LimitServerErrorMessage(trimmed);
+        }
+
+        private static string LimitServerErrorMessage(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            StringBuilder safe = new StringBuilder();
+            foreach (char character in value.Trim())
+            {
+                if (!char.IsControl(character) || character == '\r' ||
+                    character == '\n' || character == '\t')
+                {
+                    safe.Append(character);
+                }
+            }
+
+            return TruncateWithNotice(
+                safe.ToString(),
+                MaximumDisplayedServerErrorCharacters,
+                "\r\n[服务端信息过长，已截断]");
         }
 
         private static IDictionary<string, object> AsDictionary(object value)
@@ -2144,24 +2460,39 @@ namespace FilePromptAIWin7
                 value.IndexOf(second, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        private ModelCallException CreateUserFacingException(AttemptException exception)
+        private ModelCallException CreateUserFacingException(
+            AttemptException exception,
+            ModelRequest request)
         {
-            string serverMessage = string.Empty;
-            try
-            {
-                serverMessage = ExtractErrorMessage(Deserialize(exception.Body));
-            }
-            catch
-            {
-                // Use the HTTP summary below.
-            }
+            string serverMessage = ExtractErrorMessageFromBody(exception.Body);
+            bool hasBinaryAttachments = HasBinaryAttachments(request);
 
             string prefix;
             switch (exception.StatusCode)
             {
                 case 400:
                 case 422:
-                    prefix = "请求格式或模型参数不匹配。";
+                    if (hasBinaryAttachments &&
+                        IsStreamUnsupported(exception))
+                    {
+                        prefix =
+                            "接口不支持附件请求的流式输出。为避免重复上传，" +
+                            "程序没有自动改用普通请求；请调整接口支持流式附件，" +
+                            "或移除附件后重试。";
+                    }
+                    else
+                    {
+                        prefix = hasBinaryAttachments
+                            ? "接口拒绝了附件请求，当前 URL 或模型可能不支持图片或" +
+                                "内联文件输入。请改用支持附件的模型，或移除附件后重试。"
+                            : "请求格式或模型参数不匹配。";
+                    }
+                    break;
+                case 415:
+                    prefix = hasBinaryAttachments
+                        ? "接口不接受本次附件格式，当前 URL 或模型可能不支持图片或" +
+                            "内联文件输入。请改用支持附件的模型，或移除附件后重试。"
+                        : "接口不接受本次请求的内容类型。";
                     break;
                 case 401:
                     prefix = "API Key 无效，或接口认证方式不匹配。";
@@ -2173,7 +2504,9 @@ namespace FilePromptAIWin7
                     prefix = "URL 或模型名称不正确。";
                     break;
                 case 413:
-                    prefix = "提交内容过大，请减少文件或缩小图片。";
+                    prefix = hasBinaryAttachments
+                        ? "附件编码后的提交内容过大，请减少附件数量或缩小文件。"
+                        : "提交内容过大，请减少资料或会话内容。";
                     break;
                 case 429:
                     prefix = "请求过于频繁，或账户额度不足。";
@@ -2194,6 +2527,15 @@ namespace FilePromptAIWin7
             }
 
             string message = prefix;
+            if (hasBinaryAttachments &&
+                (exception.StatusCode == 400 ||
+                    exception.StatusCode == 413 ||
+                    exception.StatusCode == 415 ||
+                    exception.StatusCode == 422))
+            {
+                message += BuildBinaryAttachmentSummary(request);
+            }
+
             if (!string.IsNullOrWhiteSpace(serverMessage))
             {
                 message += "\r\n\r\n服务端信息：" + serverMessage;
@@ -2210,7 +2552,67 @@ namespace FilePromptAIWin7
                 exception.RequestId);
         }
 
-        private static ModelCallException CreateNetworkException(HttpRequestException exception)
+        private static string BuildBinaryAttachmentSummary(
+            ModelRequest request)
+        {
+            StringBuilder summary = new StringBuilder();
+            int total = 0;
+            int displayed = 0;
+            foreach (InputItem item in request == null ||
+                request.Attachments == null
+                    ? new List<InputItem>()
+                    : request.Attachments)
+            {
+                if (item == null || item.BinaryData == null ||
+                    item.BinaryData.Length == 0)
+                {
+                    continue;
+                }
+
+                total++;
+                if (displayed >= 8)
+                {
+                    continue;
+                }
+
+                if (summary.Length == 0)
+                {
+                    summary.Append("\r\n\r\n本轮附件：");
+                }
+
+                string name = (item.Name ?? "未命名附件")
+                    .Replace('\r', ' ')
+                    .Replace('\n', ' ')
+                    .Trim();
+                if (name.Length > 120)
+                {
+                    name = name.Substring(0, 117) + "...";
+                }
+
+                summary.Append("\r\n- ");
+                summary.Append(name);
+                summary.Append("（");
+                summary.Append(item.GetKindText());
+                summary.Append("，");
+                summary.Append(item.GetSizeText());
+                summary.Append("）");
+                displayed++;
+            }
+
+            if (total > displayed)
+            {
+                summary.Append("\r\n- 另有 ");
+                summary.Append((total - displayed).ToString(
+                    CultureInfo.InvariantCulture));
+                summary.Append(" 个附件");
+            }
+
+            return summary.ToString();
+        }
+
+        private static ModelCallException CreateNetworkException(
+            HttpRequestException exception,
+            ModelRequest request)
         {
             StringBuilder details = new StringBuilder();
             Exception current = exception;
@@ -2238,6 +2640,15 @@ namespace FilePromptAIWin7
                 return new ModelCallException(
                     "无法建立 HTTPS 安全连接。请确认 Windows 7 已启用 TLS 1.2、" +
                     "系统根证书已更新，并检查系统日期。");
+            }
+
+            if (HasBinaryAttachments(request))
+            {
+                return new ModelCallException(
+                    "附件上传、服务端解析或等待响应失败：" + message +
+                    "\r\n\r\n为避免重复提交，程序没有自动重新上传附件；" +
+                    "请确认接口支持附件并检查服务状态后手动重试。" +
+                    BuildBinaryAttachmentSummary(request));
             }
 
             return new ModelCallException("无法连接模型接口：" + message);
@@ -2314,6 +2725,8 @@ namespace FilePromptAIWin7
             {
                 throw new ModelCallException("没有可提交的文字内容。");
             }
+
+            ValidateBinaryAttachmentBudget(request, 0L);
         }
 
         private static void Notify(Action<string> callback, string value)
@@ -2333,6 +2746,7 @@ namespace FilePromptAIWin7
         {
             public object[] Payload { get; set; }
             public IDictionary<string, McpToolDefinition> Names { get; set; }
+            public long EstimatedBytes { get; set; }
         }
 
         private sealed class ToolRoundResponse

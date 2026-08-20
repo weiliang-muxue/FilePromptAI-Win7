@@ -5,29 +5,55 @@ namespace FilePromptAIWin7
 {
     internal sealed class ConversationMessage
     {
+        public string Id { get; set; }
+        public string ParentMessageId { get; set; }
+        public int VariantIndex { get; set; }
         public string Role { get; set; }
         public string Content { get; set; }
         public DateTime CreatedAt { get; set; }
 
         public ConversationMessage()
         {
+            Id = Guid.NewGuid().ToString("N");
+            ParentMessageId = string.Empty;
+            VariantIndex = 0;
             Role = "user";
             Content = string.Empty;
             CreatedAt = DateTime.UtcNow;
         }
 
         public ConversationMessage(string role, string content)
+            : this(role, content, DateTime.UtcNow)
         {
-            Role = NormalizeRole(role);
-            Content = content ?? string.Empty;
-            CreatedAt = DateTime.UtcNow;
         }
 
         public ConversationMessage(
             string role,
             string content,
             DateTime createdAt)
+            : this(
+                role,
+                content,
+                createdAt,
+                null,
+                null,
+                0)
         {
+        }
+
+        public ConversationMessage(
+            string role,
+            string content,
+            DateTime createdAt,
+            string id,
+            string parentMessageId,
+            int variantIndex)
+        {
+            Id = string.IsNullOrWhiteSpace(id)
+                ? Guid.NewGuid().ToString("N")
+                : id;
+            ParentMessageId = parentMessageId ?? string.Empty;
+            VariantIndex = variantIndex;
             Role = NormalizeRole(role);
             Content = content ?? string.Empty;
             CreatedAt = createdAt == DateTime.MinValue
@@ -37,7 +63,33 @@ namespace FilePromptAIWin7
 
         public ConversationMessage Clone()
         {
-            return new ConversationMessage(Role, Content, CreatedAt);
+            return new ConversationMessage(
+                Role,
+                Content,
+                CreatedAt,
+                Id,
+                ParentMessageId,
+                VariantIndex);
+        }
+
+        internal void EnsureIdentity()
+        {
+            if (string.IsNullOrWhiteSpace(Id))
+            {
+                Id = Guid.NewGuid().ToString("N");
+            }
+
+            if (ParentMessageId == null)
+            {
+                ParentMessageId = string.Empty;
+            }
+
+            Role = NormalizeRole(Role);
+            Content = Content ?? string.Empty;
+            if (CreatedAt == DateTime.MinValue)
+            {
+                CreatedAt = DateTime.UtcNow;
+            }
         }
 
         internal static string NormalizeRole(string role)
@@ -64,6 +116,10 @@ namespace FilePromptAIWin7
         public string Title { get; set; }
         public DateTime CreatedAt { get; set; }
         public DateTime UpdatedAt { get; set; }
+        public bool IsPinned { get; set; }
+        public bool IsArchived { get; set; }
+        public string SourceSessionId { get; set; }
+        public string SourceMessageId { get; set; }
         public IList<ConversationMessage> Messages { get; set; }
 
         public ConversationSession()
@@ -72,6 +128,10 @@ namespace FilePromptAIWin7
             Title = "新会话";
             CreatedAt = DateTime.UtcNow;
             UpdatedAt = CreatedAt;
+            IsPinned = false;
+            IsArchived = false;
+            SourceSessionId = string.Empty;
+            SourceMessageId = string.Empty;
             Messages = new List<ConversationMessage>();
         }
 
@@ -113,6 +173,10 @@ namespace FilePromptAIWin7
             clone.Title = Title;
             clone.CreatedAt = CreatedAt;
             clone.UpdatedAt = UpdatedAt;
+            clone.IsPinned = IsPinned;
+            clone.IsArchived = IsArchived;
+            clone.SourceSessionId = SourceSessionId;
+            clone.SourceMessageId = SourceMessageId;
             clone.Messages = new List<ConversationMessage>();
             if (Messages != null)
             {
@@ -150,7 +214,24 @@ namespace FilePromptAIWin7
                 UpdatedAt = CreatedAt;
             }
 
+            if (SourceSessionId == null)
+            {
+                SourceSessionId = string.Empty;
+            }
+
+            if (SourceMessageId == null)
+            {
+                SourceMessageId = string.Empty;
+            }
+
             EnsureMessages();
+            foreach (ConversationMessage message in Messages)
+            {
+                if (message != null)
+                {
+                    message.EnsureIdentity();
+                }
+            }
         }
 
         private void EnsureMessages()

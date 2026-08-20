@@ -23,11 +23,31 @@ internal static class NetworkReliabilitySmokeTest
             Type requestType = application.GetType(
                 "FilePromptAIWin7.ModelRequest",
                 true);
+            Type itemType = application.GetType(
+                "FilePromptAIWin7.InputItem",
+                true);
 
             TestRetriableStatusCodes(clientType, requestType);
+            TestAttachmentStatusCodesDoNotRetry(
+                clientType,
+                requestType,
+                itemType);
+            TestAttachmentStreamFallbackDoesNotRetry(
+                clientType,
+                requestType,
+                itemType);
+            TestTextStreamFallbackStillWorks(clientType, requestType);
+            TestToolAttachmentStatusCodesDoNotRetry(
+                clientType,
+                requestType,
+                itemType);
             TestRetryAfterIsHonored(clientType, requestType);
             TestLongRetryAfterIsNotIgnored(clientType, requestType);
             TestResponseHeadersTimeoutRetries(clientType, requestType);
+            TestAttachmentHeadersTimeoutDoesNotRetry(
+                clientType,
+                requestType,
+                itemType);
             TestConnectionEstablishmentFailureRetries(clientType, requestType);
             TestStreamIdleTimeout(clientType, requestType);
             TestIncompleteStreamFails(clientType, requestType);
@@ -109,6 +129,291 @@ internal static class NetworkReliabilitySmokeTest
                 listener.Stop();
             }
         }
+    }
+
+    private static void TestAttachmentStatusCodesDoNotRetry(
+        Type clientType,
+        Type requestType,
+        Type itemType)
+    {
+        int[] statusCodes = { 429, 502, 503, 504 };
+        foreach (int statusCode in statusCodes)
+        {
+            TcpListener listener = StartListener();
+            int port = GetPort(listener);
+            Task<int> server = CountErrorRequests(listener, statusCode);
+            object client = CreateClient(
+                clientType,
+                2000,
+                1000,
+                3,
+                10,
+                2000);
+            try
+            {
+                object request = CreateRequest(
+                    requestType,
+                    "http://127.0.0.1:" + port +
+                        "/attachment-status-" + statusCode);
+                SetBinaryAttachment(requestType, request, itemType);
+                Exception failure = GenerateFailure(
+                    clientType,
+                    client,
+                    request,
+                    new StringBuilder(),
+                    CancellationToken.None,
+                    TimeSpan.FromSeconds(5));
+                AssertType(
+                    failure,
+                    "FilePromptAIWin7.ModelCallException",
+                    "Attachment HTTP " + statusCode + " failure type");
+                AssertEqual(
+                    1,
+                    Wait(server),
+                    "Attachment HTTP " + statusCode +
+                        " submitted once");
+            }
+            finally
+            {
+                ((IDisposable)client).Dispose();
+                listener.Stop();
+            }
+        }
+    }
+
+    private static void TestAttachmentStreamFallbackDoesNotRetry(
+        Type clientType,
+        Type requestType,
+        Type itemType)
+    {
+        int[] statusCodes = { 400, 422 };
+        foreach (int statusCode in statusCodes)
+        {
+            TcpListener listener = StartListener();
+            int port = GetPort(listener);
+            Task<int> server = CountErrorRequests(
+                listener,
+                statusCode,
+                "{\"error\":{\"message\":\"stream unsupported\"}}");
+            object client = CreateClient(
+                clientType,
+                2000,
+                1000,
+                3,
+                10,
+                2000);
+            try
+            {
+                object request = CreateRequest(
+                    requestType,
+                    "http://127.0.0.1:" + port +
+                        "/attachment-stream-fallback-" + statusCode);
+                SetBinaryAttachment(requestType, request, itemType);
+                Exception failure = GenerateFailure(
+                    clientType,
+                    client,
+                    request,
+                    new StringBuilder(),
+                    CancellationToken.None,
+                    TimeSpan.FromSeconds(5));
+                AssertType(
+                    failure,
+                    "FilePromptAIWin7.ModelCallException",
+                    "Attachment stream fallback HTTP " + statusCode +
+                        " failure type");
+                AssertContains(
+                    failure.Message,
+                    "没有自动改用普通请求",
+                    "Attachment stream fallback HTTP " + statusCode +
+                        " guidance");
+                AssertEqual(
+                    1,
+                    Wait(server),
+                    "Attachment stream fallback HTTP " + statusCode +
+                        " submitted once");
+            }
+            finally
+            {
+                ((IDisposable)client).Dispose();
+                listener.Stop();
+            }
+        }
+    }
+
+    private static void TestTextStreamFallbackStillWorks(
+        Type clientType,
+        Type requestType)
+    {
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        Task<int> server = Task.Factory.StartNew(
+            delegate
+            {
+                int requests = 0;
+                using (TcpClient first = listener.AcceptTcpClient())
+                {
+                    requests++;
+                    ReadRequest(first.GetStream());
+                    SendResponse(
+                        first.GetStream(),
+                        400,
+                        "Bad Request",
+                        "application/json",
+                        "{\"error\":{\"message\":\"stream unsupported\"}}",
+                        null);
+                }
+
+                using (TcpClient second = listener.AcceptTcpClient())
+                {
+                    requests++;
+                    ReadRequest(second.GetStream());
+                    SendResponse(
+                        second.GetStream(),
+                        200,
+                        "OK",
+                        "application/json",
+                        "{\"choices\":[{\"message\":{\"content\":\"fallback-ok\"}}]}",
+                        null);
+                }
+
+                return requests;
+            });
+        object client = CreateClient(clientType, 2000, 1000, 3, 10, 2000);
+        try
+        {
+            StringBuilder delta = new StringBuilder();
+            string result = Generate(
+                clientType,
+                client,
+                CreateRequest(
+                    requestType,
+                    "http://127.0.0.1:" + port + "/text-stream-fallback"),
+                delta,
+                CancellationToken.None,
+                TimeSpan.FromSeconds(5));
+            AssertEqual(
+                "fallback-ok",
+                result,
+                "Text stream fallback result");
+            AssertEqual(
+                "fallback-ok",
+                delta.ToString(),
+                "Text stream fallback delta");
+            AssertEqual(2, Wait(server), "Text stream fallback request count");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static void TestToolAttachmentStatusCodesDoNotRetry(
+        Type clientType,
+        Type requestType,
+        Type itemType)
+    {
+        int[] statusCodes = { 429, 502, 503, 504 };
+        foreach (int statusCode in statusCodes)
+        {
+            TcpListener listener = StartListener();
+            int port = GetPort(listener);
+            Task<int> server = CountErrorRequests(listener, statusCode);
+            object client = CreateClient(
+                clientType,
+                2000,
+                1000,
+                3,
+                10,
+                2000);
+            try
+            {
+                string endpoint = "http://127.0.0.1:" + port +
+                    "/tool-attachment-status-" + statusCode;
+                object request = CreateRequest(requestType, endpoint);
+                SetBinaryAttachment(requestType, request, itemType);
+                Exception failure = InvokeToolAttemptFailure(
+                    clientType,
+                    client,
+                    request,
+                    endpoint,
+                    TimeSpan.FromSeconds(5));
+                AssertType(
+                    failure,
+                    clientType.FullName + "+AttemptException",
+                    "Tool attachment HTTP " + statusCode +
+                        " failure type");
+                AssertEqual(
+                    1,
+                    Wait(server),
+                    "Tool attachment HTTP " + statusCode +
+                        " submitted once");
+            }
+            finally
+            {
+                ((IDisposable)client).Dispose();
+                listener.Stop();
+            }
+        }
+    }
+
+    private static Task<int> CountErrorRequests(
+        TcpListener listener,
+        int statusCode)
+    {
+        return CountErrorRequests(
+            listener,
+            statusCode,
+            "{\"error\":{\"message\":\"temporary\"}}");
+    }
+
+    private static Task<int> CountErrorRequests(
+        TcpListener listener,
+        int statusCode,
+        string errorBody)
+    {
+        return Task.Factory.StartNew(
+            delegate
+            {
+                int requests = 0;
+                using (TcpClient first = listener.AcceptTcpClient())
+                {
+                    requests++;
+                    ReadRequest(first.GetStream());
+                    SendResponse(
+                        first.GetStream(),
+                        statusCode,
+                        "Retry",
+                        "application/json",
+                        errorBody,
+                        null);
+                }
+
+                Stopwatch observation = Stopwatch.StartNew();
+                while (observation.Elapsed < TimeSpan.FromMilliseconds(350))
+                {
+                    if (!listener.Pending())
+                    {
+                        Thread.Sleep(10);
+                        continue;
+                    }
+
+                    using (TcpClient duplicate = listener.AcceptTcpClient())
+                    {
+                        requests++;
+                        ReadRequest(duplicate.GetStream());
+                        SendResponse(
+                            duplicate.GetStream(),
+                            statusCode,
+                            "Retry",
+                            "application/json",
+                            errorBody,
+                            null);
+                    }
+                }
+
+                return requests;
+            });
     }
 
     private static void TestRetryAfterIsHonored(
@@ -281,6 +586,73 @@ internal static class NetworkReliabilitySmokeTest
                 TimeSpan.FromSeconds(4));
             AssertEqual("recovered", result, "Response headers timeout recovery");
             AssertEqual(2, Wait(server), "Response headers timeout retried once");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static void TestAttachmentHeadersTimeoutDoesNotRetry(
+        Type clientType,
+        Type requestType,
+        Type itemType)
+    {
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        Task server = Task.Factory.StartNew(
+            delegate
+            {
+                using (TcpClient connection = listener.AcceptTcpClient())
+                {
+                    ReadRequest(connection.GetStream());
+                    Thread.Sleep(800);
+                }
+            });
+        object client = CreateClientWithAttachmentTimeout(
+            clientType,
+            500,
+            1000,
+            3,
+            10,
+            1000,
+            150);
+        try
+        {
+            object request = CreateRequest(
+                requestType,
+                "http://127.0.0.1:" + port +
+                    "/attachment-headers-timeout");
+            SetBinaryAttachment(requestType, request, itemType);
+            Exception failure = GenerateFailure(
+                clientType,
+                client,
+                request,
+                new StringBuilder(),
+                CancellationToken.None,
+                TimeSpan.FromSeconds(3));
+            AssertType(
+                failure,
+                "FilePromptAIWin7.ModelCallException",
+                "Attachment headers timeout type");
+            AssertContains(
+                failure.Message,
+                "超时",
+                "Attachment headers timeout guidance");
+            AssertContains(
+                failure.Message,
+                "没有自动重新上传附件",
+                "Attachment timeout explains no automatic retry");
+            AssertContains(
+                failure.Message,
+                "timeout-image.png",
+                "Attachment timeout names the affected file");
+            Thread.Sleep(250);
+            AssertTrue(
+                !listener.Pending(),
+                "Attachment headers timeout not retried");
+            server.Wait(TimeSpan.FromSeconds(2));
         }
         finally
         {
@@ -633,6 +1005,47 @@ internal static class NetworkReliabilitySmokeTest
         });
     }
 
+    private static object CreateClientWithAttachmentTimeout(
+        Type clientType,
+        int headersTimeoutMilliseconds,
+        int readIdleTimeoutMilliseconds,
+        int maximumAttempts,
+        int retryBaseDelayMilliseconds,
+        int maximumRetryAfterMilliseconds,
+        int attachmentHeadersTimeoutMilliseconds)
+    {
+        Type[] parameterTypes =
+        {
+            typeof(int),
+            typeof(int),
+            typeof(int),
+            typeof(int),
+            typeof(int),
+            typeof(int)
+        };
+        ConstructorInfo constructor = clientType.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            null,
+            parameterTypes,
+            null);
+        if (constructor == null)
+        {
+            throw new MissingMethodException(
+                clientType.FullName,
+                ".ctor(Int32, Int32, Int32, Int32, Int32, Int32)");
+        }
+
+        return constructor.Invoke(new object[]
+        {
+            headersTimeoutMilliseconds,
+            readIdleTimeoutMilliseconds,
+            maximumAttempts,
+            retryBaseDelayMilliseconds,
+            maximumRetryAfterMilliseconds,
+            attachmentHeadersTimeoutMilliseconds
+        });
+    }
+
     private static object CreateRequest(Type requestType, string endpoint)
     {
         object request = Activator.CreateInstance(requestType, true);
@@ -644,6 +1057,36 @@ internal static class NetworkReliabilitySmokeTest
             "authorized network reliability test",
             null);
         return request;
+    }
+
+    private static void SetBinaryAttachment(
+        Type requestType,
+        object request,
+        Type itemType)
+    {
+        object item = Activator.CreateInstance(itemType, true);
+        itemType.GetProperty("Name").SetValue(
+            item,
+            "timeout-image.png",
+            null);
+        itemType.GetProperty("Kind").SetValue(
+            item,
+            Enum.Parse(itemType.GetProperty("Kind").PropertyType, "Image"),
+            null);
+        itemType.GetProperty("MimeType").SetValue(
+            item,
+            "image/png",
+            null);
+        itemType.GetProperty("BinaryData").SetValue(
+            item,
+            new byte[] { 1, 2, 3, 4 },
+            null);
+        Array attachments = Array.CreateInstance(itemType, 1);
+        attachments.SetValue(item, 0);
+        requestType.GetProperty("Attachments").SetValue(
+            request,
+            attachments,
+            null);
     }
 
     private static Task InvokeGenerate(
@@ -665,6 +1108,57 @@ internal static class NetworkReliabilitySmokeTest
                 new Action<string>(delegate { }),
                 cancellationToken
             });
+    }
+
+    private static Exception InvokeToolAttemptFailure(
+        Type clientType,
+        object client,
+        object request,
+        string endpoint,
+        TimeSpan timeout)
+    {
+        Type attemptType = clientType.GetNestedType(
+            "EndpointAttempt",
+            BindingFlags.NonPublic);
+        if (attemptType == null)
+        {
+            throw new MissingMemberException(
+                clientType.FullName,
+                "EndpointAttempt");
+        }
+
+        object attempt = Activator.CreateInstance(attemptType, true);
+        attemptType.GetProperty("Url").SetValue(
+            attempt,
+            new Uri(endpoint),
+            null);
+        MethodInfo sendToolAttempt = clientType.GetMethod(
+            "SendToolAttemptAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        if (sendToolAttempt == null)
+        {
+            throw new MissingMethodException(
+                clientType.FullName,
+                "SendToolAttemptAsync");
+        }
+
+        Task task = (Task)sendToolAttempt.Invoke(
+            client,
+            new object[]
+            {
+                attempt,
+                request,
+                "{\"model\":\"test-model\",\"messages\":[],\"tools\":[]}",
+                CancellationToken.None
+            });
+        Exception failure = WaitForFailure(task, timeout);
+        if (failure == null)
+        {
+            throw new InvalidOperationException(
+                "Tool attachment request unexpectedly succeeded.");
+        }
+
+        return failure;
     }
 
     private static string Generate(

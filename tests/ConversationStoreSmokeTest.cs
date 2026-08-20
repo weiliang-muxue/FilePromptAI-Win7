@@ -67,8 +67,11 @@ internal static class ConversationStoreSmokeTest
                     "Valid supplementary Unicode was lost.");
             }
 
+            TestMessageGuardsAndNormalization(path, reloaded);
             TestAtomicTurnRollback(path, reloaded);
+            TestSessionLifecycle(path, reloaded);
             TestCreateRollback(path);
+            TestUnpreservedDamageBlocksWrites(path);
 
             File.WriteAllText(path, "<broken", new System.Text.UTF8Encoding(true));
             ConversationStore damaged = new ConversationStore(path);
@@ -148,6 +151,46 @@ internal static class ConversationStoreSmokeTest
         }
     }
 
+    private static void TestMessageGuardsAndNormalization(
+        string path,
+        ConversationStore store)
+    {
+        ConversationSession session = store.CurrentSession;
+        int previousCount = session.Messages.Count;
+        if (store.AddMessage(
+                "missing-session",
+                "user",
+                "must not be added") ||
+            store.AddMessage(session.Id, (ConversationMessage)null) ||
+            store.AddTurn(
+                session.Id,
+                null,
+                new ConversationMessage("assistant", "unused"),
+                null) ||
+            session.Messages.Count != previousCount)
+        {
+            throw new InvalidDataException(
+                "Invalid message operations changed the conversation.");
+        }
+
+        if (!store.AddMessage(
+            session.Id,
+            new ConversationMessage("unexpected-role", "normalized role")))
+        {
+            throw new InvalidOperationException(
+                "A valid message was not added.");
+        }
+
+        ConversationStore saved = new ConversationStore(path);
+        ConversationMessage restored = saved.CurrentSession.Messages[
+            saved.CurrentSession.Messages.Count - 1];
+        if (restored.Role != "user" || restored.Content != "normalized role")
+        {
+            throw new InvalidDataException(
+                "Message role normalization did not survive reload.");
+        }
+    }
+
     private static void TestAtomicTurnRollback(
         string path,
         ConversationStore store)
@@ -209,6 +252,152 @@ internal static class ConversationStoreSmokeTest
         }
     }
 
+    private static void TestSessionLifecycle(
+        string path,
+        ConversationStore store)
+    {
+        ConversationSession first = store.CurrentSession;
+        ConversationSession second = store.CreateSession(" second ");
+        ConversationSession third = store.CreateSession("third");
+        if (store.Sessions.Count != 3 ||
+            store.CurrentSessionId != third.Id ||
+            second.Title != "second")
+        {
+            throw new InvalidDataException(
+                "Session creation did not update the active conversation.");
+        }
+
+        TestSessionMutationRollback(path, store, first, second, third);
+
+        if (!store.SelectSession(first.Id) ||
+            !store.RenameSession(first.Id, " renamed session ") ||
+            store.CurrentSessionId != first.Id ||
+            first.Title != "renamed session")
+        {
+            throw new InvalidDataException(
+                "Session selection or rename failed.");
+        }
+
+        ConversationStore selected = new ConversationStore(path);
+        ConversationSession selectedFirst = selected.GetSession(first.Id);
+        if (selected.CurrentSessionId != first.Id ||
+            selectedFirst == null ||
+            selectedFirst.Title != "renamed session")
+        {
+            throw new InvalidDataException(
+                "Session selection or rename did not survive reload.");
+        }
+
+        if (store.SelectSession("missing-session") ||
+            store.RenameSession("missing-session", "unused") ||
+            store.DeleteSession("missing-session") ||
+            store.Sessions.Count != 3 ||
+            store.CurrentSessionId != first.Id)
+        {
+            throw new InvalidDataException(
+                "Missing-session operations changed store state.");
+        }
+
+        if (!store.DeleteSession(second.Id) ||
+            store.CurrentSessionId != first.Id ||
+            store.GetSession(second.Id) != null)
+        {
+            throw new InvalidDataException(
+                "Deleting an inactive session changed the active session.");
+        }
+
+        if (!store.DeleteSession(first.Id) ||
+            store.CurrentSession == null ||
+            store.CurrentSessionId == first.Id ||
+            store.Sessions.Count != 1)
+        {
+            throw new InvalidDataException(
+                "Deleting the active session did not select a survivor.");
+        }
+
+        ConversationStore deleted = new ConversationStore(path);
+        if (deleted.Sessions.Count != 1 ||
+            deleted.GetSession(first.Id) != null ||
+            deleted.GetSession(second.Id) != null ||
+            deleted.CurrentSession == null)
+        {
+            throw new InvalidDataException(
+                "Session deletion did not survive reload.");
+        }
+    }
+
+    private static void TestSessionMutationRollback(
+        string path,
+        ConversationStore store,
+        ConversationSession first,
+        ConversationSession second,
+        ConversationSession third)
+    {
+        string secondTitle = second.Title;
+        using (FileStream locked = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read))
+        {
+            ExpectIOException(delegate { store.SelectSession(first.Id); });
+            if (store.CurrentSessionId != third.Id)
+            {
+                throw new InvalidDataException(
+                    "A failed selection did not roll back memory state.");
+            }
+
+            ExpectIOException(delegate
+            {
+                store.RenameSession(second.Id, "must rollback");
+            });
+            if (second.Title != secondTitle)
+            {
+                throw new InvalidDataException(
+                    "A failed rename did not roll back memory state.");
+            }
+
+            ExpectIOException(delegate { store.DeleteSession(second.Id); });
+            if (store.GetSession(second.Id) == null ||
+                store.Sessions.Count != 3 ||
+                store.CurrentSessionId != third.Id)
+            {
+                throw new InvalidDataException(
+                    "A failed deletion did not roll back memory state.");
+            }
+        }
+
+        ConversationStore diskState = new ConversationStore(path);
+        ConversationSession diskSecond = diskState.GetSession(second.Id);
+        if (diskState.Sessions.Count != 3 ||
+            diskState.CurrentSessionId != third.Id ||
+            diskSecond == null ||
+            diskSecond.Title != secondTitle)
+        {
+            throw new InvalidDataException(
+                "A failed session mutation modified the on-disk state.");
+        }
+    }
+
+    private static void ExpectIOException(Action action)
+    {
+        bool failed = false;
+        try
+        {
+            action();
+        }
+        catch (IOException)
+        {
+            failed = true;
+        }
+
+        if (!failed)
+        {
+            throw new InvalidDataException(
+                "A locked store unexpectedly accepted a mutation.");
+        }
+    }
+
     private static void TestCreateRollback(string path)
     {
         string blocker = path + ".blocked-parent";
@@ -248,5 +437,139 @@ internal static class ConversationStoreSmokeTest
         }
 
         Directory.Delete(blocker, true);
+    }
+
+    private static void TestUnpreservedDamageBlocksWrites(string path)
+    {
+        const string damagedContent = "<locked-broken";
+        string importSourcePath = path + ".blocked-import-source.xml";
+        string importBackupPath = path + ".blocked-import.fpc";
+        try
+        {
+            ConversationStore importSource =
+                new ConversationStore(importSourcePath);
+            importSource.CreateSession("blocked import source");
+            importSource.ExportBackup(importBackupPath);
+
+            byte[] damagedBytes = new System.Text.UTF8Encoding(true).GetBytes(
+                damagedContent);
+            File.WriteAllBytes(path, damagedBytes);
+            ConversationStore protectedStore;
+            using (FileStream locked = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read))
+            {
+                protectedStore = new ConversationStore(path);
+                if (!protectedStore.IsWriteBlocked ||
+                    protectedStore.LoadWarning.IndexOf(
+                        "禁止会话写入",
+                        StringComparison.Ordinal) < 0)
+                {
+                    throw new InvalidDataException(
+                        "Unpreserved damaged store did not enter write protection.");
+                }
+
+                ExpectWriteBlocked(
+                    delegate { protectedStore.Save(); },
+                    "explicit save");
+                ExpectWriteBlocked(
+                    delegate
+                    {
+                        protectedStore.CreateSession(
+                            "must not overwrite damage");
+                    },
+                    "session creation");
+                ExpectWriteBlocked(
+                    delegate
+                    {
+                        protectedStore.ImportBackup(importBackupPath);
+                    },
+                    "backup import");
+
+                if (protectedStore.Sessions.Count != 0 ||
+                    !string.IsNullOrEmpty(protectedStore.CurrentSessionId))
+                {
+                    throw new InvalidDataException(
+                        "A rejected write did not roll back memory state.");
+                }
+
+                AssertFileBytesEqual(
+                    path,
+                    damagedBytes,
+                    "Write protection changed the locked damaged source.");
+            }
+
+            if (!protectedStore.IsWriteBlocked)
+            {
+                throw new InvalidDataException(
+                    "Write protection was cleared when the file lock ended.");
+            }
+
+            ExpectWriteBlocked(
+                delegate { protectedStore.Save(); },
+                "save after lock release");
+            AssertFileBytesEqual(
+                path,
+                damagedBytes,
+                "Write protection changed the unlocked damaged source.");
+        }
+        finally
+        {
+            if (File.Exists(importSourcePath))
+            {
+                File.Delete(importSourcePath);
+            }
+
+            if (File.Exists(importBackupPath))
+            {
+                File.Delete(importBackupPath);
+            }
+        }
+    }
+
+    private static void ExpectWriteBlocked(Action action, string operation)
+    {
+        try
+        {
+            action();
+        }
+        catch (InvalidOperationException exception)
+        {
+            if (exception.Message.IndexOf(
+                "只读保护状态",
+                StringComparison.Ordinal) >= 0)
+            {
+                return;
+            }
+
+            throw new InvalidDataException(
+                operation + " failed for an unexpected reason.",
+                exception);
+        }
+
+        throw new InvalidDataException(
+            operation + " bypassed conversation write protection.");
+    }
+
+    private static void AssertFileBytesEqual(
+        string path,
+        byte[] expected,
+        string message)
+    {
+        byte[] actual = File.ReadAllBytes(path);
+        if (actual.Length != expected.Length)
+        {
+            throw new InvalidDataException(message);
+        }
+
+        for (int index = 0; index < actual.Length; index++)
+        {
+            if (actual[index] != expected[index])
+            {
+                throw new InvalidDataException(message);
+            }
+        }
     }
 }

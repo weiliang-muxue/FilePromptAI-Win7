@@ -30,6 +30,7 @@ namespace FilePromptAIWin7
         private readonly string storagePath;
         private string currentSessionId;
         private string loadWarning;
+        private bool writeBlockedByRecovery;
 
         public static string StoragePath
         {
@@ -93,6 +94,17 @@ namespace FilePromptAIWin7
             }
         }
 
+        public bool IsWriteBlocked
+        {
+            get
+            {
+                lock (syncRoot)
+                {
+                    return writeBlockedByRecovery;
+                }
+            }
+        }
+
         public ConversationSession CurrentSession
         {
             get
@@ -111,6 +123,7 @@ namespace FilePromptAIWin7
                 sessions.Clear();
                 currentSessionId = string.Empty;
                 loadWarning = string.Empty;
+                writeBlockedByRecovery = false;
                 if (!File.Exists(storagePath))
                 {
                     return;
@@ -143,11 +156,15 @@ namespace FilePromptAIWin7
                         currentSessionId = sessions[0].Id;
                     }
                 }
-                catch (Exception exception)
+                catch (Exception)
                 {
                     string preservedPath = PreserveDamagedStore(storagePath);
-                    loadWarning = string.IsNullOrEmpty(preservedPath)
-                        ? "会话历史文件无法读取：" + exception.Message
+                    writeBlockedByRecovery =
+                        string.IsNullOrEmpty(preservedPath);
+                    loadWarning = writeBlockedByRecovery
+                        ? "会话历史文件无法读取且无法安全重命名，原文件保持不变；" +
+                            "本次运行已禁止会话写入。请先手工备份文件并解除占用：" +
+                            storagePath
                         : "会话历史文件异常，损坏副本已保留：" +
                             preservedPath;
                     sessions.Clear();
@@ -229,7 +246,7 @@ namespace FilePromptAIWin7
                 string preservedPath = path + ".damaged-" +
                     DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" +
                     Guid.NewGuid().ToString("N").Substring(0, 8) + ".bak";
-                File.Copy(path, preservedPath, false);
+                File.Move(path, preservedPath);
                 return preservedPath;
             }
             catch
@@ -476,6 +493,175 @@ namespace FilePromptAIWin7
             }
         }
 
+        public ConversationSession CloneSessionFromMessage(
+            string sessionId,
+            string messageId,
+            string title)
+        {
+            lock (syncRoot)
+            {
+                ConversationSession source = FindSessionUnlocked(sessionId);
+                int messageIndex = FindMessageIndex(source, messageId);
+                if (source == null || messageIndex < 0)
+                {
+                    return null;
+                }
+
+                ConversationSession clone = new ConversationSession(
+                    string.IsNullOrWhiteSpace(title) ? source.Title : title);
+                clone.SourceSessionId = source.Id;
+                clone.SourceMessageId = source.Messages[messageIndex].Id;
+                clone.Messages = new List<ConversationMessage>();
+                for (int index = 0; index <= messageIndex; index++)
+                {
+                    ConversationMessage message = source.Messages[index];
+                    if (message != null)
+                    {
+                        clone.Messages.Add(message.Clone());
+                    }
+                }
+
+                clone.Touch();
+                ValidateMessageSequence(clone.Messages);
+                string previousCurrentSessionId = currentSessionId;
+                sessions.Add(clone);
+                currentSessionId = clone.Id;
+                try
+                {
+                    SaveUnlocked();
+                    return clone;
+                }
+                catch
+                {
+                    sessions.Remove(clone);
+                    currentSessionId = previousCurrentSessionId;
+                    throw;
+                }
+            }
+        }
+
+        public bool SetSessionPinned(string id, bool isPinned)
+        {
+            return SetSessionState(id, isPinned, true);
+        }
+
+        public bool SetSessionArchived(string id, bool isArchived)
+        {
+            return SetSessionState(id, isArchived, false);
+        }
+
+        public bool ReplaceMessageSuffix(
+            string sessionId,
+            string afterMessageId,
+            IList<ConversationMessage> replacementMessages)
+        {
+            if (replacementMessages == null)
+            {
+                return false;
+            }
+
+            lock (syncRoot)
+            {
+                ConversationSession session = FindSessionUnlocked(sessionId);
+                int anchorIndex = FindMessageIndex(session, afterMessageId);
+                if (session == null || anchorIndex < 0)
+                {
+                    return false;
+                }
+
+                List<ConversationMessage> candidate =
+                    new List<ConversationMessage>();
+                for (int index = 0; index <= anchorIndex; index++)
+                {
+                    ConversationMessage message = session.Messages[index];
+                    if (message != null)
+                    {
+                        candidate.Add(message);
+                    }
+                }
+
+                foreach (ConversationMessage message in replacementMessages)
+                {
+                    if (message == null)
+                    {
+                        return false;
+                    }
+
+                    candidate.Add(message);
+                }
+
+                if (!TryValidateMessageSequence(candidate))
+                {
+                    return false;
+                }
+
+                IList<ConversationMessage> previousMessages = session.Messages;
+                DateTime previousUpdatedAt = session.UpdatedAt;
+                session.Messages = candidate;
+                session.Touch();
+                try
+                {
+                    SaveUnlocked();
+                    return true;
+                }
+                catch
+                {
+                    session.Messages = previousMessages;
+                    session.UpdatedAt = previousUpdatedAt;
+                    throw;
+                }
+            }
+        }
+
+        private bool SetSessionState(
+            string id,
+            bool value,
+            bool pinnedState)
+        {
+            lock (syncRoot)
+            {
+                ConversationSession session = FindSessionUnlocked(id);
+                if (session == null)
+                {
+                    return false;
+                }
+
+                bool previousValue = pinnedState
+                    ? session.IsPinned
+                    : session.IsArchived;
+                DateTime previousUpdatedAt = session.UpdatedAt;
+                if (pinnedState)
+                {
+                    session.IsPinned = value;
+                }
+                else
+                {
+                    session.IsArchived = value;
+                }
+
+                session.Touch();
+                try
+                {
+                    SaveUnlocked();
+                    return true;
+                }
+                catch
+                {
+                    if (pinnedState)
+                    {
+                        session.IsPinned = previousValue;
+                    }
+                    else
+                    {
+                        session.IsArchived = previousValue;
+                    }
+
+                    session.UpdatedAt = previousUpdatedAt;
+                    throw;
+                }
+            }
+        }
+
         public bool AddMessage(
             string sessionId,
             string role,
@@ -570,6 +756,14 @@ namespace FilePromptAIWin7
             ConversationSession session,
             ConversationMessage message)
         {
+            List<ConversationMessage> candidate =
+                CreateMessageSequenceSnapshot(session.Messages);
+            candidate.Add(message);
+            if (!TryValidateMessageSequence(candidate))
+            {
+                return false;
+            }
+
             IList<ConversationMessage> previousMessages = session.Messages;
             int previousCount = previousMessages == null
                 ? 0
@@ -610,6 +804,13 @@ namespace FilePromptAIWin7
 
         private void SaveUnlocked()
         {
+            if (writeBlockedByRecovery)
+            {
+                throw new InvalidOperationException(
+                    "会话历史处于只读保护状态。请先手工备份并处理原文件，" +
+                    "然后重新启动程序。");
+            }
+
             string directory = Path.GetDirectoryName(storagePath);
             if (!string.IsNullOrWhiteSpace(directory) &&
                 !Directory.Exists(directory))
@@ -632,6 +833,8 @@ namespace FilePromptAIWin7
                 }
 
                 session.EnsureIdentity();
+                ValidateSessionMetadata(session);
+                ValidateMessageSequence(session.Messages);
                 root.Add(CreateSessionElement(session));
             }
 
@@ -686,6 +889,8 @@ namespace FilePromptAIWin7
                         "A session contains too many messages to export.");
                 }
 
+                ValidateSessionMetadata(snapshot);
+                ValidateMessageSequence(snapshot.Messages);
                 sessionsElement.Add(CreateSessionElement(snapshot));
                 exportedCount++;
             }
@@ -715,6 +920,22 @@ namespace FilePromptAIWin7
                 new XAttribute("title", safeTitle),
                 new XAttribute("createdAt", FormatDate(session.CreatedAt)),
                 new XAttribute("updatedAt", FormatDate(session.UpdatedAt)));
+            AddOptionalBooleanAttribute(
+                sessionElement,
+                "isPinned",
+                session.IsPinned);
+            AddOptionalBooleanAttribute(
+                sessionElement,
+                "isArchived",
+                session.IsArchived);
+            AddOptionalAttribute(
+                sessionElement,
+                "sourceSessionId",
+                session.SourceSessionId);
+            AddOptionalAttribute(
+                sessionElement,
+                "sourceMessageId",
+                session.SourceMessageId);
             XElement messagesElement = new XElement("Messages");
             if (session.Messages != null)
             {
@@ -725,16 +946,30 @@ namespace FilePromptAIWin7
                         continue;
                     }
 
-                    messagesElement.Add(
-                        new XElement(
-                            "Message",
+                    XElement messageElement = new XElement(
+                        "Message",
+                        new XAttribute("id", message.Id),
+                        new XAttribute(
+                            "role",
+                            ConversationMessage.NormalizeRole(message.Role)),
+                        new XAttribute(
+                            "createdAt",
+                            FormatDate(message.CreatedAt)));
+                    AddOptionalAttribute(
+                        messageElement,
+                        "parentMessageId",
+                        message.ParentMessageId);
+                    if (message.VariantIndex != 0)
+                    {
+                        messageElement.Add(
                             new XAttribute(
-                                "role",
-                                ConversationMessage.NormalizeRole(message.Role)),
-                            new XAttribute(
-                                "createdAt",
-                                FormatDate(message.CreatedAt)),
-                            SanitizeXmlText(message.Content)));
+                                "variantIndex",
+                                message.VariantIndex.ToString(
+                                    CultureInfo.InvariantCulture)));
+                    }
+
+                    messageElement.Add(SanitizeXmlText(message.Content));
+                    messagesElement.Add(messageElement);
                 }
             }
 
@@ -845,7 +1080,11 @@ namespace FilePromptAIWin7
                 "id",
                 "title",
                 "createdAt",
-                "updatedAt");
+                "updatedAt",
+                "isPinned",
+                "isArchived",
+                "sourceSessionId",
+                "sourceMessageId");
             string id = RequireAttribute(element, "id");
             string title = RequireAttribute(element, "title");
             if (string.IsNullOrWhiteSpace(id) || id.Length > 256)
@@ -888,6 +1127,10 @@ namespace FilePromptAIWin7
             session.Title = title;
             session.CreatedAt = createdAt;
             session.UpdatedAt = updatedAt;
+            session.IsPinned = ParseOptionalBoolean(element, "isPinned");
+            session.IsArchived = ParseOptionalBoolean(element, "isArchived");
+            session.SourceSessionId = GetAttribute(element, "sourceSessionId");
+            session.SourceMessageId = GetAttribute(element, "sourceMessageId");
             session.Messages = new List<ConversationMessage>();
             foreach (XElement messageElement in messageElements)
             {
@@ -898,7 +1141,13 @@ namespace FilePromptAIWin7
                         "A backup session contains an invalid message.");
                 }
 
-                ValidateAttributes(messageElement, "role", "createdAt");
+                ValidateAttributes(
+                    messageElement,
+                    "id",
+                    "parentMessageId",
+                    "variantIndex",
+                    "role",
+                    "createdAt");
                 string role = RequireAttribute(messageElement, "role");
                 if (!IsValidRole(role))
                 {
@@ -908,13 +1157,25 @@ namespace FilePromptAIWin7
 
                 DateTime messageCreatedAt = ParseRequiredDate(
                     RequireAttribute(messageElement, "createdAt"));
+                string messageId = GetAttribute(messageElement, "id");
+                string parentMessageId = GetAttribute(
+                    messageElement,
+                    "parentMessageId");
+                int variantIndex = ParseOptionalNonNegativeInteger(
+                    messageElement,
+                    "variantIndex");
                 session.Messages.Add(
                     new ConversationMessage(
                         role,
                         messageElement.Value,
-                        messageCreatedAt));
+                        messageCreatedAt,
+                        messageId,
+                        parentMessageId,
+                        variantIndex));
             }
 
+            ValidateSessionMetadata(session);
+            ValidateMessageSequence(session.Messages);
             return session;
         }
 
@@ -934,6 +1195,214 @@ namespace FilePromptAIWin7
                     throw new InvalidDataException(
                         "The conversation backup contains an unknown attribute.");
                 }
+            }
+        }
+
+        private static void AddOptionalAttribute(
+            XElement element,
+            string name,
+            string value)
+        {
+            string safeValue = SanitizeXmlText(value);
+            if (!string.IsNullOrWhiteSpace(safeValue))
+            {
+                element.Add(new XAttribute(name, safeValue));
+            }
+        }
+
+        private static void AddOptionalBooleanAttribute(
+            XElement element,
+            string name,
+            bool value)
+        {
+            if (value)
+            {
+                element.Add(new XAttribute(name, "true"));
+            }
+        }
+
+        private static bool ParseOptionalBoolean(XElement element, string name)
+        {
+            XAttribute attribute = element.Attribute(name);
+            if (attribute == null)
+            {
+                return false;
+            }
+
+            bool value;
+            if (!bool.TryParse(attribute.Value, out value))
+            {
+                throw new InvalidDataException(
+                    "The conversation store contains an invalid boolean.");
+            }
+
+            return value;
+        }
+
+        private static int ParseOptionalNonNegativeInteger(
+            XElement element,
+            string name)
+        {
+            XAttribute attribute = element.Attribute(name);
+            if (attribute == null)
+            {
+                return 0;
+            }
+
+            int value;
+            if (!int.TryParse(
+                attribute.Value,
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out value) || value < 0)
+            {
+                throw new InvalidDataException(
+                    "The conversation message contains an invalid variant index.");
+            }
+
+            return value;
+        }
+
+        private static int FindMessageIndex(
+            ConversationSession session,
+            string messageId)
+        {
+            if (session == null || session.Messages == null ||
+                string.IsNullOrWhiteSpace(messageId))
+            {
+                return -1;
+            }
+
+            for (int index = 0; index < session.Messages.Count; index++)
+            {
+                ConversationMessage message = session.Messages[index];
+                if (message != null && string.Equals(
+                    message.Id,
+                    messageId,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
+
+        private static List<ConversationMessage> CreateMessageSequenceSnapshot(
+            IList<ConversationMessage> messages)
+        {
+            List<ConversationMessage> result =
+                new List<ConversationMessage>();
+            if (messages != null)
+            {
+                foreach (ConversationMessage message in messages)
+                {
+                    if (message != null)
+                    {
+                        result.Add(message);
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        private static bool TryValidateMessageSequence(
+            IList<ConversationMessage> messages)
+        {
+            try
+            {
+                ValidateMessageSequence(messages);
+                return true;
+            }
+            catch (InvalidDataException)
+            {
+                return false;
+            }
+        }
+
+        private static void ValidateMessageSequence(
+            IList<ConversationMessage> messages)
+        {
+            HashSet<string> ids = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            if (messages == null)
+            {
+                return;
+            }
+
+            foreach (ConversationMessage message in messages)
+            {
+                if (message == null)
+                {
+                    continue;
+                }
+
+                message.EnsureIdentity();
+                if (string.IsNullOrWhiteSpace(message.Id) ||
+                    message.Id.Length > 256 ||
+                    !string.Equals(
+                        SanitizeXmlText(message.Id),
+                        message.Id,
+                        StringComparison.Ordinal) ||
+                    !ids.Add(message.Id))
+                {
+                    throw new InvalidDataException(
+                        "A conversation contains an invalid or duplicate message identifier.");
+                }
+
+                if (message.VariantIndex < 0)
+                {
+                    throw new InvalidDataException(
+                        "A conversation message contains an invalid variant index.");
+                }
+
+            }
+
+            foreach (ConversationMessage message in messages)
+            {
+                if (message != null &&
+                    !string.IsNullOrWhiteSpace(message.ParentMessageId) &&
+                    !ids.Contains(message.ParentMessageId))
+                {
+                    throw new InvalidDataException(
+                        "A conversation message has an unknown parent message.");
+                }
+            }
+        }
+
+        private static void ValidateSessionMetadata(ConversationSession session)
+        {
+            if (session == null)
+            {
+                return;
+            }
+
+            ValidateOptionalIdentifier(session.SourceSessionId);
+            ValidateOptionalIdentifier(session.SourceMessageId);
+            if (string.IsNullOrWhiteSpace(session.SourceSessionId) !=
+                string.IsNullOrWhiteSpace(session.SourceMessageId))
+            {
+                throw new InvalidDataException(
+                    "A conversation source reference is incomplete.");
+            }
+        }
+
+        private static void ValidateOptionalIdentifier(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return;
+            }
+
+            if (value.Length > 256 ||
+                !string.Equals(
+                    SanitizeXmlText(value),
+                    value,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "A conversation source reference is invalid.");
             }
         }
 

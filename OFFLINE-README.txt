@@ -4,9 +4,10 @@ FilePrompt AI for Windows 7 离线完整版
 版本说明
 --------
 
-当前包为 FilePrompt AI v1.13，也是当前唯一维护版本。界面采用左侧会话导航、右侧会话
-记录和底部消息编辑器布局；连接设置默认隐藏，窄窗口下顶部操作收进菜单。空资料区自动
-压缩，有资料时展开；新回复只更新本轮内容，不会清空并重画已有历史。源码仓库与离线包
+当前包为 FilePrompt AI v1.14，也是当前唯一维护版本。界面采用左侧会话导航、右侧会话
+记录和底部消息编辑器布局；模型、技能/MCP、会话和维护选项统一收进左侧
+“设置”窗口，不占用主工作区。附件列表收进底部消息编辑器，通过“+ 添加”选择文件、
+粘贴内容或打开路径窗口，有资料时才展开；新回复只更新本轮内容，不会清空并重画已有历史。源码仓库与离线包
 按同一版本构建。
 
 使用方法
@@ -23,8 +24,8 @@ FilePrompt AI for Windows 7 离线完整版
 卸载方法
 --------
 
-运行“Uninstall-FilePromptAI.exe”，或在主窗口选择“更多”→
-“卸载 FilePrompt AI...”。卸载器只删除校验清单中内容未被修改的程序文件，
+运行“Uninstall-FilePromptAI.exe”，或在左侧“设置”→“维护”中选择
+“卸载程序...”。卸载器只删除校验清单中内容未被修改的程序文件，
 发布目录中的额外文件不会被递归删除。用户配置和会话默认保留；只有明确勾选
 并再次确认后才会删除。
 
@@ -44,24 +45,34 @@ FilePrompt AI for Windows 7 离线完整版
 --------
 
 - 多会话、会话搜索、会话备份/恢复和运行期草稿保留。
-- 会话列表固定在左侧；右侧上方显示模型、消息数、本轮资料、字符预算及技能/MCP
-  状态，对话历史占据主要区域，资料和指令位于底部。
+- 会话列表固定在左侧；右侧上方显示会话标题和连接状态，对话历史占据主要区域，
+  紧凑上下文摘要显示在对话区上沿，资料与指令统一位于底部消息编辑器。
 - 流式回复按本轮序号增量追加；完成、失败或取消后会丢弃排队中的过期分片，避免
   重复内容和整段历史闪烁。
-- 窗口缩放时资料列表不会重建拖拽句柄；最小窗口展开连接设置仍保留模型输出区，
+- 窗口缩放时专用拖放入口不会重建句柄；最小窗口中对话记录和输入框仍然可见，
   上下文摘要被截断时可悬停查看完整内容。
-- 文件可直接拖入、选择，或粘贴文件路径后主动点击读取；不会后台扫描目录。
+- 文件可直接拖入；“+ 添加”菜单可选择文件、粘贴内容或打开路径窗口，路径只有
+  在用户点击“添加”后才读取，不会后台扫描目录。
+- 当前运行期跨会话草稿合计最多保留 20 MB 二进制附件，超限时会要求先发送或移除。
 - 连接自检、流式输出、Markdown 排版、资料预览和长会话上下文控制。
-- 可在“更多”→“模型配置”保存多个内网模型预设；预设 API Key 使用当前用户 DPAPI 加密。
+- 可在左侧“设置”→“模型连接”→“模型配置...”保存多个内网模型预设；
+  预设 API Key 使用当前用户 DPAPI 加密。
 - 文本资料正文会进入会话历史；图片和无文本内联文件只在当前轮发送，后续轮次
   需要再次主动添加，不会根据路径自动重读。
-- 最新回复或整个会话可导出 Word/PDF，Markdown 表格可导出 Excel/CSV，
-  不依赖 Microsoft Office。
-- 网络请求具有超时、有限重试和异常流式结束检测，避免无限等待或保存半截回复。
+- 最新回复或整个会话可导出 Word、PDF、PowerPoint 和 XMind，Markdown 表格可
+  导出 Excel/CSV；全部在本机生成，不依赖 Microsoft Office 或 XMind。
+- “快捷指令”可填入总结、提炼、翻译、PPT 大纲、XMind 结构和 Markdown 表格模板；
+  对话记录菜单可载入上一条用户指令编辑重发，模板不会自动发送。
+- 网络请求具有超时、有限重试和异常流式结束检测；二进制附件请求使用
+  120 秒响应头等待上限且不会自动重复上传。
+- 有未发送文字、已添加资料或运行中任务时，关闭程序会先要求确认，默认不退出。
+- 损坏的会话文件无法安全重命名保留时，会进入只读保护并保持原文件不变。
 - 会话备份不包含 URL、API Key 或模型名称。
 - 可从剪贴板安装普通文本、SKILL.md 或 JSON 离线技能；程序不会扫描技能目录、
   执行技能脚本或访问扩展商店。
 - 支持 stdio 与 Streamable HTTP MCP，可从剪贴板导入标准 mcpServers JSON。
+- 二进制附件触发 MCP 工具调用时，只在首轮上传；后续工具回合保留附件信息占位，
+  不会再次发送 Base64 数据。
 - MCP 命令、环境变量、URL 和请求头使用当前 Windows 用户的 DPAPI 加密保存；
   剪贴板导入后一律停用，stdio 启动和每一次工具调用默认都要人工确认。
 
@@ -112,16 +123,3 @@ SHA-256：0A3A390C47E639D0F7FC65B21195FEE6B7F65B066F80F70C60FAB191D14B7E40
 certutil -hashfile runtime\NDP48-x86-x64-AllOS-ENU.exe SHA256
 
 包内 PACKAGE-CHECKSUMS-SHA256.txt 列出了其余交付文件的 SHA-256。
-
-Offline export formats
-----------------------
-
-Word, PDF, Excel/CSV, PowerPoint (.pptx) and XMind (.xmind) exports are generated
-from bundled local code and DLLs. They do not require Microsoft Office, XMind,
-WebView2, Node.js, Python, Java, NuGet, or an Internet connection.
-Prompt actions and editable resend
-----------------------------------
-
-The shortcut menu is local-only: it fills a prompt template and never sends
-without the user's explicit action. The output context menu can load the last
-user instruction for editing and resubmission.

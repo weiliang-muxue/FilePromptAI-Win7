@@ -70,8 +70,11 @@ internal static class UiStateSmokeTest
             form = Activator.CreateInstance(formType, true);
 
             TestWorkspaceLayoutAndIncrementalTranscript(formType, form);
+            TestCurrentTurnTextBudget(formType, form);
+            TestBinaryRetentionBudget(formType, form);
+            TestFileDropRegistration(formType, form);
             ThrowIfUiThreadException();
-            TestCtrlNBusyGuard(formType, form);
+            TestMainKeyboardShortcuts(formType, form);
             TestSendShortcutConfig(formType, form);
             TestPromptActions(formType, form);
             TestDragBusyGuard(formType, form, dataRoot);
@@ -90,6 +93,7 @@ internal static class UiStateSmokeTest
                 application,
                 formType,
                 form);
+            TestExitConfirmationState(formType, form);
             ThrowIfUiThreadException();
             Console.WriteLine("PASS | UI state hardening");
             return 0;
@@ -125,33 +129,237 @@ internal static class UiStateSmokeTest
         }
     }
 
+    private static void TestBinaryRetentionBudget(Type formType, object form)
+    {
+        InvokePrivate(formType, form, "OnClearClick", form, EventArgs.Empty);
+        Type inputItemType = formType.Assembly.GetType(
+            "FilePromptAIWin7.InputItem",
+            true);
+        Type inputKindType = formType.Assembly.GetType(
+            "FilePromptAIWin7.InputKind",
+            true);
+        object first = Activator.CreateInstance(inputItemType, true);
+        inputItemType.GetProperty("Name").SetValue(first, "first.bin", null);
+        inputItemType.GetProperty("Kind").SetValue(
+            first,
+            Enum.Parse(inputKindType, "File"),
+            null);
+        inputItemType.GetProperty("BinaryData").SetValue(
+            first,
+            new byte[12 * 1024 * 1024],
+            null);
+        AssertTrue(
+            (bool)InvokePrivate(formType, form, "AddInputItem", first),
+            "Binary material below retention limit is accepted");
+
+        object second = Activator.CreateInstance(inputItemType, true);
+        inputItemType.GetProperty("Name").SetValue(second, "second.bin", null);
+        inputItemType.GetProperty("Kind").SetValue(
+            second,
+            Enum.Parse(inputKindType, "File"),
+            null);
+        inputItemType.GetProperty("BinaryData").SetValue(
+            second,
+            new byte[9 * 1024 * 1024],
+            null);
+        Exception failure = null;
+        try
+        {
+            InvokePrivate(formType, form, "AddInputItem", second);
+        }
+        catch (TargetInvocationException exception)
+        {
+            failure = exception.InnerException;
+        }
+        finally
+        {
+            InvokePrivate(formType, form, "OnClearClick", form, EventArgs.Empty);
+        }
+
+        AssertTrue(
+            failure is InvalidOperationException &&
+                failure.Message.IndexOf(
+                    "20 MB",
+                    StringComparison.Ordinal) >= 0,
+            "Binary material above retention limit is rejected");
+    }
+
+    private static void TestExitConfirmationState(Type formType, object form)
+    {
+        RichTextBox prompt = GetField(
+            formType,
+            form,
+            "promptTextBox") as RichTextBox;
+        IList items = (IList)GetField(formType, form, "inputItems");
+        IDictionary drafts = (IDictionary)GetField(
+            formType,
+            form,
+            "sessionDrafts");
+        string previousPrompt = prompt.Text;
+        ArrayList previousItems = new ArrayList(items);
+        ArrayList previousDrafts = new ArrayList();
+        foreach (DictionaryEntry entry in drafts)
+        {
+            previousDrafts.Add(entry);
+        }
+        object previousCancellation = GetField(
+            formType,
+            form,
+            "generationCancellation");
+        object previousConnectionCancellation = GetField(
+            formType,
+            form,
+            "connectionTestCancellation");
+        CancellationTokenSource testCancellation = null;
+        CancellationTokenSource testConnectionCancellation = null;
+        try
+        {
+            prompt.Clear();
+            items.Clear();
+            drafts.Clear();
+            SetField(formType, form, "generationCancellation", null);
+            AssertTrue(
+                !(bool)InvokePrivate(
+                    formType,
+                    form,
+                    "NeedsExitConfirmation"),
+                "Empty workspace exits without confirmation");
+
+            prompt.Text = "尚未发送的草稿";
+            AssertTrue(
+                (bool)InvokePrivate(
+                    formType,
+                    form,
+                    "NeedsExitConfirmation"),
+                "Unsent text requires exit confirmation");
+
+            prompt.Clear();
+            Type inputItemType = items.GetType().GetGenericArguments()[0];
+            items.Add(Activator.CreateInstance(inputItemType, true));
+            AssertTrue(
+                (bool)InvokePrivate(
+                    formType,
+                    form,
+                    "NeedsExitConfirmation"),
+                "Added material requires exit confirmation");
+
+            items.Clear();
+            testCancellation = new CancellationTokenSource();
+            SetField(
+                formType,
+                form,
+                "generationCancellation",
+                testCancellation);
+            AssertTrue(
+                (bool)InvokePrivate(
+                    formType,
+                    form,
+                    "NeedsExitConfirmation"),
+                "Active generation requires exit confirmation");
+
+            SetField(formType, form, "generationCancellation", null);
+            Type draftType = formType.GetNestedType(
+                "SessionDraft",
+                BindingFlags.NonPublic);
+            object draft = Activator.CreateInstance(draftType, true);
+            draftType.GetProperty("Prompt").SetValue(
+                draft,
+                "其他会话草稿",
+                null);
+            drafts.Add("other-session", draft);
+            AssertTrue(
+                (bool)InvokePrivate(
+                    formType,
+                    form,
+                    "NeedsExitConfirmation"),
+                "Background session draft requires exit confirmation");
+
+            testConnectionCancellation = new CancellationTokenSource();
+            SetField(
+                formType,
+                form,
+                "connectionTestCancellation",
+                testConnectionCancellation);
+            FormClosingEventArgs userClose = new FormClosingEventArgs(
+                CloseReason.UserClosing,
+                false);
+            InvokePrivate(
+                formType,
+                form,
+                "OnSettingsDialogClosing",
+                form,
+                userClose);
+            AssertTrue(userClose.Cancel,
+                "User cannot close settings during connection test");
+
+            FormClosingEventArgs shutdownClose = new FormClosingEventArgs(
+                CloseReason.WindowsShutDown,
+                false);
+            InvokePrivate(
+                formType,
+                form,
+                "OnSettingsDialogClosing",
+                form,
+                shutdownClose);
+            AssertTrue(!shutdownClose.Cancel,
+                "Settings do not block Windows shutdown");
+        }
+        finally
+        {
+            prompt.Text = previousPrompt;
+            items.Clear();
+            foreach (object item in previousItems)
+            {
+                items.Add(item);
+            }
+
+            drafts.Clear();
+            foreach (DictionaryEntry entry in previousDrafts)
+            {
+                drafts.Add(entry.Key, entry.Value);
+            }
+
+            SetField(
+                formType,
+                form,
+                "generationCancellation",
+                previousCancellation);
+            SetField(
+                formType,
+                form,
+                "connectionTestCancellation",
+                previousConnectionCancellation);
+            if (testCancellation != null)
+            {
+                testCancellation.Dispose();
+            }
+            if (testConnectionCancellation != null)
+            {
+                testConnectionCancellation.Dispose();
+            }
+        }
+    }
+
     private static void TestWorkspaceLayoutAndIncrementalTranscript(
         Type formType,
         object form)
     {
-        AssertTrue(
-            !(bool)GetField(formType, form, "settingsExpanded"),
-            "Connection settings are hidden by default");
-        RowStyle settingsRow = GetField(
+        TableLayoutPanel workspace = GetField(
             formType,
             form,
-            "settingsRowStyle") as RowStyle;
-        AssertTrue(
-            settingsRow != null && settingsRow.Height == 0F,
-            "Hidden settings do not consume workspace height");
-        RowStyle inputsRow = GetField(
+            "workspaceLayout") as TableLayoutPanel;
+        TableLayoutPanel conversationArea = GetField(
             formType,
             form,
-            "inputsAreaRowStyle") as RowStyle;
-        RowStyle promptRow = GetField(
+            "conversationArea") as TableLayoutPanel;
+        RowStyle composerRow = GetField(
             formType,
             form,
-            "promptAreaRowStyle") as RowStyle;
-        AssertTrue(
-            inputsRow != null && inputsRow.Height >= 84F &&
-                inputsRow.Height <= 100F &&
-                promptRow != null && promptRow.Height >= 90F,
-            "Empty attachment tray stays compact while the prompt remains usable");
+            "composerAreaRowStyle") as RowStyle;
+        RowStyle attachmentRow = GetField(
+            formType,
+            form,
+            "attachmentTrayRowStyle") as RowStyle;
         RichTextBox output = GetField(
             formType,
             form,
@@ -160,6 +368,30 @@ internal static class UiStateSmokeTest
             formType,
             form,
             "inputListView") as ListView;
+        RichTextBox prompt = GetField(
+            formType,
+            form,
+            "promptTextBox") as RichTextBox;
+        Control composer = GetField(
+            formType,
+            form,
+            "composerPanel") as Control;
+        Panel dropTarget = GetField(
+            formType,
+            form,
+            "fileDropTargetPanel") as Panel;
+        Button settingsButton = GetField(
+            formType,
+            form,
+            "settingsButton") as Button;
+        Button readPathButton = GetField(
+            formType,
+            form,
+            "readPathButton") as Button;
+        Button generateButton = GetField(
+            formType,
+            form,
+            "generateButton") as Button;
         Label contextSummary = GetField(
             formType,
             form,
@@ -168,6 +400,44 @@ internal static class UiStateSmokeTest
             formType,
             form,
             "contextSummaryToolTip") as ToolTip;
+        Form settingsDialog = GetField(
+            formType,
+            form,
+            "settingsDialog") as Form;
+        Form pathDialog = GetField(
+            formType,
+            form,
+            "pathInputDialog") as Form;
+        TextBox endpoint = GetField(
+            formType,
+            form,
+            "endpointTextBox") as TextBox;
+        TextBox pathInput = GetField(
+            formType,
+            form,
+            "pathTextBox") as TextBox;
+
+        AssertTrue(
+            workspace != null && workspace.RowCount == 3 &&
+                conversationArea != null && conversationArea.RowCount == 2 &&
+                composerRow != null && composerRow.Height >= 140F &&
+                composerRow.Height <= 170F &&
+                attachmentRow != null && attachmentRow.Height == 0F,
+            "Workspace contains only header, transcript, composer and status");
+        AssertTrue(
+            settingsDialog != null && pathDialog != null &&
+                endpoint != null && pathInput != null &&
+                settingsDialog.Contains(endpoint) &&
+                pathDialog.Contains(pathInput) &&
+                !workspace.Contains(endpoint) &&
+                !workspace.Contains(pathInput),
+            "Connection and path inputs live in separate dialogs");
+        AssertTrue(
+            ContainsControlText(settingsDialog, "模型连接") &&
+                ContainsControlText(settingsDialog, "技能与 MCP") &&
+                ContainsControlText(settingsDialog, "会话与输入") &&
+                ContainsControlText(settingsDialog, "维护"),
+            "Settings dialog exposes the four configuration sections");
         AssertTrue(
             contextSummary != null &&
                 contextSummary.AccessibleName == "当前会话上下文摘要" &&
@@ -175,52 +445,57 @@ internal static class UiStateSmokeTest
                     "条消息",
                     StringComparison.Ordinal) >= 0,
             "Context summary is visible in the workspace header");
-        int extensionOffset = contextSummary.Text.IndexOf(
+        string fullContextSummary = contextToolTip == null
+            ? string.Empty
+            : contextToolTip.GetToolTip(contextSummary);
+        int extensionOffset = fullContextSummary.IndexOf(
             "技能",
             StringComparison.Ordinal);
-        int historyOffset = contextSummary.Text.IndexOf(
+        int historyOffset = fullContextSummary.IndexOf(
             "历史",
             StringComparison.Ordinal);
         AssertTrue(
             extensionOffset >= 0 && historyOffset > extensionOffset &&
                 contextToolTip != null &&
-                contextToolTip.GetToolTip(contextSummary) ==
-                    contextSummary.Text &&
-                contextSummary.AccessibleDescription == contextSummary.Text,
+                contextSummary.AccessibleDescription == fullContextSummary,
             "Compact summary prioritizes extensions and exposes full text");
 
         Form window = form as Form;
         AssertTrue(
-            window != null && output != null && inputList != null,
+            window != null && output != null && inputList != null &&
+                prompt != null && composer != null && dropTarget != null &&
+                settingsButton != null && readPathButton != null &&
+                generateButton != null,
             "Main workspace controls exist");
-        Button extensionsButton = GetField(
-            formType,
-            form,
-            "extensionsButton") as Button;
-        Button toggleSettingsButton = GetField(
-            formType,
-            form,
-            "toggleSettingsButton") as Button;
-        Button moreButton = GetField(
-            formType,
-            form,
-            "moreButton") as Button;
-        AssertTrue(
-            extensionsButton != null && toggleSettingsButton != null &&
-                moreButton != null,
-            "Header workspace actions exist");
-        Size originalSize = window.Size;
         window.Show();
         Application.DoEvents();
+        AssertTrue(
+            !settingsDialog.Visible && !pathDialog.Visible &&
+                settingsButton.Parent != null,
+            "Secondary controls stay out of the main workspace");
+        Size originalSize = window.Size;
         window.Size = window.MinimumSize;
-        InvokePrivate(formType, form, "UpdateHeaderActionsLayout");
+        InvokePrivate(formType, form, "UpdateConversationAreaRows");
         Application.DoEvents();
         AssertTrue(
-            !extensionsButton.Visible && !toggleSettingsButton.Visible &&
-                moreButton.Visible && moreButton.Text == "菜单",
-            "Narrow workspace collapses secondary header actions");
+            output.Visible && output.Height >= 128,
+            "Narrow workspace keeps the transcript visible (height=" +
+                output.Height + ")");
+        AssertTrue(
+            prompt.Visible && prompt.Enabled && prompt.Height > 0,
+            "Narrow workspace keeps the prompt editor visible (height=" +
+                prompt.Height + ")");
+        AssertTrue(
+            dropTarget.Visible && dropTarget.Width >= 120 &&
+                !readPathButton.Visible,
+            "Narrow workspace keeps drag-and-drop visible and paths off-canvas");
+        AssertTrue(
+            generateButton.Visible && generateButton.Width >= 64,
+            "Narrow workspace keeps sending usable (visible=" +
+                generateButton.Visible + ", width=" +
+                generateButton.Width + ")");
         window.Size = originalSize;
-        InvokePrivate(formType, form, "UpdateHeaderActionsLayout");
+        InvokePrivate(formType, form, "UpdateConversationAreaRows");
         Application.DoEvents();
         IntPtr inputListHandle = inputList.Handle;
         Type inputItemType = formType.Assembly.GetType(
@@ -248,22 +523,31 @@ internal static class UiStateSmokeTest
         InvokePrivate(formType, form, "UpdateInputStatus");
         Application.DoEvents();
         AssertTrue(
-            inputsRow.Height >= 120F && inputList.Visible,
-            "Attachment tray expands when an item is present");
+            composerRow.Height >= 220F && attachmentRow.Height >= 58F &&
+                inputList.Visible,
+            "Composer expands its attachment tray when an item is present");
+        inputList.Select();
+        inputList.Items[0].Selected = true;
+        Application.DoEvents();
+        KeyEventArgs deleteKeys = new KeyEventArgs(Keys.Delete);
+        RaiseKeyDown(inputList, deleteKeys);
+        Application.DoEvents();
+        AssertTrue(
+            deleteKeys.Handled && inputList.Items.Count == 0 &&
+                ((IList)GetField(formType, form, "inputItems")).Count == 0,
+            "Delete removes the selected attachment from UI and draft state");
         InvokePrivate(formType, form, "OnClearClick", form, EventArgs.Empty);
         Application.DoEvents();
         AssertTrue(
-            inputsRow.Height <= 100F && !inputList.Visible,
-            "Attachment tray collapses after items are cleared");
+            composerRow.Height <= 170F && attachmentRow.Height == 0F &&
+                !inputList.Visible,
+            "Composer collapses its attachment tray after items are cleared");
         window.Size = window.MinimumSize;
-        InvokePrivate(formType, form, "SetSettingsExpanded", true);
-        Application.DoEvents();
         InvokePrivate(formType, form, "UpdateConversationAreaRows");
         Application.DoEvents();
         AssertTrue(
-            output.Height >= 32,
-            "Transcript remains visible with settings open at minimum size");
-        InvokePrivate(formType, form, "SetSettingsExpanded", false);
+            output.Height >= 128 && prompt.Height > 0,
+            "Transcript and composer remain visible at minimum size");
         window.Size = originalSize;
         Application.DoEvents();
         AssertTrue(
@@ -439,17 +723,21 @@ internal static class UiStateSmokeTest
         ContextMenuStrip menu =
             ((Button)generateButton).ContextMenuStrip;
         AssertTrue(menu != null, "Send button shortcut menu exists");
-        AssertTrue(menu.Items.Count >= 4, "Send button shortcut menu has options");
 
         int checkedCount = 0;
+        int optionCount = 0;
         foreach (ToolStripItem item in menu.Items)
         {
             ToolStripMenuItem menuItem = item as ToolStripMenuItem;
             if (menuItem != null && menuItem.Tag != null)
             {
+                optionCount++;
                 checkedCount += menuItem.Checked ? 1 : 0;
             }
         }
+        AssertTrue(
+            optionCount == 3,
+            "Send button shortcut menu has three modes");
         AssertTrue(
             checkedCount == 1,
             "Send button shortcut menu has one checked option");
@@ -489,11 +777,39 @@ internal static class UiStateSmokeTest
             "Shift+Enter inserts newline");
     }
 
-    private static void TestCtrlNBusyGuard(Type formType, object form)
+    private static void TestMainKeyboardShortcuts(Type formType, object form)
     {
+        TextBox search = GetField(
+            formType,
+            form,
+            "sessionSearchTextBox") as TextBox;
+        RichTextBox prompt = GetField(
+            formType,
+            form,
+            "promptTextBox") as RichTextBox;
+        AssertTrue(search != null && prompt != null,
+            "Keyboard shortcut targets exist");
+        search.Text = "find this session";
+        prompt.Focus();
+        KeyEventArgs findKeys = new KeyEventArgs(Keys.Control | Keys.F);
+        InvokePrivate(formType, form, "OnMainKeyDown", form, findKeys);
+        Application.DoEvents();
+        AssertTrue(
+            search.Focused && search.SelectionLength == search.TextLength &&
+                findKeys.SuppressKeyPress,
+            "Ctrl+F focuses and selects the session search");
+
         object store = GetField(formType, form, "conversationStore");
         int before = ((IList)store.GetType().GetProperty("Sessions")
             .GetValue(store, null)).Count;
+        KeyEventArgs newKeys = new KeyEventArgs(Keys.Control | Keys.N);
+        InvokePrivate(formType, form, "OnMainKeyDown", form, newKeys);
+        int afterNew = ((IList)store.GetType().GetProperty("Sessions")
+            .GetValue(store, null)).Count;
+        AssertTrue(
+            afterNew == before + 1 && newKeys.SuppressKeyPress,
+            "Ctrl+N creates a session while idle");
+
         SetField(formType, form, "isAddingFiles", true);
         try
         {
@@ -501,11 +817,35 @@ internal static class UiStateSmokeTest
             InvokePrivate(formType, form, "OnMainKeyDown", form, keys);
             int after = ((IList)store.GetType().GetProperty("Sessions")
                 .GetValue(store, null)).Count;
-            AssertTrue(before == after, "Ctrl+N is blocked during extraction");
+            AssertTrue(
+                afterNew == after,
+                "Ctrl+N is blocked during extraction");
         }
         finally
         {
             SetField(formType, form, "isAddingFiles", false);
+        }
+
+        CancellationTokenSource cancellation = new CancellationTokenSource();
+        try
+        {
+            SetField(formType, form, "generationCancellation", cancellation);
+            KeyEventArgs escapeKeys = new KeyEventArgs(Keys.Escape);
+            InvokePrivate(
+                formType,
+                form,
+                "OnMainKeyDown",
+                form,
+                escapeKeys);
+            AssertTrue(
+                cancellation.IsCancellationRequested &&
+                    escapeKeys.SuppressKeyPress,
+                "Escape cancels an active generation");
+        }
+        finally
+        {
+            SetField(formType, form, "generationCancellation", null);
+            cancellation.Dispose();
         }
     }
 
@@ -552,6 +892,37 @@ internal static class UiStateSmokeTest
             InvokePrivate(formType, form, "LoadLastPromptForEditing");
             AssertTrue(prompt.Text == "original instruction",
                 "Last user prompt loads for editing");
+
+            messages.Clear();
+            prompt.Clear();
+            messages.Add(Activator.CreateInstance(
+                messageType,
+                new object[]
+                {
+                    "user",
+                    "\u7528\u6237\u8981\u6c42\uff1abinary instruction\r\n\r\n" +
+                    "\u4ee5\u4e0b\u56fe\u7247\u6216\u5185\u8054\u6587\u4ef6\u4ec5\u968f\u672c\u8f6e\u53d1\u9001\uff1b" +
+                    "\u540e\u7eed\u8f6e\u6b21\u5982\u9700\u91cd\u65b0\u5206\u6790\uff0c\u8bf7\u518d\u6b21\u4e3b\u52a8\u6dfb\u52a0\uff1a\r\n" +
+                    "- pasted.png\uff08\u56fe\u7247\uff0c3 \u5b57\u8282\uff09"
+                }));
+            InvokePrivate(formType, form, "LoadLastPromptForEditing");
+            AssertTrue(prompt.Text == "binary instruction",
+                "Binary attachment notes stay out of loaded prompt");
+
+            messages.Clear();
+            prompt.Clear();
+            messages.Add(Activator.CreateInstance(
+                messageType,
+                new object[]
+                {
+                    "user",
+                    "\u7528\u6237\u8981\u6c42\uff1amixed instruction\r\n" +
+                    "\u4ee5\u4e0b\u8d44\u6599\u7531\u7528\u6237\u4e3b\u52a8\u6dfb\u52a0\r\n" +
+                    "\u4ee5\u4e0b\u56fe\u7247\u6216\u5185\u8054\u6587\u4ef6\u4ec5\u968f\u672c\u8f6e\u53d1\u9001"
+                }));
+            InvokePrivate(formType, form, "LoadLastPromptForEditing");
+            AssertTrue(prompt.Text == "mixed instruction",
+                "Mixed attachment notes stay out of loaded prompt");
         }
         finally
         {
@@ -594,6 +965,228 @@ internal static class UiStateSmokeTest
             SetField(formType, form, "generationCancellation", null);
             cancellation.Dispose();
         }
+
+        IList inputItems = (IList)GetField(
+            formType,
+            form,
+            "inputItems");
+        int before = inputItems.Count;
+        DataObject acceptedData = new DataObject();
+        acceptedData.SetData(
+            DataFormats.FileDrop,
+            new string[] { file });
+        DragEventArgs acceptedDrag = new DragEventArgs(
+            acceptedData,
+            0,
+            0,
+            0,
+            DragDropEffects.Copy,
+            DragDropEffects.Copy);
+        InvokePrivate(
+            formType,
+            form,
+            "OnDragDrop",
+            GetField(formType, form, "fileDropTargetPanel"),
+            acceptedDrag);
+        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline &&
+            ((bool)GetField(formType, form, "isAddingFiles") ||
+                inputItems.Count == before))
+        {
+            Application.DoEvents();
+            Thread.Sleep(10);
+        }
+
+        AssertTrue(
+            inputItems.Count == before + 1,
+            "File drop extracts and adds the selected file");
+        InvokePrivate(
+            formType,
+            form,
+            "OnClearClick",
+            form,
+            EventArgs.Empty);
+    }
+
+    private static void TestFileDropRegistration(
+        Type formType,
+        object form)
+    {
+        Form window = form as Form;
+        Control composerPanel = GetField(
+            formType,
+            form,
+            "composerPanel") as Control;
+        ListView inputList = GetField(
+            formType,
+            form,
+            "inputListView") as ListView;
+        Panel dropTarget = GetField(
+            formType,
+            form,
+            "fileDropTargetPanel") as Panel;
+        AssertTrue(
+            window != null && composerPanel != null && inputList != null &&
+                dropTarget != null,
+            "File drop controls exist");
+        AssertTrue(
+            !window.AllowDrop && !composerPanel.AllowDrop &&
+                !inputList.AllowDrop,
+            "Child controls do not register duplicate Win7 drop targets");
+
+        IntPtr handle = window.Handle;
+        InvokePrivate(
+            formType,
+            form,
+            "InitializeFileDropTarget");
+        AssertTrue(
+            dropTarget.AllowDrop,
+            "Dedicated file strip registers the drop target on an STA thread");
+
+        InvokePrivate(
+            formType,
+            form,
+            "DisableFileDropTarget");
+        AssertTrue(
+            !dropTarget.AllowDrop,
+            "Dedicated file strip revokes the drop target before disposal");
+    }
+
+    private static void TestCurrentTurnTextBudget(
+        Type formType,
+        object form)
+    {
+        IList inputItems = (IList)GetField(formType, form, "inputItems");
+        Type inputType = formType.Assembly.GetType(
+            "FilePromptAIWin7.InputItem",
+            true);
+        Type kindType = formType.Assembly.GetType(
+            "FilePromptAIWin7.InputKind",
+            true);
+        try
+        {
+            inputItems.Clear();
+            object textItem = Activator.CreateInstance(inputType, true);
+            inputType.GetProperty("Name").SetValue(
+                textItem,
+                "large-unicode.txt",
+                null);
+            inputType.GetProperty("Kind").SetValue(
+                textItem,
+                Enum.Parse(kindType, "Text"),
+                null);
+            inputType.GetProperty("TextContent").SetValue(
+                textItem,
+                RepeatText("\uD83D\uDE00", 60000),
+                null);
+            inputItems.Add(textItem);
+
+            string systemWithinBudget = new string('s', 5000);
+            object[] buildArguments = new object[]
+            {
+                "总结文件",
+                systemWithinBudget,
+                null,
+                null,
+                false
+            };
+            bool built = (bool)InvokePrivate(
+                formType,
+                form,
+                "TryBuildCombinedPrompt",
+                buildArguments);
+            string combined = buildArguments[2] as string;
+            AssertTrue(built, "Large extracted text still builds a prompt");
+            AssertTrue(
+                (bool)buildArguments[4],
+                "Large extracted text is marked as truncated");
+            AssertTrue(
+                CountUnicodeCharacters(systemWithinBudget) +
+                    CountUnicodeCharacters(combined) <= 48000L,
+                "Combined system and current-turn text stays within budget");
+            AssertTrue(
+                combined != null && combined.IndexOf(
+                    "文件正文超过本轮 48,000 字符预算",
+                    StringComparison.Ordinal) >= 0,
+                "Truncated file text includes an explicit marker");
+            AssertTrue(
+                !HasUnpairedSurrogate(combined),
+                "File text truncation preserves Unicode scalar boundaries");
+
+            object[] systemArguments = new object[]
+            {
+                "简短要求",
+                new string('S', 48000),
+                null,
+                null,
+                false
+            };
+            bool systemAccepted = (bool)InvokePrivate(
+                formType,
+                form,
+                "TryBuildCombinedPrompt",
+                systemArguments);
+            AssertTrue(
+                !systemAccepted && Convert.ToString(systemArguments[3])
+                    .IndexOf("系统提示", StringComparison.Ordinal) >= 0,
+                "Oversized skill system prompt is rejected before sending");
+
+            object[] instructionArguments = new object[]
+            {
+                new string('U', 48000),
+                string.Empty,
+                null,
+                null,
+                false
+            };
+            bool instructionAccepted = (bool)InvokePrivate(
+                formType,
+                form,
+                "TryBuildCombinedPrompt",
+                instructionArguments);
+            AssertTrue(
+                !instructionAccepted && Convert.ToString(instructionArguments[3])
+                    .IndexOf("文字描述", StringComparison.Ordinal) >= 0,
+                "Oversized user instruction is rejected before sending");
+
+            inputItems.Clear();
+            object binaryItem = Activator.CreateInstance(inputType, true);
+            inputType.GetProperty("Name").SetValue(
+                binaryItem,
+                "large-image.png",
+                null);
+            inputType.GetProperty("Kind").SetValue(
+                binaryItem,
+                Enum.Parse(kindType, "Image"),
+                null);
+            inputType.GetProperty("BinaryData").SetValue(
+                binaryItem,
+                new byte[64 * 1024],
+                null);
+            inputType.GetProperty("MimeType").SetValue(
+                binaryItem,
+                "image/png",
+                null);
+            inputItems.Add(binaryItem);
+
+            object selection = InvokePrivate(
+                formType,
+                form,
+                "SelectConversationTextContext",
+                CreateHistory(formType.Assembly, 20000),
+                string.Empty,
+                "用户要求：\r\n继续分析\r\n");
+            int selectedMessages = Convert.ToInt32(selection.GetType()
+                .GetProperty("SelectedMessageCount")
+                .GetValue(selection, null));
+            AssertTrue(
+                selectedMessages == 2,
+                "Binary Base64 size does not consume the text-history budget");
+        }
+        finally
+        {
+            inputItems.Clear();
+        }
     }
 
     private static void TestPathInput(
@@ -611,8 +1204,8 @@ internal static class UiStateSmokeTest
             "readPathButton") as Button;
         AssertTrue(pathInput != null && pathInput.Multiline,
             "Path input accepts multiple lines");
-        AssertTrue(readButton != null && readButton.Text == "读取路径",
-            "Path read action is visible");
+        AssertTrue(readButton != null && readButton.Text == "添加",
+            "Path add action exists in the dedicated dialog");
 
         MethodInfo parser = formType.GetMethod(
             "ParsePastedPaths",
@@ -949,31 +1542,35 @@ internal static class UiStateSmokeTest
         Type formType,
         object form)
     {
-        Button moreButton = GetField(
+        Form settingsDialog = GetField(
             formType,
             form,
-            "moreButton") as Button;
+            "settingsDialog") as Form;
         AssertTrue(
-            moreButton != null && moreButton.ContextMenuStrip != null,
-            "More menu exists for model profiles");
+            settingsDialog != null,
+            "Settings dialog exists for model profiles");
+        CheckBox settingsShowKey = FindControl<CheckBox>(
+            settingsDialog,
+            "\u663e\u793a Key");
+        TextBox apiKey = settingsDialog.GetType()
+            .GetProperty("ApiKeyTextBox")
+            .GetValue(settingsDialog, null) as TextBox;
+        AssertTrue(settingsShowKey != null && apiKey != null,
+            "Settings API key visibility controls exist");
+        settingsShowKey.Checked = true;
+        AssertTrue(!apiKey.UseSystemPasswordChar,
+            "API key can be revealed for the current settings view");
+        settingsDialog.GetType().GetMethod(
+            "PrepareForOpen",
+            new[] { typeof(string), typeof(string) })
+            .Invoke(settingsDialog, new object[] { string.Empty, string.Empty });
+        AssertTrue(!settingsShowKey.Checked && apiKey.UseSystemPasswordChar,
+            "Reopening settings hides the API key again");
         AssertTrue(
-            ContainsMenuText(moreButton.ContextMenuStrip, "测试模型连接") &&
-                ContainsMenuText(moreButton.ContextMenuStrip, "技能 / MCP...") &&
-                ContainsMenuText(moreButton.ContextMenuStrip, "连接设置..."),
-            "More menu keeps connection and extension actions available");
-        ToolStripItem profilesItem = null;
-        foreach (ToolStripItem item in moreButton.ContextMenuStrip.Items)
-        {
-            if (string.Equals(
-                item.Text,
-                "模型配置...",
-                StringComparison.Ordinal))
-            {
-                profilesItem = item;
-                break;
-            }
-        }
-        AssertTrue(profilesItem != null, "Model profiles menu entry exists");
+            FindControl<Button>(settingsDialog, "测试连接") != null &&
+                FindControl<Button>(settingsDialog, "管理技能与 MCP...") != null &&
+                FindControl<Button>(settingsDialog, "模型配置...") != null,
+            "Settings pages keep model and extension actions available");
 
         Type profileType = application.GetType(
             "FilePromptAIWin7.ModelProfile",
@@ -1029,27 +1626,14 @@ internal static class UiStateSmokeTest
     }
     private static void TestUninstallerEntry(Type formType, object form)
     {
-        Button moreButton = GetField(
+        Form settingsDialog = GetField(
             formType,
             form,
-            "moreButton") as Button;
-        AssertTrue(moreButton != null, "More button exists");
+            "settingsDialog") as Form;
         AssertTrue(
-            moreButton.ContextMenuStrip != null,
-            "More menu exists");
-        ToolStripItem uninstallItem = null;
-        foreach (ToolStripItem item in moreButton.ContextMenuStrip.Items)
-        {
-            if (string.Equals(
-                item.Text,
-                "卸载 FilePrompt AI...",
-                StringComparison.Ordinal))
-            {
-                uninstallItem = item;
-                break;
-            }
-        }
-        AssertTrue(uninstallItem != null, "Uninstall entry exists");
+            settingsDialog != null &&
+                FindControl<Button>(settingsDialog, "卸载程序...") != null,
+            "Settings maintenance page exposes uninstall");
     }
 
     private static T FindControl<T>(
@@ -1415,6 +1999,29 @@ internal static class UiStateSmokeTest
         }
     }
 
+    private static bool ContainsControlText(Control root, string text)
+    {
+        if (root == null)
+        {
+            return false;
+        }
+
+        if (string.Equals(root.Text, text, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        foreach (Control child in root.Controls)
+        {
+            if (ContainsControlText(child, text))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static object GetField(
         Type type,
         object instance,
@@ -1424,6 +2031,97 @@ internal static class UiStateSmokeTest
             name,
             BindingFlags.Instance | BindingFlags.NonPublic)
             .GetValue(instance);
+    }
+
+    private static IList CreateHistory(
+        Assembly application,
+        int charactersPerMessage)
+    {
+        Type messageType = application.GetType(
+            "FilePromptAIWin7.ConversationMessage",
+            true);
+        Type listType = typeof(List<>).MakeGenericType(messageType);
+        IList messages = (IList)Activator.CreateInstance(listType);
+        object user = Activator.CreateInstance(messageType, true);
+        messageType.GetProperty("Role").SetValue(user, "user", null);
+        messageType.GetProperty("Content").SetValue(
+            user,
+            new string('u', charactersPerMessage),
+            null);
+        object assistant = Activator.CreateInstance(messageType, true);
+        messageType.GetProperty("Role").SetValue(
+            assistant,
+            "assistant",
+            null);
+        messageType.GetProperty("Content").SetValue(
+            assistant,
+            new string('a', charactersPerMessage),
+            null);
+        messages.Add(user);
+        messages.Add(assistant);
+        return messages;
+    }
+
+    private static string RepeatText(string value, int count)
+    {
+        StringBuilder result = new StringBuilder(value.Length * count);
+        for (int index = 0; index < count; index++)
+        {
+            result.Append(value);
+        }
+
+        return result.ToString();
+    }
+
+    private static long CountUnicodeCharacters(string value)
+    {
+        long count = 0L;
+        if (string.IsNullOrEmpty(value))
+        {
+            return count;
+        }
+
+        for (int index = 0; index < value.Length; index++)
+        {
+            if (char.IsHighSurrogate(value[index]) &&
+                index + 1 < value.Length &&
+                char.IsLowSurrogate(value[index + 1]))
+            {
+                index++;
+            }
+
+            count++;
+        }
+
+        return count;
+    }
+
+    private static bool HasUnpairedSurrogate(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return false;
+        }
+
+        for (int index = 0; index < value.Length; index++)
+        {
+            if (char.IsHighSurrogate(value[index]))
+            {
+                if (index + 1 >= value.Length ||
+                    !char.IsLowSurrogate(value[index + 1]))
+                {
+                    return true;
+                }
+
+                index++;
+            }
+            else if (char.IsLowSurrogate(value[index]))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void SetField(
@@ -1449,6 +2147,14 @@ internal static class UiStateSmokeTest
             BindingFlags.Instance | BindingFlags.NonPublic |
                 BindingFlags.DeclaredOnly)
             .Invoke(instance, arguments);
+    }
+
+    private static void RaiseKeyDown(Control control, KeyEventArgs arguments)
+    {
+        typeof(Control).GetMethod(
+            "OnKeyDown",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            .Invoke(control, new object[] { arguments });
     }
 
     private static void ConfigureAssemblyResolution(string applicationPath)

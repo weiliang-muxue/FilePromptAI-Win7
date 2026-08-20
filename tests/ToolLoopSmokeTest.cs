@@ -440,6 +440,11 @@ namespace FilePromptAIWin7
             IDictionary<string, object> current =
                 messages[3] as IDictionary<string, object>;
             Assert(current["content"] is IList, "current multimodal content");
+            Assert(
+                request.IndexOf(
+                    "data:image/png;base64,AQID",
+                    StringComparison.Ordinal) >= 0,
+                "first tool request contains binary attachment");
         }
 
         private static void InspectSecondRequest(string request)
@@ -447,10 +452,29 @@ namespace FilePromptAIWin7
             IDictionary<string, object> root = ParseBody(request);
             IList messages = root["messages"] as IList;
             Assert(messages != null && messages.Count == 6, "tool transcript count");
+            IDictionary<string, object> current =
+                messages[3] as IDictionary<string, object>;
             IDictionary<string, object> assistant =
                 messages[4] as IDictionary<string, object>;
             IDictionary<string, object> tool =
                 messages[5] as IDictionary<string, object>;
+            Assert(
+                request.IndexOf(
+                    "data:image/png;base64",
+                    StringComparison.OrdinalIgnoreCase) < 0,
+                "tool follow-up omits binary attachment");
+            Assert(
+                current != null && current["content"] is string,
+                "tool follow-up uses text attachment placeholder");
+            string currentContent = Convert.ToString(current["content"]);
+            Assert(
+                currentContent.IndexOf(
+                    "pasted.png",
+                    StringComparison.Ordinal) >= 0 &&
+                currentContent.IndexOf(
+                    "避免自动重复上传",
+                    StringComparison.Ordinal) >= 0,
+                "tool follow-up preserves attachment description");
             Assert(GetRole(assistant) == "assistant", "assistant tool message");
             Assert(assistant["tool_calls"] is IList, "assistant tool_calls preserved");
             Assert(GetRole(tool) == "tool", "tool result role");

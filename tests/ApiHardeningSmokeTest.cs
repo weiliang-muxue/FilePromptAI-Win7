@@ -22,8 +22,18 @@ internal static class ApiHardeningSmokeTest
             Type requestType = application.GetType(
                 "FilePromptAIWin7.ModelRequest",
                 true);
+            Type itemType = application.GetType(
+                "FilePromptAIWin7.InputItem",
+                true);
 
             TestRedirectIsRejected(clientType, requestType);
+            TestStructuredErrorMessages(clientType, requestType);
+            TestPlainTextErrorIsBounded(clientType, requestType);
+            TestAttachmentErrorGuidance(clientType, requestType, itemType);
+            TestOversizedAttachmentIsRejectedLocally(
+                clientType,
+                requestType,
+                itemType);
             TestBodyCancellation(clientType, 200, "OK");
             TestBodyCancellation(
                 clientType,
@@ -111,6 +121,260 @@ internal static class ApiHardeningSmokeTest
             ((IDisposable)client).Dispose();
             origin.Stop();
             redirectTarget.Stop();
+        }
+    }
+
+    private static void TestStructuredErrorMessages(
+        Type clientType,
+        Type requestType)
+    {
+        AssertHttpErrorContains(
+            clientType,
+            requestType,
+            null,
+            400,
+            "Bad Request",
+            "application/json",
+            "{\"message\":\"root-level-message\"}",
+            "root-level-message",
+            "Root-level message error");
+        AssertHttpErrorContains(
+            clientType,
+            requestType,
+            null,
+            422,
+            "Unprocessable Entity",
+            "application/json",
+            "{\"detail\":\"root-level-detail\"}",
+            "root-level-detail",
+            "Root-level detail error");
+    }
+
+    private static void TestPlainTextErrorIsBounded(
+        Type clientType,
+        Type requestType)
+    {
+        string body = "plain-gateway-error " + new string('x', 5000);
+        Exception failure = SendHttpError(
+            clientType,
+            requestType,
+            null,
+            400,
+            "Bad Request",
+            "text/plain",
+            body);
+        AssertContains(
+            failure == null ? string.Empty : failure.Message,
+            "plain-gateway-error",
+            "Plain-text error detail");
+        AssertContains(
+            failure == null ? string.Empty : failure.Message,
+            "服务端信息过长，已截断",
+            "Plain-text error truncation marker");
+        AssertTrue(
+            failure != null && failure.Message.Length < 2300,
+            "Plain-text error is bounded");
+    }
+
+    private static void TestAttachmentErrorGuidance(
+        Type clientType,
+        Type requestType,
+        Type itemType)
+    {
+        int[] statusCodes = { 400, 415, 422, 413 };
+        foreach (int statusCode in statusCodes)
+        {
+            string serverDetail = "attachment-server-" + statusCode;
+            string body = statusCode == 415
+                ? serverDetail
+                : statusCode == 422
+                    ? "{\"detail\":\"" + serverDetail + "\"}"
+                    : "{\"message\":\"" + serverDetail + "\"}";
+            Exception failure = SendHttpError(
+                clientType,
+                requestType,
+                itemType,
+                statusCode,
+                GetReason(statusCode),
+                statusCode == 415 ? "text/plain" : "application/json",
+                body);
+            string message = failure == null
+                ? string.Empty
+                : failure.Message;
+            AssertContains(
+                message,
+                statusCode == 413 ? "减少附件数量" : "可能不支持",
+                "Attachment HTTP " + statusCode + " guidance");
+            AssertContains(
+                message,
+                serverDetail,
+                "Attachment HTTP " + statusCode + " server detail");
+            AssertContains(
+                message,
+                "small-image.png",
+                "Attachment HTTP " + statusCode + " file name");
+            AssertContains(
+                message,
+                "图片",
+                "Attachment HTTP " + statusCode + " file type");
+            AssertContains(
+                message,
+                "0.0 KB",
+                "Attachment HTTP " + statusCode + " file size");
+        }
+    }
+
+    private static void TestOversizedAttachmentIsRejectedLocally(
+        Type clientType,
+        Type requestType,
+        Type itemType)
+    {
+        object client = Activator.CreateInstance(clientType, true);
+        try
+        {
+            object request = CreateRequest(
+                requestType,
+                "http://127.0.0.1:1/local-preflight");
+            SetBinaryAttachment(
+                requestType,
+                request,
+                itemType,
+                "File",
+                "oversized.pdf",
+                "application/pdf",
+                new byte[25 * 1024 * 1024]);
+            Exception failure = WaitForFailure(
+                InvokeGenerate(
+                    clientType,
+                    client,
+                    request,
+                    CancellationToken.None),
+                TimeSpan.FromSeconds(3));
+            AssertTrue(
+                failure != null &&
+                failure.GetType().FullName ==
+                    "FilePromptAIWin7.ModelCallException",
+                "Oversized attachment returned ModelCallException");
+            AssertContains(
+                failure == null ? string.Empty : failure.Message,
+                "附件编码后预计",
+                "Oversized attachment local guidance");
+            AssertContains(
+                failure == null ? string.Empty : failure.Message,
+                "32 MB",
+                "Oversized attachment limit detail");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+        }
+    }
+
+    private static void AssertHttpErrorContains(
+        Type clientType,
+        Type requestType,
+        Type itemType,
+        int statusCode,
+        string reason,
+        string contentType,
+        string body,
+        string expected,
+        string name)
+    {
+        Exception failure = SendHttpError(
+            clientType,
+            requestType,
+            itemType,
+            statusCode,
+            reason,
+            contentType,
+            body);
+        AssertTrue(
+            failure != null &&
+            failure.GetType().FullName ==
+                "FilePromptAIWin7.ModelCallException",
+            name + " type");
+        AssertContains(
+            failure == null ? string.Empty : failure.Message,
+            expected,
+            name + " detail");
+    }
+
+    private static Exception SendHttpError(
+        Type clientType,
+        Type requestType,
+        Type itemType,
+        int statusCode,
+        string reason,
+        string contentType,
+        string body)
+    {
+        TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        Task server = Task.Factory.StartNew(
+            delegate
+            {
+                HandleResponse(
+                    listener,
+                    statusCode,
+                    reason,
+                    contentType,
+                    body);
+            });
+        object client = Activator.CreateInstance(clientType, true);
+        try
+        {
+            object request = CreateRequest(
+                requestType,
+                "http://127.0.0.1:" + port + "/http-error");
+            if (itemType != null)
+            {
+                SetBinaryAttachment(
+                    requestType,
+                    request,
+                    itemType,
+                    "Image",
+                    "small-image.png",
+                    "image/png",
+                    new byte[] { 1, 2, 3, 4 });
+            }
+
+            Exception failure = WaitForFailure(
+                InvokeGenerate(
+                    clientType,
+                    client,
+                    request,
+                    CancellationToken.None),
+                TimeSpan.FromSeconds(5));
+            if (!server.Wait(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("HTTP error test server timed out.");
+            }
+
+            return failure;
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static string GetReason(int statusCode)
+    {
+        switch (statusCode)
+        {
+            case 400:
+                return "Bad Request";
+            case 413:
+                return "Payload Too Large";
+            case 415:
+                return "Unsupported Media Type";
+            case 422:
+                return "Unprocessable Entity";
+            default:
+                return "Error";
         }
     }
 
@@ -293,6 +557,35 @@ internal static class ApiHardeningSmokeTest
             "authorized hardening prompt",
             null);
         return request;
+    }
+
+    private static void SetBinaryAttachment(
+        Type requestType,
+        object request,
+        Type itemType,
+        string kind,
+        string name,
+        string mimeType,
+        byte[] data)
+    {
+        object item = Activator.CreateInstance(itemType, true);
+        itemType.GetProperty("Name").SetValue(item, name, null);
+        itemType.GetProperty("Kind").SetValue(
+            item,
+            Enum.Parse(itemType.GetProperty("Kind").PropertyType, kind),
+            null);
+        itemType.GetProperty("MimeType").SetValue(
+            item,
+            mimeType,
+            null);
+        itemType.GetProperty("BinaryData").SetValue(item, data, null);
+
+        Array attachments = Array.CreateInstance(itemType, 1);
+        attachments.SetValue(item, 0);
+        requestType.GetProperty("Attachments").SetValue(
+            request,
+            attachments,
+            null);
     }
 
     private static Task InvokeGenerate(

@@ -135,9 +135,11 @@ namespace FilePromptAIWin7
                 "path command directory");
             Directory.CreateDirectory(commandDirectory);
             string wrapper = Path.Combine(commandDirectory, "fake-npx.cmd");
+            string relativeServer = "%~dp0..\\" +
+                Path.GetFileName(serverExecutable);
             File.WriteAllText(
                 wrapper,
-                "@echo off\r\n\"" + serverExecutable + "\" %*\r\n",
+                "@echo off\r\n\"" + relativeServer + "\" %*\r\n",
                 Encoding.ASCII);
 
             McpServerDefinition server = new McpServerDefinition
@@ -185,11 +187,13 @@ namespace FilePromptAIWin7
             string wrapper = Path.Combine(directory, "safe-wrapper.bat");
             string injected = Path.Combine(directory, "injected.txt");
             string started = Path.Combine(directory, "started.txt");
+            string relativeServer = "%~dp0..\\" +
+                Path.GetFileName(serverExecutable);
             File.WriteAllText(
                 wrapper,
                 "@echo off\r\n" +
-                "echo started>\"" + started + "\"\r\n" +
-                "\"" + serverExecutable + "\" %*\r\n",
+                "echo started>\"%~dp0started.txt\"\r\n" +
+                "\"" + relativeServer + "\" %*\r\n",
                 Encoding.ASCII);
             DeleteIfExists(injected);
             DeleteIfExists(started);
