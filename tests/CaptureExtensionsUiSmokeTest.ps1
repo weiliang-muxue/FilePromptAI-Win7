@@ -14,7 +14,7 @@ $compiler = Join-Path $frameworkRoot 'csc.exe'
 $artifactRoot = Join-Path $testRoot 'build-artifacts'
 $hostExecutable = Join-Path $artifactRoot 'ExtensionsDialogHost.exe'
 $outputPath = Join-Path $artifactRoot (
-    'FilePromptAI-ui-v1.14-extensions-' + $Mode.ToLowerInvariant() + '.png'
+    'FilePromptAI-ui-v1.15-extensions-' + $Mode.ToLowerInvariant() + '.png'
 )
 $profileRoot = Join-Path $artifactRoot 'extensions-ui-profile'
 

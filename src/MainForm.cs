@@ -57,6 +57,8 @@ namespace FilePromptAIWin7
         private TextBox modelTextBox;
         private TextBox sessionSearchTextBox;
         private ListBox sessionListBox;
+        private Button currentSessionsButton;
+        private Button archivedSessionsButton;
         private Label sessionTitleLabel;
         private Label connectionStatusLabel;
         private Label contextSummaryLabel;
@@ -106,6 +108,7 @@ namespace FilePromptAIWin7
         private bool isLoadingSession;
         private bool isUpdatingConversationRows;
         private bool followStreamTail;
+        private bool showArchivedSessions;
         private string sendShortcutMode;
         private GroupBox promptGroup;
         private SettingsDialog settingsDialog;
@@ -319,11 +322,12 @@ namespace FilePromptAIWin7
 
             TableLayoutPanel layout = new TableLayoutPanel();
             layout.Dock = DockStyle.Fill;
-            layout.RowCount = 5;
+            layout.RowCount = 6;
             layout.ColumnCount = 1;
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
 
@@ -382,6 +386,37 @@ namespace FilePromptAIWin7
             searchLayout.Controls.Add(sessionSearchTextBox, 1, 0);
             layout.Controls.Add(searchLayout, 0, 2);
 
+            TableLayoutPanel sessionViewLayout = new TableLayoutPanel();
+            sessionViewLayout.Dock = DockStyle.Fill;
+            sessionViewLayout.ColumnCount = 2;
+            sessionViewLayout.RowCount = 1;
+            sessionViewLayout.ColumnStyles.Add(
+                new ColumnStyle(SizeType.Percent, 50F));
+            sessionViewLayout.ColumnStyles.Add(
+                new ColumnStyle(SizeType.Percent, 50F));
+            sessionViewLayout.Margin = new Padding(0, 2, 0, 4);
+
+            currentSessionsButton = CreateButton("当前", 96);
+            currentSessionsButton.Dock = DockStyle.Fill;
+            currentSessionsButton.Margin = new Padding(0, 0, 2, 0);
+            currentSessionsButton.AccessibleName = "查看当前会话";
+            currentSessionsButton.Click += delegate
+            {
+                SetSessionArchiveView(false);
+            };
+            archivedSessionsButton = CreateButton("已归档", 96);
+            archivedSessionsButton.Dock = DockStyle.Fill;
+            archivedSessionsButton.Margin = new Padding(2, 0, 0, 0);
+            archivedSessionsButton.AccessibleName = "查看已归档会话";
+            archivedSessionsButton.Click += delegate
+            {
+                SetSessionArchiveView(true);
+            };
+            sessionViewLayout.Controls.Add(currentSessionsButton, 0, 0);
+            sessionViewLayout.Controls.Add(archivedSessionsButton, 1, 0);
+            layout.Controls.Add(sessionViewLayout, 0, 3);
+            UpdateSessionViewButtons();
+
             sessionListBox = new ListBox();
             sessionListBox.Dock = DockStyle.Fill;
             sessionListBox.BorderStyle = BorderStyle.None;
@@ -391,6 +426,7 @@ namespace FilePromptAIWin7
             sessionListBox.DrawMode = DrawMode.OwnerDrawFixed;
             sessionListBox.ItemHeight = 52;
             sessionListBox.DrawItem += OnSessionDrawItem;
+            sessionListBox.MouseDown += OnSessionListMouseDown;
             sessionListBox.SelectedIndexChanged += OnSessionSelected;
 
             renameSessionButton = CreateButton("重命名", 96);
@@ -400,6 +436,15 @@ namespace FilePromptAIWin7
             deleteSessionButton.Click += OnDeleteSessionClick;
 
             ContextMenuStrip sessionMenu = new ContextMenuStrip();
+            ToolStripMenuItem pinItem =
+                new ToolStripMenuItem("置顶会话");
+            pinItem.Click += OnToggleSessionPinnedClick;
+            ToolStripMenuItem archiveItem =
+                new ToolStripMenuItem("归档会话");
+            archiveItem.Click += OnToggleSessionArchivedClick;
+            ToolStripMenuItem branchItem =
+                new ToolStripMenuItem("从最新回复创建分支");
+            branchItem.Click += OnBranchSessionClick;
             ToolStripMenuItem renameItem =
                 new ToolStripMenuItem("重命名会话...");
             renameItem.Click += OnRenameSessionClick;
@@ -407,17 +452,49 @@ namespace FilePromptAIWin7
                 new ToolStripMenuItem("删除当前会话...");
             deleteItem.ForeColor = UiTheme.Danger;
             deleteItem.Click += OnDeleteSessionClick;
+            sessionMenu.Items.Add(pinItem);
+            sessionMenu.Items.Add(archiveItem);
+            sessionMenu.Items.Add(branchItem);
+            sessionMenu.Items.Add(new ToolStripSeparator());
             sessionMenu.Items.Add(renameItem);
             sessionMenu.Items.Add(deleteItem);
-            sessionMenu.Opening += delegate
+            sessionMenu.Opening += delegate(
+                object sender,
+                System.ComponentModel.CancelEventArgs args)
             {
-                bool hasSession = conversationStore.CurrentSession != null;
-                renameItem.Enabled = hasSession && !IsBusy;
-                deleteItem.Enabled = hasSession &&
-                    conversationStore.Sessions.Count > 1 && !IsBusy;
+                ConversationSession selectedSession =
+                    sessionListBox.SelectedItem as ConversationSession;
+                ConversationSession session =
+                    conversationStore.CurrentSession;
+                bool hasSession = selectedSession != null && session != null &&
+                    string.Equals(
+                        selectedSession.Id,
+                        session.Id,
+                        StringComparison.OrdinalIgnoreCase);
+                if (!hasSession)
+                {
+                    args.Cancel = true;
+                    return;
+                }
+
+                bool writable = hasSession && !IsBusy &&
+                    !conversationStore.IsWriteBlocked;
+                pinItem.Text = hasSession && session.IsPinned
+                    ? "取消置顶"
+                    : "置顶会话";
+                archiveItem.Text = hasSession && session.IsArchived
+                    ? "移回当前会话"
+                    : "归档会话";
+                pinItem.Enabled = writable;
+                archiveItem.Enabled = writable;
+                branchItem.Enabled = writable &&
+                    FindLatestAssistantMessage(session) != null;
+                renameItem.Enabled = writable;
+                deleteItem.Enabled = writable &&
+                    conversationStore.Sessions.Count > 1;
             };
             sessionListBox.ContextMenuStrip = sessionMenu;
-            layout.Controls.Add(sessionListBox, 0, 3);
+            layout.Controls.Add(sessionListBox, 0, 4);
 
             TableLayoutPanel actions = new TableLayoutPanel();
             actions.Dock = DockStyle.Fill;
@@ -430,7 +507,7 @@ namespace FilePromptAIWin7
             settingsButton.AccessibleName = "打开应用设置";
             settingsButton.Click += delegate { ShowSettingsDialog(); };
             actions.Controls.Add(settingsButton, 0, 0);
-            layout.Controls.Add(actions, 0, 4);
+            layout.Controls.Add(actions, 0, 5);
 
             panel.Controls.Add(layout);
             return panel;
@@ -1211,9 +1288,20 @@ namespace FilePromptAIWin7
                 string time = updated.Date == DateTime.Today
                     ? updated.ToString("HH:mm")
                     : updated.ToString("MM-dd");
+                List<string> metadata = new List<string>();
+                if (session.IsPinned)
+                {
+                    metadata.Add("置顶");
+                }
+                if (!string.IsNullOrWhiteSpace(session.SourceSessionId))
+                {
+                    metadata.Add("分支");
+                }
+                metadata.Add(time);
+                metadata.Add(messageCount + " 条消息");
                 TextRenderer.DrawText(
                     args.Graphics,
-                    time + "  ·  " + messageCount + " 条消息",
+                    string.Join("  ·  ", metadata.ToArray()),
                     metaFont,
                     metaBounds,
                     metaColor,
@@ -1340,6 +1428,32 @@ namespace FilePromptAIWin7
             }
         }
 
+        private bool DeleteSessionAndClearDraft(
+            ConversationSession session)
+        {
+            if (session == null)
+            {
+                return false;
+            }
+
+            ConversationSession current = conversationStore.CurrentSession;
+            if (current != null && string.Equals(
+                current.Id,
+                session.Id,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                SaveCurrentDraft();
+            }
+
+            if (!conversationStore.DeleteSession(session.Id))
+            {
+                return false;
+            }
+
+            ClearDraft(session.Id);
+            return true;
+        }
+
         private void EnsureInitialSession()
         {
             if (conversationStore.Sessions.Count == 0)
@@ -1352,11 +1466,132 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            if (conversationStore.CurrentSession == null)
+            ConversationSession current = conversationStore.CurrentSession;
+            ConversationSession visible = conversationStore.Sessions
+                .Where(session => session != null && !session.IsArchived)
+                .OrderByDescending(session => session.IsPinned)
+                .ThenByDescending(session => session.UpdatedAt)
+                .FirstOrDefault();
+            if (current != null && !current.IsArchived)
             {
-                conversationStore.SelectSession(
-                    conversationStore.Sessions[0].Id);
+                return;
             }
+
+            if (visible != null)
+            {
+                conversationStore.SelectSession(visible.Id);
+            }
+            else if (!conversationStore.IsWriteBlocked)
+            {
+                conversationStore.CreateSession("新会话");
+            }
+            else
+            {
+                showArchivedSessions = true;
+                UpdateSessionViewButtons();
+            }
+        }
+
+        private void SetSessionArchiveView(bool archived)
+        {
+            if (IsBusy || showArchivedSessions == archived)
+            {
+                return;
+            }
+
+            SaveCurrentDraft();
+            if (archived && !conversationStore.Sessions.Any(
+                session => session != null && session.IsArchived))
+            {
+                SetStatus("暂无已归档会话");
+                return;
+            }
+
+            bool previousView = showArchivedSessions;
+            string previousSearch = sessionSearchTextBox == null
+                ? string.Empty
+                : sessionSearchTextBox.Text;
+            ClearSessionSearch();
+            showArchivedSessions = archived;
+            UpdateSessionViewButtons();
+            RefreshSessionList();
+
+            ConversationSession current = conversationStore.CurrentSession;
+            if (current != null && current.IsArchived == archived)
+            {
+                return;
+            }
+
+            ConversationSession first = GetVisibleSessions().FirstOrDefault();
+            try
+            {
+                if (first != null && conversationStore.SelectSession(first.Id))
+                {
+                    RefreshSessionList();
+                    LoadCurrentSession();
+                    RestoreCurrentDraft();
+                    SetStatus(archived
+                        ? "正在查看已归档会话"
+                        : "已返回当前会话");
+                }
+                else if (archived)
+                {
+                    SetStatus("暂无已归档会话");
+                }
+            }
+            catch (Exception exception)
+            {
+                showArchivedSessions = previousView;
+                RestoreSessionSearch(previousSearch);
+                UpdateSessionViewButtons();
+                RefreshSessionList();
+                LoadCurrentSession();
+                RestoreCurrentDraft();
+                ShowSessionOperationError("切换会话视图", exception);
+            }
+        }
+
+        private void UpdateSessionViewButtons()
+        {
+            SetSessionViewButtonState(
+                currentSessionsButton,
+                !showArchivedSessions);
+            SetSessionViewButtonState(
+                archivedSessionsButton,
+                showArchivedSessions);
+        }
+
+        private static void SetSessionViewButtonState(
+            Button button,
+            bool selected)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            button.BackColor = selected
+                ? UiTheme.SelectionBackground
+                : UiTheme.ButtonBackground;
+            button.ForeColor = selected
+                ? UiTheme.SelectionText
+                : UiTheme.ButtonText;
+            button.FlatAppearance.BorderColor = selected
+                ? UiTheme.Accent
+                : UiTheme.BorderColor;
+        }
+
+        private IEnumerable<ConversationSession> GetVisibleSessions()
+        {
+            string filter = sessionSearchTextBox == null
+                ? string.Empty
+                : sessionSearchTextBox.Text;
+            return conversationStore.Sessions
+                .Where(session => session != null &&
+                    session.IsArchived == showArchivedSessions &&
+                    SessionMatchesFilter(session, filter))
+                .OrderByDescending(session => session.IsPinned)
+                .ThenByDescending(session => session.UpdatedAt);
         }
 
         private void RefreshSessionList()
@@ -1372,14 +1607,7 @@ namespace FilePromptAIWin7
             try
             {
                 sessionListBox.Items.Clear();
-                string filter = sessionSearchTextBox == null
-                    ? string.Empty
-                    : sessionSearchTextBox.Text;
-                IEnumerable<ConversationSession> visibleSessions =
-                    conversationStore.Sessions
-                        .Where(session => SessionMatchesFilter(session, filter))
-                        .OrderByDescending(session => session.UpdatedAt);
-                foreach (ConversationSession session in visibleSessions)
+                foreach (ConversationSession session in GetVisibleSessions())
                 {
                     sessionListBox.Items.Add(session);
                 }
@@ -2631,14 +2859,242 @@ namespace FilePromptAIWin7
             }
 
             SaveCurrentDraft();
+            showArchivedSessions = false;
+            UpdateSessionViewButtons();
+            ClearSessionSearch();
             ConversationSession session =
                 conversationStore.CreateSession("新会话");
             RefreshSessionList();
-            conversationStore.SelectSession(session.Id);
             LoadCurrentSession();
             RestoreCurrentDraft();
             promptTextBox.Focus();
             SetStatus("已创建新会话");
+        }
+
+        private void OnToggleSessionPinnedClick(object sender, EventArgs args)
+        {
+            if (!CanMutateCurrentSession())
+            {
+                return;
+            }
+
+            ConversationSession session = conversationStore.CurrentSession;
+            bool pinned = !session.IsPinned;
+            try
+            {
+                conversationStore.SetSessionPinned(session.Id, pinned);
+                RefreshSessionList();
+                SetStatus(pinned ? "会话已置顶" : "已取消置顶");
+            }
+            catch (Exception exception)
+            {
+                ShowSessionOperationError("更新置顶状态", exception);
+            }
+        }
+
+        private void OnToggleSessionArchivedClick(
+            object sender,
+            EventArgs args)
+        {
+            if (!CanMutateCurrentSession())
+            {
+                return;
+            }
+
+            SaveCurrentDraft();
+            ConversationSession session = conversationStore.CurrentSession;
+            bool archived = !session.IsArchived;
+            try
+            {
+                conversationStore.SetSessionArchivedAndResolveCurrent(
+                    session.Id,
+                    archived,
+                    "新会话");
+                ClearSessionSearch();
+                showArchivedSessions = false;
+                UpdateSessionViewButtons();
+                RefreshSessionList();
+                LoadCurrentSession();
+                RestoreCurrentDraft();
+                SetStatus(archived
+                    ? "会话已归档，可在“已归档”中查看"
+                    : "会话已移回当前列表");
+            }
+            catch (Exception exception)
+            {
+                UpdateSessionViewButtons();
+                RefreshSessionList();
+                LoadCurrentSession();
+                RestoreCurrentDraft();
+                ShowSessionOperationError(
+                    archived ? "归档会话" : "移回会话",
+                    exception);
+            }
+        }
+
+        private void OnBranchSessionClick(object sender, EventArgs args)
+        {
+            if (!CanMutateCurrentSession())
+            {
+                return;
+            }
+
+            ConversationSession source = conversationStore.CurrentSession;
+            ConversationMessage anchor = FindLatestAssistantMessage(source);
+            if (anchor == null)
+            {
+                SetStatus("当前会话还没有可用于创建分支的模型回复");
+                return;
+            }
+
+            SaveCurrentDraft();
+            try
+            {
+                ConversationSession branch =
+                    conversationStore.CloneSessionFromMessage(
+                        source.Id,
+                        anchor.Id,
+                        BuildBranchTitle(source.Title));
+                if (branch == null)
+                {
+                    SetStatus("未能找到分支起点，会话未改变");
+                    return;
+                }
+
+                showArchivedSessions = false;
+                UpdateSessionViewButtons();
+                ClearSessionSearch();
+                RefreshSessionList();
+                LoadCurrentSession();
+                RestoreCurrentDraft();
+                promptTextBox.Focus();
+                SetStatus("已从最新回复创建分支，原会话保持不变");
+            }
+            catch (Exception exception)
+            {
+                ShowSessionOperationError("创建会话分支", exception);
+            }
+        }
+
+        private bool CanMutateCurrentSession()
+        {
+            if (IsBusy || conversationStore.CurrentSession == null)
+            {
+                return false;
+            }
+
+            if (conversationStore.IsWriteBlocked)
+            {
+                ShowConversationWriteBlocked();
+                return false;
+            }
+
+            return true;
+        }
+
+        private void EnsureVisibleCurrentSession()
+        {
+            ConversationSession current = conversationStore.CurrentSession;
+            if (current != null &&
+                current.IsArchived == showArchivedSessions)
+            {
+                return;
+            }
+
+            ConversationSession first = GetVisibleSessions().FirstOrDefault();
+            if (first != null)
+            {
+                conversationStore.SelectSession(first.Id);
+                return;
+            }
+
+            if (!showArchivedSessions && !conversationStore.IsWriteBlocked)
+            {
+                conversationStore.CreateSession("新会话");
+            }
+        }
+
+        private void ClearSessionSearch()
+        {
+            if (sessionSearchTextBox == null)
+            {
+                return;
+            }
+
+            sessionSearchTextBox.Clear();
+            if (sessionSearchTimer != null)
+            {
+                sessionSearchTimer.Stop();
+            }
+        }
+
+        private void RestoreSessionSearch(string value)
+        {
+            if (sessionSearchTextBox == null)
+            {
+                return;
+            }
+
+            sessionSearchTextBox.Text = value ?? string.Empty;
+            if (sessionSearchTimer != null)
+            {
+                sessionSearchTimer.Stop();
+            }
+        }
+
+        private static ConversationMessage FindLatestAssistantMessage(
+            ConversationSession session)
+        {
+            if (session == null || session.Messages == null)
+            {
+                return null;
+            }
+
+            for (int index = session.Messages.Count - 1; index >= 0; index--)
+            {
+                ConversationMessage message = session.Messages[index];
+                if (message != null && string.Equals(
+                    message.Role,
+                    "assistant",
+                    StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(message.Id))
+                {
+                    return message;
+                }
+            }
+
+            return null;
+        }
+
+        private static string BuildBranchTitle(string sourceTitle)
+        {
+            const string suffix = " · 分支";
+            string title = string.IsNullOrWhiteSpace(sourceTitle)
+                ? "新会话"
+                : sourceTitle.Trim();
+            const int maximumTitleCharacters = 48;
+            if (title.Length + suffix.Length > maximumTitleCharacters)
+            {
+                title = title.Substring(
+                    0,
+                    maximumTitleCharacters - suffix.Length - 1).TrimEnd() +
+                    "…";
+            }
+
+            return title + suffix;
+        }
+
+        private void ShowSessionOperationError(
+            string operation,
+            Exception exception)
+        {
+            MessageBox.Show(
+                this,
+                operation + "失败：" + exception.Message,
+                "会话操作失败",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            SetStatus(operation + "失败，会话保持不变");
         }
 
         private void OnSessionSelected(object sender, EventArgs args)
@@ -2656,17 +3112,47 @@ namespace FilePromptAIWin7
             }
 
             SaveCurrentDraft();
-            if (conversationStore.SelectSession(session.Id))
+            try
             {
+                if (conversationStore.SelectSession(session.Id))
+                {
+                    LoadCurrentSession();
+                    RestoreCurrentDraft();
+                    SetStatus("已切换到：" + session.Title);
+                }
+            }
+            catch (Exception exception)
+            {
+                RefreshSessionList();
                 LoadCurrentSession();
                 RestoreCurrentDraft();
-                SetStatus("已切换到：" + session.Title);
+                ShowSessionOperationError("切换会话", exception);
             }
+        }
+
+        private void OnSessionListMouseDown(
+            object sender,
+            MouseEventArgs args)
+        {
+            if (args == null || args.Button != MouseButtons.Right ||
+                sessionListBox == null)
+            {
+                return;
+            }
+
+            int index = sessionListBox.IndexFromPoint(args.Location);
+            if (index < 0 || index >= sessionListBox.Items.Count)
+            {
+                sessionListBox.ClearSelected();
+                return;
+            }
+
+            sessionListBox.SelectedIndex = index;
         }
 
         private void OnRenameSessionClick(object sender, EventArgs args)
         {
-            if (IsBusy)
+            if (!CanMutateCurrentSession())
             {
                 return;
             }
@@ -2699,7 +3185,7 @@ namespace FilePromptAIWin7
 
         private void OnDeleteSessionClick(object sender, EventArgs args)
         {
-            if (IsBusy)
+            if (!CanMutateCurrentSession())
             {
                 return;
             }
@@ -2721,8 +3207,32 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            ClearDraft(session.Id);
-            conversationStore.DeleteSession(session.Id);
+            try
+            {
+                if (!DeleteSessionAndClearDraft(session))
+                {
+                    SetStatus("会话未能删除，会话和草稿保持不变");
+                    return;
+                }
+            }
+            catch (Exception exception)
+            {
+                RefreshSessionList();
+                LoadCurrentSession();
+                RestoreCurrentDraft();
+                ShowSessionOperationError("删除会话", exception);
+                return;
+            }
+
+            ClearSessionSearch();
+            if (showArchivedSessions && !conversationStore.Sessions.Any(
+                item => item != null && item.IsArchived))
+            {
+                showArchivedSessions = false;
+                UpdateSessionViewButtons();
+            }
+
+            EnsureVisibleCurrentSession();
             RefreshSessionList();
             LoadCurrentSession();
             RestoreCurrentDraft();
@@ -4665,6 +5175,16 @@ namespace FilePromptAIWin7
             if (sessionSearchTextBox != null)
             {
                 sessionSearchTextBox.Enabled = enabled;
+            }
+
+            if (currentSessionsButton != null)
+            {
+                currentSessionsButton.Enabled = enabled;
+            }
+
+            if (archivedSessionsButton != null)
+            {
+                archivedSessionsButton.Enabled = enabled;
             }
 
             if (newSessionButton != null)

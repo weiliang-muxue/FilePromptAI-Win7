@@ -297,6 +297,13 @@ namespace FilePromptAIWin7
 
             lock (syncRoot)
             {
+                if (sessions.Count >
+                    MaximumBackupSessions - imported.Count)
+                {
+                    throw new InvalidOperationException(
+                        "The imported sessions would exceed the conversation store limit.");
+                }
+
                 HashSet<string> ids = new HashSet<string>(
                     StringComparer.OrdinalIgnoreCase);
                 foreach (ConversationSession existing in sessions)
@@ -308,12 +315,32 @@ namespace FilePromptAIWin7
                     }
                 }
 
+                Dictionary<string, string> importedIds =
+                    new Dictionary<string, string>(
+                        StringComparer.OrdinalIgnoreCase);
                 foreach (ConversationSession session in imported)
                 {
                     session.EnsureIdentity();
-                    if (!ids.Add(session.Id))
+                    string originalId = session.Id;
+                    string importedId = originalId;
+                    if (!ids.Add(importedId))
                     {
-                        session.Id = CreateUniqueId(ids);
+                        importedId = CreateUniqueId(ids);
+                    }
+
+                    importedIds.Add(originalId, importedId);
+                    session.Id = importedId;
+                }
+
+                foreach (ConversationSession session in imported)
+                {
+                    string remappedSourceId;
+                    if (!string.IsNullOrWhiteSpace(session.SourceSessionId) &&
+                        importedIds.TryGetValue(
+                            session.SourceSessionId,
+                            out remappedSourceId))
+                    {
+                        session.SourceSessionId = remappedSourceId;
                     }
                 }
 
@@ -548,6 +575,77 @@ namespace FilePromptAIWin7
         public bool SetSessionArchived(string id, bool isArchived)
         {
             return SetSessionState(id, isArchived, false);
+        }
+
+        public bool SetSessionArchivedAndResolveCurrent(
+            string id,
+            bool isArchived,
+            string replacementTitle)
+        {
+            lock (syncRoot)
+            {
+                ConversationSession session = FindSessionUnlocked(id);
+                if (session == null)
+                {
+                    return false;
+                }
+
+                bool previousArchived = session.IsArchived;
+                DateTime previousUpdatedAt = session.UpdatedAt;
+                string previousCurrentSessionId = currentSessionId;
+                ConversationSession createdReplacement = null;
+
+                session.IsArchived = isArchived;
+                session.Touch();
+                if (!isArchived)
+                {
+                    currentSessionId = session.Id;
+                }
+                else if (string.Equals(
+                    currentSessionId,
+                    session.Id,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    ConversationSession replacement = sessions
+                        .Where(candidate =>
+                            candidate != null &&
+                            !candidate.IsArchived &&
+                            !string.Equals(
+                                candidate.Id,
+                                session.Id,
+                                StringComparison.OrdinalIgnoreCase))
+                        .OrderByDescending(candidate => candidate.IsPinned)
+                        .ThenByDescending(candidate => candidate.UpdatedAt)
+                        .FirstOrDefault();
+                    if (replacement == null)
+                    {
+                        createdReplacement = new ConversationSession(
+                            replacementTitle);
+                        sessions.Add(createdReplacement);
+                        replacement = createdReplacement;
+                    }
+
+                    currentSessionId = replacement.Id;
+                }
+
+                try
+                {
+                    SaveUnlocked();
+                    return true;
+                }
+                catch
+                {
+                    if (createdReplacement != null)
+                    {
+                        sessions.Remove(createdReplacement);
+                    }
+
+                    session.IsArchived = previousArchived;
+                    session.UpdatedAt = previousUpdatedAt;
+                    currentSessionId = previousCurrentSessionId;
+                    throw;
+                }
+            }
         }
 
         public bool ReplaceMessageSuffix(
@@ -811,6 +909,8 @@ namespace FilePromptAIWin7
                     "然后重新启动程序。");
             }
 
+            ValidateStoreCapacityUnlocked();
+
             string directory = Path.GetDirectoryName(storagePath);
             if (!string.IsNullOrWhiteSpace(directory) &&
                 !Directory.Exists(directory))
@@ -845,6 +945,26 @@ namespace FilePromptAIWin7
                 document,
                 storagePath,
                 MaximumConversationBytes);
+        }
+
+        private void ValidateStoreCapacityUnlocked()
+        {
+            if (sessions.Count > MaximumBackupSessions)
+            {
+                throw new InvalidOperationException(
+                    "There are too many sessions to save in the conversation store.");
+            }
+
+            foreach (ConversationSession session in sessions)
+            {
+                if (session != null &&
+                    session.Messages != null &&
+                    session.Messages.Count > MaximumMessagesPerSession)
+                {
+                    throw new InvalidOperationException(
+                        "A conversation contains too many messages to save.");
+                }
+            }
         }
 
         private XDocument BuildBackupDocumentUnlocked(out int exportedCount)
@@ -1058,6 +1178,8 @@ namespace FilePromptAIWin7
 
             List<ConversationSession> result =
                 new List<ConversationSession>();
+            HashSet<string> sessionIds = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
             foreach (XElement sessionElement in sessionElements)
             {
                 if (sessionElement.Name != "Session")
@@ -1066,7 +1188,15 @@ namespace FilePromptAIWin7
                         "The conversation backup contains an unknown element.");
                 }
 
-                result.Add(ReadBackupSession(sessionElement));
+                ConversationSession session = ReadBackupSession(
+                    sessionElement);
+                if (!sessionIds.Add(session.Id))
+                {
+                    throw new InvalidDataException(
+                        "The conversation backup contains duplicate session identifiers.");
+                }
+
+                result.Add(session);
             }
 
             return result;

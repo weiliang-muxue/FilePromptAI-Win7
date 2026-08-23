@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
@@ -93,6 +94,8 @@ internal static class UiStateSmokeTest
                 application,
                 formType,
                 form);
+            TestSessionManagement(formType, form);
+            TestDeleteSessionDraftTransaction(formType, form);
             TestExitConfirmationState(formType, form);
             ThrowIfUiThreadException();
             Console.WriteLine("PASS | UI state hardening");
@@ -712,6 +715,545 @@ internal static class UiStateSmokeTest
             cancellation.Dispose();
             messages.Clear();
             InvokePrivate(formType, form, "LoadCurrentSession");
+        }
+    }
+
+    private static void TestSessionManagement(Type formType, object form)
+    {
+        Button currentButton = GetField(
+            formType,
+            form,
+            "currentSessionsButton") as Button;
+        Button archivedButton = GetField(
+            formType,
+            form,
+            "archivedSessionsButton") as Button;
+        Button newButton = GetField(
+            formType,
+            form,
+            "newSessionButton") as Button;
+        TextBox search = GetField(
+            formType,
+            form,
+            "sessionSearchTextBox") as TextBox;
+        ListBox list = GetField(
+            formType,
+            form,
+            "sessionListBox") as ListBox;
+        ContextMenuStrip menu = list == null
+            ? null
+            : list.ContextMenuStrip;
+
+        AssertTrue(
+            currentButton != null && archivedButton != null &&
+                currentButton.Text == "当前" &&
+                archivedButton.Text == "已归档" &&
+                currentButton.AccessibleName == "查看当前会话" &&
+                archivedButton.AccessibleName == "查看已归档会话",
+            "Current and archived session controls exist");
+        AssertTrue(
+            list != null && search != null && newButton != null &&
+                menu != null && menu.Items.Count == 6 &&
+                menu.Items[0] is ToolStripMenuItem &&
+                menu.Items[1] is ToolStripMenuItem &&
+                menu.Items[2] is ToolStripMenuItem &&
+                menu.Items[3] is ToolStripSeparator &&
+                menu.Items[4] is ToolStripMenuItem &&
+                menu.Items[4].Text == "重命名会话..." &&
+                menu.Items[5] is ToolStripMenuItem &&
+                menu.Items[5].Text == "删除当前会话...",
+            "Session list exposes management actions");
+
+        object store = GetField(formType, form, "conversationStore");
+        PropertyInfo sessionsProperty = store.GetType().GetProperty(
+            "Sessions");
+        PropertyInfo currentSessionProperty = store.GetType().GetProperty(
+            "CurrentSession");
+        PropertyInfo currentSessionIdProperty = store.GetType().GetProperty(
+            "CurrentSessionId");
+        IList originalSessions = (IList)sessionsProperty.GetValue(store, null);
+        HashSet<string> originalIds = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (object session in originalSessions)
+        {
+            originalIds.Add(GetSessionId(session));
+        }
+
+        string originalCurrentId = (string)currentSessionIdProperty.GetValue(
+            store,
+            null);
+        bool originalArchiveView = (bool)GetField(
+            formType,
+            form,
+            "showArchivedSessions");
+        string originalSearch = search.Text;
+        string marker = Guid.NewGuid().ToString("N");
+        string activeTitle = "UI active " + marker;
+        string newerTitle = "UI newer " + marker;
+        string pinnedTitle = "UI pinned " + marker;
+        string archivedTitle = "UI archived " + marker;
+        string sourceTitle = "UI source " + marker;
+        object active = null;
+        object newer = null;
+        object pinned = null;
+        object archived = null;
+        object source = null;
+        CancellationTokenSource busyCancellation = null;
+        try
+        {
+            active = InvokePublic(store, "CreateSession", activeTitle);
+            newer = InvokePublic(store, "CreateSession", newerTitle);
+            pinned = InvokePublic(store, "CreateSession", pinnedTitle);
+            archived = InvokePublic(store, "CreateSession", archivedTitle);
+            source = InvokePublic(store, "CreateSession", sourceTitle);
+            InvokePublic(
+                store,
+                "SetSessionPinned",
+                GetSessionId(pinned),
+                true);
+            InvokePublic(
+                store,
+                "SetSessionArchived",
+                GetSessionId(archived),
+                true);
+
+            DateTime baseline = DateTime.UtcNow.AddHours(-2);
+            SetProperty(active, "UpdatedAt", baseline.AddMinutes(1));
+            SetProperty(newer, "UpdatedAt", baseline.AddMinutes(4));
+            SetProperty(pinned, "UpdatedAt", baseline);
+            SetProperty(archived, "UpdatedAt", baseline.AddMinutes(3));
+            SetProperty(source, "UpdatedAt", baseline.AddMinutes(5));
+
+            InvokePrivate(formType, form, "ClearSessionSearch");
+            ((System.Windows.Forms.Timer)GetField(
+                formType,
+                form,
+                "sessionSearchTimer")).Stop();
+            SetField(formType, form, "showArchivedSessions", false);
+            InvokePrivate(formType, form, "UpdateSessionViewButtons");
+            InvokePrivate(formType, form, "RefreshSessionList");
+            AssertTrue(
+                FindSessionIndex(list.Items, GetSessionId(active)) >= 0 &&
+                    FindSessionIndex(list.Items, GetSessionId(newer)) >= 0 &&
+                    FindSessionIndex(list.Items, GetSessionId(source)) >= 0 &&
+                    FindSessionIndex(list.Items, GetSessionId(archived)) < 0,
+                "Current view filters out archived sessions");
+            AssertTrue(
+                FindSessionIndex(list.Items, GetSessionId(pinned)) == 0,
+                "Pinned sessions sort before newer current sessions");
+
+            InvokePrivate(
+                formType,
+                form,
+                "SetSessionArchiveView",
+                true);
+            AssertTrue(
+                (bool)GetField(formType, form, "showArchivedSessions") &&
+                    FindSessionIndex(
+                        list.Items,
+                        GetSessionId(archived)) >= 0 &&
+                    FindSessionIndex(list.Items, GetSessionId(active)) < 0 &&
+                    GetSessionId(list.SelectedItem) == GetSessionId(archived),
+                "Archived view filters and selects an archived session");
+            InvokePrivate(
+                formType,
+                form,
+                "SetSessionArchiveView",
+                false);
+
+            InvokePublic(
+                store,
+                "SelectSession",
+                GetSessionId(active));
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+
+            int rightClickIndex = FindSessionIndex(
+                list.Items,
+                GetSessionId(newer));
+            Rectangle rightClickBounds = list.GetItemRectangle(
+                rightClickIndex);
+            RaiseMouseDown(
+                list,
+                new MouseEventArgs(
+                    MouseButtons.Right,
+                    1,
+                    rightClickBounds.Left + 4,
+                    rightClickBounds.Top + 4,
+                    0));
+            AssertTrue(
+                GetSessionId(list.SelectedItem) == GetSessionId(newer) &&
+                    GetSessionId(
+                        currentSessionProperty.GetValue(store, null)) ==
+                        GetSessionId(newer),
+                "Right-click selects its session before opening the menu");
+            InvokePrivate(
+                formType,
+                form,
+                "OnToggleSessionPinnedClick",
+                menu,
+                EventArgs.Empty);
+            AssertTrue(
+                (bool)GetProperty(newer, "IsPinned") &&
+                    !(bool)GetProperty(active, "IsPinned"),
+                "Session menu action targets the right-clicked row");
+            InvokePrivate(
+                formType,
+                form,
+                "OnToggleSessionPinnedClick",
+                menu,
+                EventArgs.Empty);
+            InvokePublic(
+                store,
+                "SelectSession",
+                GetSessionId(active));
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+
+            RaiseMenuOpening(menu);
+            ToolStripMenuItem pinItem = menu.Items[0] as ToolStripMenuItem;
+            ToolStripMenuItem archiveItem =
+                menu.Items[1] as ToolStripMenuItem;
+            ToolStripMenuItem branchItem =
+                menu.Items[2] as ToolStripMenuItem;
+            AssertTrue(
+                pinItem.Text == "置顶会话" &&
+                    archiveItem.Text == "归档会话" &&
+                    branchItem.Text == "从最新回复创建分支" &&
+                    !branchItem.Enabled,
+                "Session menu labels an unpinned active session and disables branching without a reply");
+
+            InvokePrivate(
+                formType,
+                form,
+                "OnToggleSessionPinnedClick",
+                menu,
+                EventArgs.Empty);
+            RaiseMenuOpening(menu);
+            AssertTrue(
+                (bool)GetProperty(active, "IsPinned") &&
+                    pinItem.Text == "取消置顶" &&
+                    FindSessionIndex(list.Items, GetSessionId(active)) == 0,
+                "Pin action updates its label and moves the session first");
+            InvokePrivate(
+                formType,
+                form,
+                "OnToggleSessionPinnedClick",
+                menu,
+                EventArgs.Empty);
+            AssertTrue(
+                !(bool)GetProperty(active, "IsPinned") &&
+                    FindSessionIndex(list.Items, GetSessionId(pinned)) == 0,
+                "Unpin action restores pinned-first ordering");
+
+            InvokePrivate(
+                formType,
+                form,
+                "OnToggleSessionArchivedClick",
+                menu,
+                EventArgs.Empty);
+            object selectedAfterArchive = currentSessionProperty.GetValue(
+                store,
+                null);
+            AssertTrue(
+                (bool)GetProperty(active, "IsArchived") &&
+                    GetSessionId(selectedAfterArchive) !=
+                        GetSessionId(active) &&
+                    FindSessionIndex(list.Items, GetSessionId(active)) < 0 &&
+                    GetSessionId(list.SelectedItem) ==
+                        GetSessionId(selectedAfterArchive),
+                "Archiving the selected session chooses another current session");
+
+            InvokePrivate(
+                formType,
+                form,
+                "SetSessionArchiveView",
+                true);
+            AssertTrue(
+                GetSessionId(currentSessionProperty.GetValue(store, null)) ==
+                    GetSessionId(active) &&
+                    GetSessionId(list.SelectedItem) == GetSessionId(active),
+                "Archived view selects the newly archived session");
+            RaiseMenuOpening(menu);
+            AssertTrue(
+                archiveItem.Text == "移回当前会话",
+                "Archived session menu offers to move the session back");
+            InvokePrivate(
+                formType,
+                form,
+                "OnToggleSessionArchivedClick",
+                menu,
+                EventArgs.Empty);
+            AssertTrue(
+                !(bool)GetProperty(active, "IsArchived") &&
+                    !(bool)GetField(
+                        formType,
+                        form,
+                        "showArchivedSessions") &&
+                    GetSessionId(currentSessionProperty.GetValue(store, null)) ==
+                        GetSessionId(active) &&
+                    GetSessionId(list.SelectedItem) == GetSessionId(active),
+                "Unarchiving keeps the session selected in the current view");
+
+            IList sourceMessages = (IList)GetProperty(source, "Messages");
+            Type messageType = formType.Assembly.GetType(
+                "FilePromptAIWin7.ConversationMessage",
+                true);
+            object userMessage = Activator.CreateInstance(
+                messageType,
+                new object[] { "user", "branch source question" });
+            object assistantMessage = Activator.CreateInstance(
+                messageType,
+                new object[] { "assistant", "branch source answer" });
+            SetProperty(
+                assistantMessage,
+                "ParentMessageId",
+                (string)GetProperty(userMessage, "Id"));
+            object trailingMessage = Activator.CreateInstance(
+                messageType,
+                new object[] { "user", "trailing question" });
+            SetProperty(
+                trailingMessage,
+                "ParentMessageId",
+                (string)GetProperty(assistantMessage, "Id"));
+            sourceMessages.Add(userMessage);
+            sourceMessages.Add(assistantMessage);
+            sourceMessages.Add(trailingMessage);
+            InvokePublic(
+                store,
+                "SelectSession",
+                GetSessionId(source));
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            RaiseMenuOpening(menu);
+            AssertTrue(
+                branchItem.Enabled,
+                "Branch action is enabled when an assistant reply exists");
+
+            int sessionCountBeforeBranch =
+                ((IList)sessionsProperty.GetValue(store, null)).Count;
+            string sourceId = GetSessionId(source);
+            string assistantId = (string)GetProperty(
+                assistantMessage,
+                "Id");
+            InvokePrivate(
+                formType,
+                form,
+                "OnBranchSessionClick",
+                menu,
+                EventArgs.Empty);
+            object branch = currentSessionProperty.GetValue(store, null);
+            IList branchMessages = (IList)GetProperty(branch, "Messages");
+            AssertTrue(
+                ((IList)sessionsProperty.GetValue(store, null)).Count ==
+                    sessionCountBeforeBranch + 1 &&
+                    GetSessionId(branch) != sourceId &&
+                    (string)GetProperty(branch, "SourceSessionId") == sourceId &&
+                    (string)GetProperty(branch, "SourceMessageId") ==
+                        assistantId &&
+                    branchMessages.Count == 2 &&
+                    sourceMessages.Count == 3 &&
+                    GetSessionId(list.SelectedItem) == GetSessionId(branch),
+                "Branching from the latest assistant keeps the source and selects the branch");
+
+            busyCancellation = new CancellationTokenSource();
+            SetField(
+                formType,
+                form,
+                "generationCancellation",
+                busyCancellation);
+            InvokePrivate(
+                formType,
+                form,
+                "SetSessionNavigationEnabled",
+                false);
+            RaiseMenuOpening(menu);
+            AssertTrue(
+                !list.Enabled && !search.Enabled &&
+                    !currentButton.Enabled && !archivedButton.Enabled &&
+                    !newButton.Enabled && !pinItem.Enabled &&
+                    !archiveItem.Enabled && !branchItem.Enabled,
+                "Busy state disables session navigation and mutations");
+            SetField(formType, form, "generationCancellation", null);
+            InvokePrivate(
+                formType,
+                form,
+                "SetSessionNavigationEnabled",
+                true);
+            busyCancellation.Dispose();
+            busyCancellation = null;
+            AssertTrue(
+                list.Enabled && search.Enabled && currentButton.Enabled &&
+                    archivedButton.Enabled && newButton.Enabled,
+                "Session navigation is restored after generation finishes");
+        }
+        finally
+        {
+            if (busyCancellation != null)
+            {
+                SetField(formType, form, "generationCancellation", null);
+                InvokePrivate(
+                    formType,
+                    form,
+                    "SetSessionNavigationEnabled",
+                    true);
+                busyCancellation.Dispose();
+            }
+
+            IList sessions = (IList)sessionsProperty.GetValue(store, null);
+            List<string> temporaryIds = new List<string>();
+            foreach (object session in sessions)
+            {
+                string id = GetSessionId(session);
+                if (!originalIds.Contains(id))
+                {
+                    temporaryIds.Add(id);
+                }
+            }
+
+            foreach (string id in temporaryIds)
+            {
+                InvokePublic(store, "DeleteSession", id);
+            }
+
+            if (!string.IsNullOrEmpty(originalCurrentId))
+            {
+                InvokePublic(store, "SelectSession", originalCurrentId);
+            }
+
+            SetField(
+                formType,
+                form,
+                "showArchivedSessions",
+                originalArchiveView);
+            System.Windows.Forms.Timer searchTimer =
+                (System.Windows.Forms.Timer)GetField(
+                formType,
+                form,
+                "sessionSearchTimer");
+            searchTimer.Stop();
+            search.Text = originalSearch;
+            searchTimer.Stop();
+            InvokePrivate(formType, form, "UpdateSessionViewButtons");
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            InvokePrivate(formType, form, "RestoreCurrentDraft");
+        }
+    }
+
+    private static void TestDeleteSessionDraftTransaction(
+        Type formType,
+        object form)
+    {
+        object store = GetField(formType, form, "conversationStore");
+        PropertyInfo currentSessionIdProperty = store.GetType().GetProperty(
+            "CurrentSessionId");
+        MethodInfo getSessionMethod = store.GetType().GetMethod(
+            "GetSession");
+        RichTextBox prompt = GetField(
+            formType,
+            form,
+            "promptTextBox") as RichTextBox;
+        IDictionary drafts = (IDictionary)GetField(
+            formType,
+            form,
+            "sessionDrafts");
+        string storagePath = (string)store.GetType().GetField(
+            "storagePath",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(store);
+        string originalCurrentId = (string)currentSessionIdProperty.GetValue(
+            store,
+            null);
+        string originalPrompt = prompt.Text;
+        object session = null;
+        string sessionId = string.Empty;
+        const string draftText = "draft survives failed delete";
+        try
+        {
+            session = InvokePublic(
+                store,
+                "CreateSession",
+                "UI delete draft " + Guid.NewGuid().ToString("N"));
+            sessionId = GetSessionId(session);
+            InvokePublic(store, "SelectSession", sessionId);
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            prompt.Text = draftText;
+            AssertTrue(
+                !drafts.Contains(sessionId),
+                "Delete transaction starts with an uncached visible draft");
+
+            Exception failure = null;
+            using (FileStream locked = new FileStream(
+                storagePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read))
+            {
+                try
+                {
+                    InvokePrivate(
+                        formType,
+                        form,
+                        "DeleteSessionAndClearDraft",
+                        session);
+                }
+                catch (TargetInvocationException exception)
+                {
+                    failure = exception.InnerException;
+                }
+            }
+
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            InvokePrivate(formType, form, "RestoreCurrentDraft");
+            AssertTrue(
+                failure is IOException &&
+                    getSessionMethod.Invoke(
+                        store,
+                        new object[] { sessionId }) != null &&
+                    drafts.Contains(sessionId) &&
+                    prompt.Text == draftText,
+                "Failed session delete preserves the session and visible draft");
+
+            bool deleted = (bool)InvokePrivate(
+                formType,
+                form,
+                "DeleteSessionAndClearDraft",
+                session);
+            AssertTrue(
+                deleted &&
+                    getSessionMethod.Invoke(
+                        store,
+                        new object[] { sessionId }) == null &&
+                    !drafts.Contains(sessionId),
+                "Successful session delete removes the session and its draft");
+            session = null;
+        }
+        finally
+        {
+            prompt.Text = originalPrompt;
+            if (session != null &&
+                getSessionMethod.Invoke(
+                    store,
+                    new object[] { sessionId }) != null)
+            {
+                drafts.Remove(sessionId);
+                InvokePublic(store, "DeleteSession", sessionId);
+            }
+
+            if (!string.IsNullOrEmpty(originalCurrentId) &&
+                getSessionMethod.Invoke(
+                    store,
+                    new object[] { originalCurrentId }) != null)
+            {
+                InvokePublic(store, "SelectSession", originalCurrentId);
+            }
+
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            InvokePrivate(formType, form, "RestoreCurrentDraft");
         }
     }
 
@@ -1482,6 +2024,7 @@ internal static class UiStateSmokeTest
             formType,
             form,
             "extensionsButton") as Button;
+        Application.DoEvents();
         AssertTrue(extensionsButton != null, "Extensions button exists");
         AssertTrue(extensionsButton.Enabled, "Extensions button enabled when idle");
 
@@ -2033,6 +2576,68 @@ internal static class UiStateSmokeTest
             .GetValue(instance);
     }
 
+    private static object GetProperty(object instance, string name)
+    {
+        return instance.GetType().GetProperty(name).GetValue(instance, null);
+    }
+
+    private static void SetProperty(
+        object instance,
+        string name,
+        object value)
+    {
+        instance.GetType().GetProperty(name).SetValue(instance, value, null);
+    }
+
+    private static object InvokePublic(
+        object instance,
+        string name,
+        params object[] arguments)
+    {
+        return instance.GetType().InvokeMember(
+            name,
+            BindingFlags.InvokeMethod | BindingFlags.Instance |
+                BindingFlags.Public,
+            null,
+            instance,
+            arguments);
+    }
+
+    private static string GetSessionId(object session)
+    {
+        return session == null
+            ? string.Empty
+            : (string)GetProperty(session, "Id");
+    }
+
+    private static int FindSessionIndex(
+        ListBox.ObjectCollection sessions,
+        string id)
+    {
+        for (int index = 0; index < sessions.Count; index++)
+        {
+            if (string.Equals(
+                GetSessionId(sessions[index]),
+                id,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static void RaiseMenuOpening(ContextMenuStrip menu)
+    {
+        typeof(ToolStripDropDown).GetMethod(
+            "OnOpening",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            .Invoke(
+                menu,
+                new object[] { new CancelEventArgs() });
+    }
+
     private static IList CreateHistory(
         Assembly application,
         int charactersPerMessage)
@@ -2153,6 +2758,16 @@ internal static class UiStateSmokeTest
     {
         typeof(Control).GetMethod(
             "OnKeyDown",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            .Invoke(control, new object[] { arguments });
+    }
+
+    private static void RaiseMouseDown(
+        Control control,
+        MouseEventArgs arguments)
+    {
+        typeof(Control).GetMethod(
+            "OnMouseDown",
             BindingFlags.Instance | BindingFlags.NonPublic)
             .Invoke(control, new object[] { arguments });
     }

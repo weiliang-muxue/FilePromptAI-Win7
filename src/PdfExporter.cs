@@ -7,6 +7,8 @@ using System.Drawing.Text;
 using MigraDoc.DocumentObjectModel;
 using MigraDoc.DocumentObjectModel.Tables;
 using MigraDoc.Rendering;
+using PdfSharp.Drawing;
+using PdfSharp.Pdf;
 
 namespace FilePromptAIWin7
 {
@@ -303,15 +305,20 @@ namespace FilePromptAIWin7
                     bodyFont = FindInstalledFont(new[]
                     {
                         "Microsoft YaHei",
+                        "Microsoft YaHei UI",
                         "SimSun",
                         "Arial Unicode MS",
                         "Noto Sans CJK SC",
+                        "Noto Sans SC",
                         "DengXian",
                         "Microsoft JhengHei",
+                        "Microsoft JhengHei UI",
                         "MingLiU",
                         "MS Gothic",
                         "Meiryo",
-                        "Malgun Gothic"
+                        "Malgun Gothic",
+                        "Yu Gothic",
+                        "SimSun-ExtB"
                     });
                 }
 
@@ -351,7 +358,8 @@ namespace FilePromptAIWin7
 
                 foreach (string candidate in candidates)
                 {
-                    if (installed.Contains(candidate))
+                    if (installed.Contains(candidate) &&
+                        CanEmbedFont(candidate))
                     {
                         return candidate;
                     }
@@ -359,8 +367,43 @@ namespace FilePromptAIWin7
             }
 
             throw new InvalidOperationException(
-                "未找到可嵌入的中文字体。请在 Windows 中安装 Microsoft YaHei、SimSun 或 Arial Unicode MS 后重试。\r\n" +
-                "No embeddable CJK font was found. Install Microsoft YaHei, SimSun, or Arial Unicode MS.");
+                "未找到 PDFsharp 可嵌入的中文字体。请在 Windows 中安装 Microsoft YaHei、SimSun 或 Noto Sans SC 后重试。\r\n" +
+                "No PDFsharp-compatible CJK font was found. Install Microsoft YaHei, SimSun, or Noto Sans SC.");
+        }
+
+        private static bool CanEmbedFont(string familyName)
+        {
+            try
+            {
+                XPdfFontOptions options = new XPdfFontOptions(
+                    PdfFontEncoding.Unicode);
+                XFontStyle[] styles =
+                {
+                    XFontStyle.Regular,
+                    XFontStyle.Bold,
+                    XFontStyle.Italic
+                };
+                foreach (XFontStyle style in styles)
+                {
+                    // GDI can enumerate fonts whose cmap tables cannot
+                    // be parsed by the PDFsharp 1.50 version used on Win7.
+                    new XFont(familyName, 10, style, options);
+                }
+
+                return true;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+            catch (NotSupportedException)
+            {
+                return false;
+            }
         }
 
         private static bool ContainsNonAscii(string value)

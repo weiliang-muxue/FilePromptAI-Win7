@@ -278,6 +278,8 @@ internal static class ExportSmokeTest
         string markdown =
             "# PDF export\n\n" +
             "A paragraph with Unicode \u4E2D\u6587 and a table.\n\n" +
+            "> An italic quote with Unicode \u5F15\u7528.\n\n" +
+            "```\nConsole.WriteLine(\"PDF code font\");\n```\n\n" +
             "| Name | Value |\n| --- | --- |\n| one | two |";
         byte[] content = PdfExporter.Create(markdown);
         AssertTrue(content.Length > 500, "PDF has content");

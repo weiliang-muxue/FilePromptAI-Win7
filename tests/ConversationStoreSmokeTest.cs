@@ -69,6 +69,8 @@ internal static class ConversationStoreSmokeTest
 
             TestMessageGuardsAndNormalization(path, reloaded);
             TestAtomicTurnRollback(path, reloaded);
+            TestSessionStatePersistence(path, reloaded);
+            TestSessionBranching(path, reloaded);
             TestSessionLifecycle(path, reloaded);
             TestCreateRollback(path);
             TestUnpreservedDamageBlocksWrites(path);
@@ -323,6 +325,259 @@ internal static class ConversationStoreSmokeTest
         {
             throw new InvalidDataException(
                 "Session deletion did not survive reload.");
+        }
+    }
+
+    private static void TestSessionStatePersistence(
+        string path,
+        ConversationStore store)
+    {
+        ConversationSession session = store.CurrentSession;
+        if (session == null ||
+            !store.SetSessionPinned(session.Id, true) ||
+            !store.SetSessionArchived(session.Id, true) ||
+            !session.IsPinned ||
+            !session.IsArchived)
+        {
+            throw new InvalidDataException(
+                "Session pin or archive state was not updated.");
+        }
+
+        if (store.SetSessionPinned("missing-session", true) ||
+            store.SetSessionArchived("missing-session", true) ||
+            store.Sessions.Count != 1 ||
+            store.CurrentSessionId != session.Id)
+        {
+            throw new InvalidDataException(
+                "A missing-session state change modified the store.");
+        }
+
+        DateTime pinnedUpdatedAt = session.UpdatedAt;
+        using (FileStream locked = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read))
+        {
+            ExpectIOException(delegate
+            {
+                store.SetSessionPinned(session.Id, false);
+            });
+            if (!session.IsPinned || session.UpdatedAt != pinnedUpdatedAt)
+            {
+                throw new InvalidDataException(
+                    "A failed pin change did not roll back memory state.");
+            }
+
+            ExpectIOException(delegate
+            {
+                store.SetSessionArchived(session.Id, false);
+            });
+            if (!session.IsArchived || session.UpdatedAt != pinnedUpdatedAt)
+            {
+                throw new InvalidDataException(
+                    "A failed archive change did not roll back memory state.");
+            }
+        }
+
+        ConversationStore enabled = new ConversationStore(path);
+        ConversationSession enabledSession = enabled.GetSession(session.Id);
+        if (enabledSession == null ||
+            !enabledSession.IsPinned ||
+            !enabledSession.IsArchived)
+        {
+            throw new InvalidDataException(
+                "Session pin or archive state did not survive reload.");
+        }
+
+        if (!store.SetSessionPinned(session.Id, false) ||
+            !store.SetSessionArchived(session.Id, false))
+        {
+            throw new InvalidOperationException(
+                "Session pin or archive state was not cleared.");
+        }
+
+        ConversationStore cleared = new ConversationStore(path);
+        ConversationSession clearedSession = cleared.GetSession(session.Id);
+        if (clearedSession == null ||
+            clearedSession.IsPinned ||
+            clearedSession.IsArchived)
+        {
+            throw new InvalidDataException(
+                "Cleared session state did not survive reload.");
+        }
+    }
+
+    private static void TestSessionBranching(
+        string path,
+        ConversationStore store)
+    {
+        ConversationSession source = store.CurrentSession;
+        ConversationMessage parent = source.Messages[
+            source.Messages.Count - 1];
+        ConversationMessage branchPoint = new ConversationMessage(
+            "assistant",
+            "branch boundary",
+            DateTime.UtcNow.AddMinutes(-1),
+            null,
+            parent.Id,
+            2);
+        if (!store.AddMessage(source.Id, branchPoint))
+        {
+            throw new InvalidOperationException(
+                "Branch boundary message was not added.");
+        }
+
+        int sessionCount = store.Sessions.Count;
+        string currentSessionId = store.CurrentSessionId;
+        if (store.CloneSessionFromMessage(
+                "missing-session",
+                source.Messages[0].Id,
+                "unused") != null ||
+            store.CloneSessionFromMessage(
+                source.Id,
+                "missing-message",
+                "unused") != null ||
+            store.CloneSessionFromMessage(source.Id, null, "unused") != null ||
+            store.Sessions.Count != sessionCount ||
+            store.CurrentSessionId != currentSessionId)
+        {
+            throw new InvalidDataException(
+                "An invalid branch request changed the conversation store.");
+        }
+
+        using (FileStream locked = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read))
+        {
+            ExpectIOException(delegate
+            {
+                store.CloneSessionFromMessage(
+                    source.Id,
+                    source.Messages[0].Id,
+                    "must rollback");
+            });
+        }
+
+        if (store.Sessions.Count != sessionCount ||
+            store.CurrentSessionId != currentSessionId)
+        {
+            throw new InvalidDataException(
+                "A failed branch save did not roll back memory state.");
+        }
+
+        ConversationStore unchanged = new ConversationStore(path);
+        if (unchanged.Sessions.Count != sessionCount ||
+            unchanged.CurrentSessionId != currentSessionId)
+        {
+            throw new InvalidDataException(
+                "A failed branch save modified the on-disk state.");
+        }
+
+        TestBranchBoundary(
+            path,
+            store,
+            source,
+            0,
+            "   ",
+            source.Title);
+        TestBranchBoundary(
+            path,
+            store,
+            source,
+            source.Messages.Count - 1,
+            " last branch ",
+            "last branch");
+    }
+
+    private static void TestBranchBoundary(
+        string path,
+        ConversationStore store,
+        ConversationSession source,
+        int messageIndex,
+        string requestedTitle,
+        string expectedTitle)
+    {
+        int previousSessionCount = store.Sessions.Count;
+        int sourceMessageCount = source.Messages.Count;
+        ConversationMessage anchor = source.Messages[messageIndex];
+        ConversationSession branch = store.CloneSessionFromMessage(
+            source.Id,
+            anchor.Id,
+            requestedTitle);
+        if (branch == null ||
+            branch.Id == source.Id ||
+            branch.Title != expectedTitle ||
+            branch.SourceSessionId != source.Id ||
+            branch.SourceMessageId != anchor.Id ||
+            branch.Messages.Count != messageIndex + 1 ||
+            branch.IsPinned ||
+            branch.IsArchived ||
+            store.Sessions.Count != previousSessionCount + 1 ||
+            store.CurrentSessionId != branch.Id ||
+            source.Messages.Count != sourceMessageCount)
+        {
+            throw new InvalidDataException(
+                "Session branching did not preserve the expected boundary.");
+        }
+
+        AssertMessagePrefix(source, branch, messageIndex);
+
+        ConversationStore reloaded = new ConversationStore(path);
+        ConversationSession restoredBranch = reloaded.GetSession(branch.Id);
+        if (restoredBranch == null ||
+            reloaded.CurrentSessionId != branch.Id ||
+            restoredBranch.Title != expectedTitle ||
+            restoredBranch.SourceSessionId != source.Id ||
+            restoredBranch.SourceMessageId != anchor.Id ||
+            restoredBranch.Messages.Count != messageIndex + 1)
+        {
+            throw new InvalidDataException(
+                "Session branch metadata did not survive reload.");
+        }
+
+        AssertMessagePrefix(source, restoredBranch, messageIndex);
+        if (!store.DeleteSession(branch.Id) ||
+            store.Sessions.Count != previousSessionCount ||
+            store.CurrentSessionId != source.Id ||
+            store.GetSession(branch.Id) != null)
+        {
+            throw new InvalidDataException(
+                "Branch cleanup did not restore the source session.");
+        }
+
+        ConversationStore cleaned = new ConversationStore(path);
+        if (cleaned.Sessions.Count != previousSessionCount ||
+            cleaned.CurrentSessionId != source.Id ||
+            cleaned.GetSession(branch.Id) != null)
+        {
+            throw new InvalidDataException(
+                "Branch cleanup did not survive reload.");
+        }
+    }
+
+    private static void AssertMessagePrefix(
+        ConversationSession source,
+        ConversationSession branch,
+        int lastMessageIndex)
+    {
+        for (int index = 0; index <= lastMessageIndex; index++)
+        {
+            ConversationMessage expected = source.Messages[index];
+            ConversationMessage actual = branch.Messages[index];
+            if (object.ReferenceEquals(expected, actual) ||
+                expected.Id != actual.Id ||
+                expected.ParentMessageId != actual.ParentMessageId ||
+                expected.VariantIndex != actual.VariantIndex ||
+                expected.Role != actual.Role ||
+                expected.Content != actual.Content ||
+                expected.CreatedAt != actual.CreatedAt)
+            {
+                throw new InvalidDataException(
+                    "A branched message was not copied exactly.");
+            }
         }
     }
 
