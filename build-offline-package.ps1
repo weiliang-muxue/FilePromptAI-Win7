@@ -19,6 +19,7 @@ $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appBuildScript = Join-Path $projectRoot 'build.ps1'
 $appDistribution = Join-Path $projectRoot 'dist'
 $libraryRoot = Join-Path $projectRoot 'lib'
+$libraryChecksumPath = Join-Path $projectRoot 'LIBRARIES-SHA256.txt'
 $bootstrapperRoot = Join-Path $projectRoot 'bootstrapper'
 $uninstallerRoot = Join-Path $projectRoot 'uninstaller'
 $appIcon = Join-Path $projectRoot 'assets\FilePromptAI.ico'
@@ -90,6 +91,7 @@ function Copy-RequiredFile {
 
 Assert-FileExists -Path $appBuildScript -Description 'application build script'
 Assert-FileExists -Path $appIcon -Description 'application icon'
+Assert-FileExists -Path $libraryChecksumPath -Description 'approved library checksum manifest'
 Assert-FileExists -Path (Join-Path $uninstallerRoot 'Program.cs') -Description 'uninstaller source'
 Assert-FileExists -Path (Join-Path $uninstallerRoot 'AssemblyInfo.cs') -Description 'uninstaller assembly metadata'
 Assert-FileExists -Path (Join-Path $uninstallerRoot 'uninstaller.manifest') -Description 'uninstaller manifest'
@@ -156,6 +158,10 @@ Copy-RequiredFile `
     -Source (Join-Path $projectRoot 'THIRD-PARTY-NOTICES.txt') `
     -Destination $releaseAppRoot `
     -Description 'third-party notices'
+Copy-RequiredFile `
+    -Source $libraryChecksumPath `
+    -Destination $releaseAppRoot `
+    -Description 'approved library checksum manifest'
 
 $compilerArguments = @(
     '/nologo',

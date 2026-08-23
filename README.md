@@ -202,7 +202,8 @@ XLS/XLSX 和图片处理所需的 33 个托管 DLL；安装和启动不会联网
 
 ## 构建
 
-在 PowerShell 中运行：
+源码构建、打包和测试使用构建机上的 Windows PowerShell 5.1；这是构建工具要求，
+解压后的客户端运行不依赖 PowerShell。在 PowerShell 5.1 中运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build.ps1
@@ -221,7 +222,8 @@ powershell -ExecutionPolicy Bypass -File .\build-offline-package.ps1
 前必须另行准备项目锁定的 `packages` 包缓存和经过核验的 .NET Framework 4.8
 `redist` 安装程序；构建脚本不会联网还原或下载这些文件。
 打包脚本只使用项目内已存在的 `packages` 与 `redist` 文件，不会联网还原或下载。
-它会重建依赖、核对 33 个应用 DLL、验证 .NET 4.8 安装包的固定 SHA-256 与
+它会重建依赖、按仓库 `LIBRARIES-SHA256.txt` 核对 33 个应用 DLL 的固定 SHA-256、
+验证 .NET 4.8 安装包的固定 SHA-256 与
 Microsoft Authenticode 签名，并生成 `PACKAGE-CHECKSUMS-SHA256.txt`。仅准备和
 检查发布目录而不生成 ZIP 时，可加 `-StageOnly`。
 
@@ -238,4 +240,5 @@ powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1
 `tests\CaptureUiSmokeTest.ps1 -FullHd100`，脚本会校验屏幕尺寸和 96 DPI，
 并按完整工作区生成固定验收截图。设置、技能和 MCP 窗口分别使用
 `tests\CaptureExtensionsUiSmokeTest.ps1 -Mode Settings`、`-Mode Skills` 和
-`-Mode Mcp` 留存截图。
+`-Mode Mcp` 留存截图；发布验收时三条命令均加 `-FullHd100`，脚本同样会拒绝
+非 1920×1080 或非 96 DPI 的环境。

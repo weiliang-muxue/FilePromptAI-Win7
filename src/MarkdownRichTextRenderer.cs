@@ -193,7 +193,7 @@ namespace FilePromptAIWin7
                 {
                     if (index > 0)
                     {
-                        context.Target.AppendText("\r\n\r\n");
+                        context.Target.AppendText("\r\n");
                         ResetParagraph(context);
                         ApplyRunFormat(
                             context,
@@ -202,6 +202,7 @@ namespace FilePromptAIWin7
                             false,
                             context.Palette.Text,
                             context.Palette.Background);
+                        context.Target.AppendText("\r\n");
                     }
 
                     AppendBlock(context, blocks[index]);

@@ -4,9 +4,33 @@ Set-StrictMode -Version 2.0
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $packageRoot = Join-Path $projectRoot 'packages'
 $libraryRoot = Join-Path $projectRoot 'lib'
+$libraryChecksumPath = Join-Path $projectRoot 'LIBRARIES-SHA256.txt'
+
+function Get-Sha256 {
+    param([string]$Path)
+
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $algorithm = New-Object Security.Cryptography.SHA256CryptoServiceProvider
+        try {
+            return [BitConverter]::ToString(
+                $algorithm.ComputeHash($stream)
+            ).Replace('-', '')
+        }
+        finally {
+            $algorithm.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
 
 if (-not (Test-Path -LiteralPath $packageRoot -PathType Container)) {
     throw 'The local packages directory is missing. This script never downloads dependencies; restore the checked package set on a connected build computer first.'
+}
+if (-not (Test-Path -LiteralPath $libraryChecksumPath -PathType Leaf)) {
+    throw "The approved library checksum manifest is missing: $libraryChecksumPath"
 }
 
 $frameworkFolders = @(
@@ -68,6 +92,29 @@ $expectedLibraryFiles = @(
     'PdfSharp.Charting-gdi.dll'
 )
 
+$approvedHashes = @{}
+foreach ($line in Get-Content -LiteralPath $libraryChecksumPath -Encoding UTF8) {
+    if ($line -notmatch '^([0-9A-F]{64}) \*([^\\/]+\.dll)$') {
+        throw "Invalid approved library checksum line: $line"
+    }
+
+    $name = $Matches[2]
+    if ($approvedHashes.ContainsKey($name)) {
+        throw "Duplicate approved library checksum entry: $name"
+    }
+
+    $approvedHashes[$name] = $Matches[1]
+}
+
+$approvedDifferences = @(
+    Compare-Object `
+        -ReferenceObject @($expectedLibraryFiles | Sort-Object) `
+        -DifferenceObject @($approvedHashes.Keys | Sort-Object)
+)
+if ($approvedDifferences.Count -gt 0) {
+    throw 'The approved library checksum manifest does not match the expected DLL set.'
+}
+
 $copyPlan = @()
 foreach ($relativeFolder in $frameworkFolders) {
     $sourceFolder = Join-Path $packageRoot $relativeFolder
@@ -101,6 +148,16 @@ if ($libraryDifferences.Count -gt 0) {
     throw "The local package DLL set does not match the approved offline dependency set: $($details -join ', ')"
 }
 
+foreach ($sourceFile in $copyPlan) {
+    $actualHash = Get-Sha256 -Path $sourceFile.FullName
+    if (-not [string]::Equals(
+        $actualHash,
+        $approvedHashes[$sourceFile.Name],
+        [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The local package DLL failed its approved SHA-256 check: $($sourceFile.FullName)"
+    }
+}
+
 if (-not (Test-Path -LiteralPath $libraryRoot -PathType Container)) {
     New-Item -ItemType Directory -Path $libraryRoot | Out-Null
 }
@@ -127,4 +184,15 @@ if ($preparedDifferences.Count -gt 0) {
     throw 'The prepared library directory failed its final file-list verification.'
 }
 
-Write-Host "Prepared and verified $($preparedLibraryFiles.Count) local libraries in: $libraryRoot"
+foreach ($name in $preparedLibraryFiles) {
+    $preparedPath = Join-Path $libraryRoot $name
+    $actualHash = Get-Sha256 -Path $preparedPath
+    if (-not [string]::Equals(
+        $actualHash,
+        $approvedHashes[$name],
+        [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The prepared library failed its approved SHA-256 check: $preparedPath"
+    }
+}
+
+Write-Host "Prepared and SHA-256 verified $($preparedLibraryFiles.Count) local libraries in: $libraryRoot"

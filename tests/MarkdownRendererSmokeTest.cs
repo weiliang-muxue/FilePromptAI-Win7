@@ -70,6 +70,15 @@ internal static class MarkdownRendererSmokeTest
                 AssertMonospace(output, "Console.WriteLine(value);", "code block format");
                 AssertBold(output, "\u540D\u79F0", "table header format");
                 AssertBullet(output, "\u65E0\u5E8F\u9879\u4E00", "unordered list format");
+                AssertBullet(output, "\u65E0\u5E8F\u9879\u4E8C", "second unordered list format");
+                AssertBulletParagraphCount(
+                    output,
+                    2,
+                    "unordered list has no empty trailing bullet");
+                AssertNotBullet(
+                    output,
+                    "\u540D\u79F0",
+                    "table after unordered list");
                 AssertIndent(output, "Console.WriteLine(value);", 12, "code block indent");
                 AssertIndent(output, "\u8FD9\u662F\u4E00\u6BB5\u4E2D\u6587\u5F15\u7528", 18, "quote indent");
 
@@ -116,6 +125,44 @@ internal static class MarkdownRendererSmokeTest
     {
         SelectText(output, value, name);
         AssertTrue(output.SelectionBullet, name + " uses native bullet formatting");
+    }
+
+    private static void AssertNotBullet(
+        RichTextBox output,
+        string value,
+        string name)
+    {
+        SelectText(output, value, name);
+        AssertTrue(!output.SelectionBullet, name + " is not a bullet paragraph");
+    }
+
+    private static void AssertBulletParagraphCount(
+        RichTextBox output,
+        int expected,
+        string name)
+    {
+        int count = 0;
+        int paragraphStart = 0;
+        while (paragraphStart <= output.TextLength)
+        {
+            output.Select(paragraphStart, 0);
+            if (output.SelectionBullet)
+            {
+                count++;
+            }
+
+            int newline = output.Text.IndexOf(
+                '\n',
+                paragraphStart);
+            if (newline < 0)
+            {
+                break;
+            }
+
+            paragraphStart = newline + 1;
+        }
+
+        AssertEqual(expected, count, name);
     }
 
     private static void AssertIndent(

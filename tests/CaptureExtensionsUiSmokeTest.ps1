@@ -1,6 +1,7 @@
 param(
     [ValidateSet('Skills', 'Mcp', 'Settings')]
-    [string]$Mode = 'Skills'
+    [string]$Mode = 'Skills',
+    [switch]$FullHd100
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,10 +14,23 @@ $frameworkRoot = 'C:\Windows\Microsoft.NET\Framework\v4.0.30319'
 $compiler = Join-Path $frameworkRoot 'csc.exe'
 $artifactRoot = Join-Path $testRoot 'build-artifacts'
 $hostExecutable = Join-Path $artifactRoot 'ExtensionsDialogHost.exe'
+$fullHdProbe = Join-Path $testRoot 'AssertFullHd100.ps1'
+$sizeSuffix = if ($FullHd100) { '-fullhd100' } else { '' }
 $outputPath = Join-Path $artifactRoot (
-    'FilePromptAI-ui-v1.16-extensions-' + $Mode.ToLowerInvariant() + '.png'
+    'FilePromptAI-ui-v1.16-extensions-' + $Mode.ToLowerInvariant() +
+        $sizeSuffix + '.png'
 )
 $profileRoot = Join-Path $artifactRoot 'extensions-ui-profile'
+
+if ($FullHd100) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $fullHdProbe
+    if ($LASTEXITCODE -ne 0) {
+        throw "FullHd100 display verification failed with exit code $LASTEXITCODE."
+    }
+}
+
+Add-Type -AssemblyName System.Windows.Forms
+$primaryScreen = [Windows.Forms.Screen]::PrimaryScreen
 
 New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $profileRoot -Force | Out-Null
@@ -64,6 +78,7 @@ public static class ExtensionsCaptureNative
         IntPtr handle,
         IntPtr deviceContext,
         uint flags);
+
 }
 '@
 
@@ -128,7 +143,7 @@ try {
         $bitmap.Dispose()
     }
 
-    Write-Host "PASS | dialog ui capture | mode=$Mode | ${width}x${height} | $outputPath"
+    Write-Host "PASS | dialog ui capture | mode=$Mode | ${width}x${height} | fullhd100=$FullHd100 | screen=$($primaryScreen.Bounds.Width)x$($primaryScreen.Bounds.Height) | working=$($primaryScreen.WorkingArea.Width)x$($primaryScreen.WorkingArea.Height) | $outputPath"
 }
 finally {
     if (-not $process.HasExited) {

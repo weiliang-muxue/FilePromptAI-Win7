@@ -123,7 +123,10 @@ Windows 7 基础要求
 
 仅克隆源码仓库不会得到被忽略的 packages、lib 和 redist 本地缓存。离线重建前
 必须另行准备项目锁定的 packages 包缓存和经过核验的 .NET Framework 4.8 redist
-安装程序；构建脚本不会联网还原或下载这些文件。
+安装程序；构建脚本不会联网还原或下载这些文件，并会按仓库
+LIBRARIES-SHA256.txt 核对 33 个托管 DLL 的固定 SHA-256。
+源码构建、打包和测试需要构建机安装 Windows PowerShell 5.1；这是构建工具要求，
+解压后的客户端运行不依赖 PowerShell。
 
 随包运行环境
 ------------

@@ -12,6 +12,7 @@ Set-StrictMode -Version 2.0
 $projectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $application = Join-Path $projectRoot 'dist\FilePromptAI.exe'
 $artifactRoot = Join-Path $projectRoot 'tests\build-artifacts'
+$fullHdProbe = Join-Path $projectRoot 'tests\AssertFullHd100.ps1'
 $profileRoot = Join-Path $artifactRoot ('ui-profile-' + $Mode.ToLowerInvariant())
 $applicationData = Join-Path $profileRoot 'FilePromptAI-Win7'
 $sizeSuffix = if ($FullHd100) {
@@ -35,17 +36,15 @@ if ($FullHd100 -and ($MinimumWindow -or $Physical125)) {
     throw '-FullHd100 cannot be combined with -MinimumWindow or -Physical125.'
 }
 
+if ($FullHd100) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $fullHdProbe
+    if ($LASTEXITCODE -ne 0) {
+        throw "FullHd100 display verification failed with exit code $LASTEXITCODE."
+    }
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 $primaryScreen = [Windows.Forms.Screen]::PrimaryScreen
-if ($FullHd100 -and (
-    $primaryScreen.Bounds.Width -ne 1920 -or
-    $primaryScreen.Bounds.Height -ne 1080
-)) {
-    throw (
-        '-FullHd100 requires a 1920x1080 primary display; actual bounds are ' +
-        $primaryScreen.Bounds.Width + 'x' + $primaryScreen.Bounds.Height + '.'
-    )
-}
 
 if (Test-Path -LiteralPath $profileRoot) {
     Remove-Item -LiteralPath $profileRoot -Recurse -Force
@@ -150,9 +149,6 @@ public static class FilePromptAICaptureNative
 
     [DllImport("user32.dll")]
     public static extern bool PrintWindow(IntPtr handle, IntPtr deviceContext, uint flags);
-
-    [DllImport("user32.dll", EntryPoint = "GetDpiForWindow")]
-    public static extern uint GetDpiForWindow(IntPtr handle);
 
     [DllImport("user32.dll")]
     public static extern bool EnumChildWindows(
@@ -337,24 +333,10 @@ try {
         $bitmap.Dispose()
     }
 
-    $dpi = 0
-    try {
-        $dpi = [FilePromptAICaptureNative]::GetDpiForWindow(
-            $process.MainWindowHandle
-        )
-    }
-    catch [EntryPointNotFoundException] {
-        $dpi = 96
-    }
-
-    if ($FullHd100 -and $dpi -ne 96) {
-        throw "-FullHd100 requires 100% scaling (96 DPI); actual DPI is $dpi."
-    }
-
     $listView = [FilePromptAICaptureNative]::DescribeListView(
         $process.MainWindowHandle
     )
-    Write-Host "PASS | ui capture | mode=$Mode | ${width}x${height} | dpi=$dpi | screen=$($primaryScreen.Bounds.Width)x$($primaryScreen.Bounds.Height) | working=$($primaryScreen.WorkingArea.Width)x$($primaryScreen.WorkingArea.Height) | list=$listView | $outputPath | physical125=$physicalPath"
+    Write-Host "PASS | ui capture | mode=$Mode | ${width}x${height} | fullhd100=$FullHd100 | screen=$($primaryScreen.Bounds.Width)x$($primaryScreen.Bounds.Height) | working=$($primaryScreen.WorkingArea.Width)x$($primaryScreen.WorkingArea.Height) | list=$listView | $outputPath | physical125=$physicalPath"
 }
 finally {
     if (-not $process.HasExited) {

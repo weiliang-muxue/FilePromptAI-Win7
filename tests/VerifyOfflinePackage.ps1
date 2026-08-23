@@ -10,15 +10,89 @@ $projectRoot = Split-Path -Parent $testRoot
 $stagingRoot = Join-Path $projectRoot "FilePromptAI-offline-release-v$Version"
 $archivePath = Join-Path $projectRoot "FilePromptAI-Win7-Full-v$Version.zip"
 $archiveChecksumPath = "$archivePath.sha256.txt"
+$approvedLibraryChecksumPath = Join-Path $projectRoot 'LIBRARIES-SHA256.txt'
 
 if (-not (Test-Path -LiteralPath $stagingRoot -PathType Container)) {
     throw "Missing staging directory: $stagingRoot"
+}
+$stagingItem = Get-Item -LiteralPath $stagingRoot -Force
+if (($stagingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "The staging directory must not be a reparse point: $stagingRoot"
+}
+$stagingReparsePoints = @(
+    Get-ChildItem -LiteralPath $stagingRoot -Force -Recurse |
+        Where-Object {
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        }
+)
+if ($stagingReparsePoints.Count -gt 0) {
+    throw "The staging directory contains a reparse point: $($stagingReparsePoints[0].FullName)"
 }
 if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
     throw "Missing archive: $archivePath"
 }
 if (-not (Test-Path -LiteralPath $archiveChecksumPath -PathType Leaf)) {
     throw "Missing archive checksum: $archiveChecksumPath"
+}
+if (-not (Test-Path -LiteralPath $approvedLibraryChecksumPath -PathType Leaf)) {
+    throw "Missing approved library checksum manifest: $approvedLibraryChecksumPath"
+}
+
+$stagedLibraryChecksumPath = Join-Path `
+    $stagingRoot `
+    'app\LIBRARIES-SHA256.txt'
+if (-not (Test-Path -LiteralPath $stagedLibraryChecksumPath -PathType Leaf)) {
+    throw "Missing staged library checksum manifest: $stagedLibraryChecksumPath"
+}
+$approvedManifestHash = (Get-FileHash `
+    -LiteralPath $approvedLibraryChecksumPath `
+    -Algorithm SHA256).Hash
+$stagedManifestHash = (Get-FileHash `
+    -LiteralPath $stagedLibraryChecksumPath `
+    -Algorithm SHA256).Hash
+if ($approvedManifestHash -ne $stagedManifestHash) {
+    throw 'The staged library checksum manifest does not match the repository manifest.'
+}
+
+$approvedLibraries = @{}
+foreach ($line in Get-Content `
+    -LiteralPath $approvedLibraryChecksumPath `
+    -Encoding UTF8) {
+    if ($line -notmatch '^([0-9A-F]{64}) \*([^\\/]+\.dll)$') {
+        throw "Invalid approved library checksum line: $line"
+    }
+    if ($approvedLibraries.ContainsKey($Matches[2])) {
+        throw "Duplicate approved library checksum entry: $($Matches[2])"
+    }
+    $approvedLibraries[$Matches[2]] = $Matches[1]
+}
+if ($approvedLibraries.Count -ne 33) {
+    throw "Expected 33 approved libraries, found $($approvedLibraries.Count)."
+}
+
+$stagedLibraryNames = @(
+    Get-ChildItem -LiteralPath (Join-Path $stagingRoot 'app') `
+        -Filter '*.dll' `
+        -File |
+        ForEach-Object { $_.Name } |
+        Sort-Object
+)
+$libraryDifferences = @(
+    Compare-Object `
+        -ReferenceObject @($approvedLibraries.Keys | Sort-Object) `
+        -DifferenceObject $stagedLibraryNames `
+        -CaseSensitive
+)
+if ($libraryDifferences.Count -gt 0) {
+    throw 'The staged DLL set does not match the approved library checksum manifest.'
+}
+foreach ($name in $stagedLibraryNames) {
+    $actualHash = (Get-FileHash `
+        -LiteralPath (Join-Path $stagingRoot "app\$name") `
+        -Algorithm SHA256).Hash
+    if ($actualHash -ne $approvedLibraries[$name]) {
+        throw "The staged library failed its approved SHA-256 check: $name"
+    }
 }
 
 $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
@@ -30,25 +104,89 @@ if ($archiveHash -ne $recordedArchiveHash) {
 }
 
 $payloadChecksumPath = Join-Path $stagingRoot 'PACKAGE-CHECKSUMS-SHA256.txt'
+if (-not (Test-Path -LiteralPath $payloadChecksumPath -PathType Leaf)) {
+    throw "Missing payload checksum manifest: $payloadChecksumPath"
+}
+
 $checksumFailures = New-Object Collections.Generic.List[string]
-$checksumEntries = 0
+$payloadRoot = [IO.Path]::GetFullPath($stagingRoot).TrimEnd('\') + '\'
+$checksumEntries = @{}
 foreach ($line in Get-Content -LiteralPath $payloadChecksumPath -Encoding UTF8) {
     if ($line -notmatch '^([0-9A-F]{64}) \*(.+)$') {
         $checksumFailures.Add("invalid line: $line")
         continue
     }
 
-    $checksumEntries++
-    $payloadPath = Join-Path $stagingRoot $Matches[2]
+    $expectedHash = $Matches[1]
+    $relativePath = $Matches[2]
+    $segments = $relativePath.Split('\')
+    if ([IO.Path]::IsPathRooted($relativePath) -or
+        $relativePath.Contains(':') -or
+        $relativePath.Contains('/') -or
+        $segments -contains '' -or
+        $segments -contains '.' -or
+        $segments -contains '..') {
+        $checksumFailures.Add("unsafe path: $relativePath")
+        continue
+    }
+
+    if ($checksumEntries.ContainsKey($relativePath)) {
+        $checksumFailures.Add("duplicate: $relativePath")
+        continue
+    }
+
+    $payloadPath = [IO.Path]::GetFullPath((Join-Path $stagingRoot $relativePath))
+    if (-not $payloadPath.StartsWith(
+        $payloadRoot,
+        [StringComparison]::OrdinalIgnoreCase)) {
+        $checksumFailures.Add("outside staging: $relativePath")
+        continue
+    }
+
+    $canonicalRelativePath = $payloadPath.Substring($payloadRoot.Length)
+    if (-not [string]::Equals(
+        $canonicalRelativePath,
+        $relativePath,
+        [StringComparison]::Ordinal)) {
+        $checksumFailures.Add("non-canonical path: $relativePath")
+        continue
+    }
+
+    $checksumEntries[$relativePath] = $expectedHash
     if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
-        $checksumFailures.Add("missing: $($Matches[2])")
+        $checksumFailures.Add("missing: $relativePath")
         continue
     }
 
     $actual = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash
-    if ($actual -ne $Matches[1]) {
-        $checksumFailures.Add("hash: $($Matches[2])")
+    if ($actual -ne $expectedHash) {
+        $checksumFailures.Add("hash: $relativePath")
     }
+}
+
+$stagedPayloadFiles = @(
+    Get-ChildItem -LiteralPath $stagingRoot -File -Recurse |
+        Where-Object {
+            -not [string]::Equals(
+                $_.FullName,
+                $payloadChecksumPath,
+                [StringComparison]::OrdinalIgnoreCase)
+        } |
+        ForEach-Object {
+            $_.FullName.Substring($payloadRoot.Length)
+        } |
+        Sort-Object
+)
+$checksumDifferences = @(
+    Compare-Object `
+        -ReferenceObject $stagedPayloadFiles `
+        -DifferenceObject @($checksumEntries.Keys | Sort-Object) `
+        -CaseSensitive
+)
+if ($checksumDifferences.Count -gt 0) {
+    $details = $checksumDifferences |
+        ForEach-Object { "$($_.InputObject) [$($_.SideIndicator)]" }
+    $checksumFailures.Add("file set: $($details -join ', ')")
 }
 if ($checksumFailures.Count -ne 0) {
     throw "Payload checksum failures: $($checksumFailures -join ', ')"
@@ -166,4 +304,4 @@ if ($uninstallerCheck.ExitCode -ne 0) {
     throw "Uninstaller safety check failed with exit code $($uninstallerCheck.ExitCode)."
 }
 
-Write-Host "PASS | offline package | version=$Version | files=$($entryNames.Count) | checksums=$checksumEntries | sha256=$archiveHash"
+Write-Host "PASS | offline package | version=$Version | files=$($entryNames.Count) | checksums=$($checksumEntries.Count) | sha256=$archiveHash"
