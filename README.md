@@ -4,19 +4,21 @@
 
 ## 当前发布
 
-当前版本为 **v1.15**。这是仓库和离线安装包的唯一维护版本；界面采用左侧会话导航、
+当前版本为 **v1.16**。这是仓库和离线安装包的唯一维护版本；界面采用左侧会话导航、
 右侧会话记录和底部消息编辑器布局；模型、技能/MCP、会话和维护选项
 统一收进左侧“设置”窗口，不占用主工作区。
 附件列表直接收进底部消息编辑器：通过“+ 添加”选择文件、粘贴内容或打开路径窗口，
 有资料时才展开；发送新消息时只追加和更新本轮内容，不再清空并重画已有历史。
 左侧会话支持置顶、当前/已归档视图，并可从最新模型回复创建独立分支；分支复制
 此前上下文，原会话保持不变。
-打包脚本会在项目根目录生成 `FilePromptAI-Win7-Full-v1.15.zip` 及其 SHA-256
+打包脚本会在项目根目录生成 `FilePromptAI-Win7-Full-v1.16.zip` 及其 SHA-256
 校验文件；源码和构建脚本均保留在仓库中，便于内网环境审计、重建和离线分发。
 
 ## 当前功能
 
 - 配置完整请求 URL、API Key、模型名称。
+- 对标准 OpenAI 兼容 URL 可主动读取同源 `/models` 列表并选择模型；模型框仍可编辑，
+  服务未提供列表接口时继续支持手动输入。
 - 可在左侧“设置”→“模型连接”→“模型配置...”保存多个内网模型预设，随时选择应用或删除；预设中的 API Key 使用 Windows DPAPI 加密。
 - 可从剪贴板安装本地技能；技能是离线保存的 system 指令，可独立启用或停用。
 - 支持本地 stdio 和 Streamable HTTP 两种 MCP；可粘贴标准 `mcpServers` JSON、
@@ -36,6 +38,9 @@
 - 文本资料正文会随会话历史保留；图片和无文本内联文件只发送当前轮，后续轮次
   若需再次查看请主动重新添加，程序不会偷偷从本地路径重读。
 - 支持流式输出、停止、复制结果和保存为 Markdown/文本文件。
+- 可对最新模型回复原位重新生成，用新结果替换原回复，避免在会话中堆叠重复问答；
+  请求失败后可从失败位置快速重试。
+- 可在主工作区快速切换已保存的模型配置，无需先打开设置窗口。
 - 会话历史固定在右侧上方并占据主要空间；新回复只更新当前问答，过期流式分片会
   被丢弃，不会再次追加到已经完成的回复后面。
 - 窗口缩放和最小尺寸下专用拖放入口保持句柄稳定，对话记录和输入框仍然可见；
@@ -160,21 +165,29 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 
 ## 系统要求
 
-- Windows 7 SP1、Windows 8/10/11。
-- .NET Framework 4.8。
-- Windows 7 需要启用 TLS 1.2，并安装可用的系统根证书更新。
+- Windows 7 必须安装 Service Pack 1；也支持 Windows 8/10/11。
+- 程序需要 .NET Framework 4.8，完整离线包已经附带微软官方完整离线安装程序。
+- 长期未更新或经过精简的 Windows 7 可能还要先安装微软 SHA-2 代码签名支持、
+  最新服务堆栈以及提供 `D3DCompiler_47.dll` 的系统更新；这些 Windows 补丁不在
+  应用离线包内。
+- 访问 HTTPS 模型或 HTTP MCP 地址时，Windows 需要支持 TLS 1.2，并信任服务端
+  证书使用的根证书；单位内部 CA 证书需由管理员预先导入系统证书库。
+- 中文 PDF 导出需要系统已安装 PDFsharp 可嵌入的 CJK 字体，例如 Microsoft YaHei、
+  SimSun 或 Noto Sans SC。精简系统若删除了这些字体，需要由管理员离线补装。
 
 ## Windows 7 离线完整版
 
-优先使用 `FilePromptAI-Win7-Full-v1.15.zip`。完整解压后运行
+优先使用 `FilePromptAI-Win7-Full-v1.16.zip`。完整解压后运行
 `Start-FilePromptAI.exe`，启动器会检测 .NET Framework 4.8；缺少时会调用包内
 经过微软数字签名的官方完整离线安装程序。安装过程不下载文件，也不需要访问
 互联网。不要只复制 `app` 目录中的 EXE。
 
-完整版已经附带 PDF、DOC/DOCX、XLS/XLSX 和图片处理所需的全部托管 DLL，
+运行 ZIP 已包含 .NET Framework 4.8 完整离线安装程序，以及 PDF、DOC/DOCX、
+XLS/XLSX 和图片处理所需的 33 个托管 DLL；安装和启动不会联网下载依赖，
 不需要另装 WebView2、VC++ 运行库、Node.js、Python、Java 或 Microsoft Office。
 实际生成内容时，电脑仍需能够访问用户填写的完整请求 URL；该地址可以是内网
-模型服务，不要求连接公网。
+模型服务，不要求连接公网。用户主动启用的 stdio MCP 及其运行环境不属于客户端
+运行 ZIP，仍需按“离线技能与 MCP”一节由管理员另行准备。
 
 卸载时运行 `Uninstall-FilePromptAI.exe`，或在左侧“设置”→“维护”中选择
 “卸载程序...”。卸载器只删除校验清单内且内容未被修改的程序文件，
@@ -184,11 +197,8 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 正常运行时，程序数据固定保存在当前用户的
 `%LocalAppData%\FilePromptAI-Win7`，不会搜索、读取或迁移其他数据目录。
 
-对于长期未更新或被精简过的 Windows 7，微软的 .NET Framework 4.8 安装程序
-仍可能要求操作系统已具备 SP1、SHA-2 代码签名支持、最新服务堆栈以及
-`D3DCompiler_47.dll`。这些属于 Windows 系统更新，不是应用 DLL，当前完整版
-没有附带。应由内网管理员通过离线补丁源预先安装。HTTPS 请求若使用单位内部
-证书，还需把单位根证书安装到 Windows 证书库。
+对于长期未更新或被精简过的 Windows 7，上述微软系统更新和字体必须由内网管理员
+通过可信离线介质预先安装。应用包不会联网获取系统补丁、证书或字体。
 
 ## 构建
 
@@ -207,6 +217,9 @@ EXE，因为 PDF 与旧版 Office 文件解析器由旁边的 DLL 提供。
 powershell -ExecutionPolicy Bypass -File .\build-offline-package.ps1
 ```
 
+仅克隆源码仓库不会得到被忽略的 `packages`、`lib` 和 `redist` 本地缓存。离线重建
+前必须另行准备项目锁定的 `packages` 包缓存和经过核验的 .NET Framework 4.8
+`redist` 安装程序；构建脚本不会联网还原或下载这些文件。
 打包脚本只使用项目内已存在的 `packages` 与 `redist` 文件，不会联网还原或下载。
 它会重建依赖、核对 33 个应用 DLL、验证 .NET 4.8 安装包的固定 SHA-256 与
 Microsoft Authenticode 签名，并生成 `PACKAGE-CHECKSUMS-SHA256.txt`。仅准备和
@@ -221,4 +234,8 @@ powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1
 ```
 
 界面截图测试单独运行 `tests\CaptureUiSmokeTest.ps1`，支持正常窗口、最小窗口和
-125% 物理尺寸预览。
+125% 物理尺寸预览。发布前在 1920×1080、100% 缩放的主屏上运行
+`tests\CaptureUiSmokeTest.ps1 -FullHd100`，脚本会校验屏幕尺寸和 96 DPI，
+并按完整工作区生成固定验收截图。设置、技能和 MCP 窗口分别使用
+`tests\CaptureExtensionsUiSmokeTest.ps1 -Mode Settings`、`-Mode Skills` 和
+`-Mode Mcp` 留存截图。

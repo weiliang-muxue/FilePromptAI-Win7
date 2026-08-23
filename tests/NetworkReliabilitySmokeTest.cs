@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -11,6 +12,7 @@ using System.Threading.Tasks;
 
 internal static class NetworkReliabilitySmokeTest
 {
+    [STAThread]
     private static int Main(string[] args)
     {
         try
@@ -27,6 +29,12 @@ internal static class NetworkReliabilitySmokeTest
                 "FilePromptAIWin7.InputItem",
                 true);
 
+            TestModelEndpointDerivation(clientType);
+            TestModelDiscoveryProtocol(clientType);
+            TestUnknownModelEndpointIsRejected(clientType);
+            TestModelDiscoveryDoesNotFollowRedirects(clientType);
+            TestNonStandardModelResponsesAreRejected(clientType);
+            TestAvailableModelsPreserveManualSelection(application);
             TestRetriableStatusCodes(clientType, requestType);
             TestAttachmentStatusCodesDoNotRetry(
                 clientType,
@@ -63,6 +71,308 @@ internal static class NetworkReliabilitySmokeTest
             Console.Error.WriteLine(Unwrap(exception));
             return 1;
         }
+    }
+
+    private static void TestModelEndpointDerivation(Type clientType)
+    {
+        MethodInfo buildModelsEndpoint = clientType.GetMethod(
+            "BuildModelsEndpoint",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        if (buildModelsEndpoint == null)
+        {
+            throw new MissingMethodException(
+                clientType.FullName,
+                "BuildModelsEndpoint");
+        }
+
+        string[] inputs =
+        {
+            "https://example.test/tenant/v1/chat/completions?tenant=abc#ignored",
+            "https://example.test/tenant/v1/responses?tenant=abc#ignored",
+            "https://example.test/tenant/v1/completions?tenant=abc#ignored",
+            "https://example.test/tenant/v1/embeddings?tenant=abc#ignored",
+            "https://example.test/tenant/v1/images/generations?tenant=abc#ignored",
+            "https://example.test/tenant/v1/?tenant=abc#ignored",
+            "https://example.test/tenant/v1/models/?tenant=abc#ignored"
+        };
+        foreach (string input in inputs)
+        {
+            Uri actual = (Uri)buildModelsEndpoint.Invoke(
+                null,
+                new object[] { new Uri(input) });
+            AssertEqual(
+                "/tenant/v1/models?tenant=abc",
+                actual.PathAndQuery,
+                "Model endpoint derivation " + new Uri(input).AbsolutePath);
+            AssertEqual(
+                string.Empty,
+                actual.Fragment,
+                "Model endpoint fragment removed " + new Uri(input).AbsolutePath);
+        }
+    }
+
+    private static void TestModelDiscoveryProtocol(Type clientType)
+    {
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        string requestHeaders = null;
+        string overlong = new string('x', 513);
+        string responseBody =
+            "{\"object\":\"list\",\"data\":[" +
+            "{\"id\":\"zeta\"}," +
+            "{\"id\":\" Alpha \"}," +
+            "{\"id\":\"alpha\"}," +
+            "{\"id\":\"zeta\"}," +
+            "{\"id\":\"bad\\u000aidentifier\"}," +
+            "{\"id\":\"" + overlong + "\"}," +
+            "{\"id\":123}," +
+            "{\"name\":\"not-an-id\"}," +
+            "{\"id\":\"Beta\"}]}";
+        Task<int> server = Task.Factory.StartNew(
+            delegate
+            {
+                using (TcpClient connection = listener.AcceptTcpClient())
+                {
+                    requestHeaders = ReadRequestText(connection.GetStream());
+                    SendResponse(
+                        connection.GetStream(),
+                        200,
+                        "OK",
+                        "application/json",
+                        responseBody,
+                        null);
+                }
+
+                return 1;
+            });
+        object client = CreateClient(clientType, 2000, 1000, 1, 0, 2000);
+        try
+        {
+            IList models = FetchModels(
+                clientType,
+                client,
+                "http://127.0.0.1:" + port +
+                    "/tenant/v1/chat/completions?tenant=abc#ignored",
+                "  test-key  ",
+                TimeSpan.FromSeconds(5));
+            AssertEqual(1, Wait(server), "Model discovery request count");
+            AssertEqual(4, models.Count, "Model discovery valid model count");
+            AssertEqual("Alpha", Convert.ToString(models[0]), "Model sort first");
+            AssertEqual("alpha", Convert.ToString(models[1]), "Model sort tie-break");
+            AssertEqual("Beta", Convert.ToString(models[2]), "Model sort middle");
+            AssertEqual("zeta", Convert.ToString(models[3]), "Model sort last");
+            AssertContains(
+                requestHeaders,
+                "GET /tenant/v1/models?tenant=abc HTTP/1.1",
+                "Model discovery path and query");
+            AssertContains(
+                requestHeaders,
+                "Authorization: Bearer test-key",
+                "Model discovery bearer authorization");
+            AssertContains(
+                requestHeaders,
+                "Accept: application/json",
+                "Model discovery accept header");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static void TestUnknownModelEndpointIsRejected(Type clientType)
+    {
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        object client = CreateClient(clientType, 1000, 1000, 1, 0, 1000);
+        try
+        {
+            Exception failure = FetchModelsFailure(
+                clientType,
+                client,
+                "http://127.0.0.1:" + port + "/custom/generate",
+                "test-key",
+                TimeSpan.FromSeconds(2));
+            AssertType(
+                failure,
+                "FilePromptAIWin7.ModelCallException",
+                "Unknown model endpoint failure type");
+            AssertContains(
+                failure.Message,
+                "无法从当前请求 URL 推导",
+                "Unknown model endpoint guidance");
+            Thread.Sleep(100);
+            AssertTrue(
+                !listener.Pending(),
+                "Unknown model endpoint rejected before network access");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static void TestModelDiscoveryDoesNotFollowRedirects(Type clientType)
+    {
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        Task<int> server = Task.Factory.StartNew(
+            delegate
+            {
+                using (TcpClient connection = listener.AcceptTcpClient())
+                {
+                    ReadRequest(connection.GetStream());
+                    SendResponse(
+                        connection.GetStream(),
+                        302,
+                        "Found",
+                        "application/json",
+                        "{\"error\":{\"message\":\"redirected\"}}",
+                        "Location: http://127.0.0.1:" + port +
+                            "/captured/v1/models\r\n");
+                }
+
+                Thread.Sleep(200);
+                return listener.Pending() ? 2 : 1;
+            });
+        object client = CreateClient(clientType, 2000, 1000, 3, 0, 2000);
+        try
+        {
+            Exception failure = FetchModelsFailure(
+                clientType,
+                client,
+                "http://127.0.0.1:" + port + "/v1/chat/completions",
+                "test-key",
+                TimeSpan.FromSeconds(5));
+            AssertType(
+                failure,
+                "FilePromptAIWin7.ModelCallException",
+                "Model redirect failure type");
+            AssertContains(
+                failure.Message,
+                "没有跟随重定向",
+                "Model redirect guidance");
+            AssertEqual(1, Wait(server), "Model redirect request count");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static void TestNonStandardModelResponsesAreRejected(Type clientType)
+    {
+        string[] bodies =
+        {
+            "[{\"id\":\"array-model\"}]",
+            "{\"models\":[{\"id\":\"alternate-model\"}]}",
+            "{\"data\":{\"id\":\"not-an-array\"}}"
+        };
+        foreach (string body in bodies)
+        {
+            TcpListener listener = StartListener();
+            int port = GetPort(listener);
+            Task<int> server = Task.Factory.StartNew(
+                delegate
+                {
+                    using (TcpClient connection = listener.AcceptTcpClient())
+                    {
+                        ReadRequest(connection.GetStream());
+                        SendResponse(
+                            connection.GetStream(),
+                            200,
+                            "OK",
+                            "application/json",
+                            body,
+                            null);
+                    }
+
+                    return 1;
+                });
+            object client = CreateClient(clientType, 2000, 1000, 1, 0, 2000);
+            try
+            {
+                Exception failure = FetchModelsFailure(
+                    clientType,
+                    client,
+                    "http://127.0.0.1:" + port + "/v1/responses",
+                    "test-key",
+                    TimeSpan.FromSeconds(5));
+                AssertType(
+                    failure,
+                    "FilePromptAIWin7.ModelCallException",
+                    "Non-standard model response failure type");
+                AssertContains(
+                    failure.Message,
+                    "没有可用的模型 ID",
+                    "Non-standard model response guidance");
+                AssertEqual(1, Wait(server), "Non-standard model response request count");
+            }
+            finally
+            {
+                ((IDisposable)client).Dispose();
+                listener.Stop();
+            }
+        }
+    }
+
+    private static void TestAvailableModelsPreserveManualSelection(
+        Assembly application)
+    {
+        Type settingsType = application.GetType(
+            "FilePromptAIWin7.SettingsDialog",
+            true);
+        object settings = Activator.CreateInstance(settingsType, true);
+        try
+        {
+            object modelSelector = settingsType.GetProperty("ModelTextBox")
+                .GetValue(settings, null);
+            PropertyInfo textProperty = modelSelector.GetType().GetProperty("Text");
+            textProperty.SetValue(modelSelector, "manual-model", null);
+            SetAvailableModels(
+                settingsType,
+                settings,
+                new[] { "alpha", "beta" });
+            AssertEqual(
+                "manual-model",
+                Convert.ToString(textProperty.GetValue(modelSelector, null)),
+                "Fetched models preserve manual model");
+
+            textProperty.SetValue(modelSelector, string.Empty, null);
+            SetAvailableModels(
+                settingsType,
+                settings,
+                new[] { "alpha", "beta" });
+            AssertEqual(
+                string.Empty,
+                Convert.ToString(textProperty.GetValue(modelSelector, null)),
+                "Fetched models do not auto-select first model");
+        }
+        finally
+        {
+            ((IDisposable)settings).Dispose();
+        }
+    }
+
+    private static void SetAvailableModels(
+        Type settingsType,
+        object settings,
+        IList<string> models)
+    {
+        MethodInfo method = settingsType.GetMethod(
+            "SetAvailableModels",
+            BindingFlags.Instance | BindingFlags.Public);
+        if (method == null)
+        {
+            throw new MissingMethodException(
+                settingsType.FullName,
+                "SetAvailableModels");
+        }
+
+        method.Invoke(settings, new object[] { models });
     }
 
     private static void TestRetriableStatusCodes(
@@ -1207,6 +1517,76 @@ internal static class NetworkReliabilitySmokeTest
         return failure;
     }
 
+    private static IList FetchModels(
+        Type clientType,
+        object client,
+        string endpoint,
+        string apiKey,
+        TimeSpan timeout)
+    {
+        Task task = InvokeFetchModels(
+            clientType,
+            client,
+            endpoint,
+            apiKey);
+        if (!task.Wait(timeout))
+        {
+            throw new TimeoutException(
+                "Model discovery did not complete in time.");
+        }
+
+        return (IList)task.GetType().GetProperty("Result")
+            .GetValue(task, null);
+    }
+
+    private static Exception FetchModelsFailure(
+        Type clientType,
+        object client,
+        string endpoint,
+        string apiKey,
+        TimeSpan timeout)
+    {
+        Task task = InvokeFetchModels(
+            clientType,
+            client,
+            endpoint,
+            apiKey);
+        Exception failure = WaitForFailure(task, timeout);
+        if (failure == null)
+        {
+            throw new InvalidOperationException(
+                "Model discovery unexpectedly succeeded.");
+        }
+
+        return failure;
+    }
+
+    private static Task InvokeFetchModels(
+        Type clientType,
+        object client,
+        string endpoint,
+        string apiKey)
+    {
+        MethodInfo fetchModels = clientType.GetMethod(
+            "FetchModelsAsync",
+            BindingFlags.Instance | BindingFlags.Public);
+        if (fetchModels == null)
+        {
+            throw new MissingMethodException(
+                clientType.FullName,
+                "FetchModelsAsync");
+        }
+
+        return (Task)fetchModels.Invoke(
+            client,
+            new object[]
+            {
+                endpoint,
+                apiKey,
+                CancellationToken.None
+            });
+    }
+
     private static Exception WaitForFailure(Task task, TimeSpan timeout)
     {
         try
@@ -1272,6 +1652,11 @@ internal static class NetworkReliabilitySmokeTest
 
     private static void ReadRequest(NetworkStream stream)
     {
+        ReadRequestText(stream);
+    }
+
+    private static string ReadRequestText(NetworkStream stream)
+    {
         stream.ReadTimeout = 5000;
         MemoryStream bytes = new MemoryStream();
         byte[] buffer = new byte[4096];
@@ -1282,7 +1667,10 @@ internal static class NetworkReliabilitySmokeTest
             int read = stream.Read(buffer, 0, buffer.Length);
             if (read <= 0)
             {
-                return;
+                return Encoding.ASCII.GetString(
+                    bytes.GetBuffer(),
+                    0,
+                    (int)bytes.Length);
             }
 
             bytes.Write(buffer, 0, read);
@@ -1316,6 +1704,11 @@ internal static class NetworkReliabilitySmokeTest
 
             bytes.Write(buffer, 0, read);
         }
+
+        return Encoding.ASCII.GetString(
+            bytes.GetBuffer(),
+            0,
+            (int)bytes.Length);
     }
 
     private static int FindHeaderEnd(byte[] value, int length)

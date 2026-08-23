@@ -28,6 +28,8 @@ namespace FilePromptAIWin7
         private const long MaximumConversationContextCharacters = 48000L;
         private const string TruncatedFileTextNotice =
             "\r\n[已提取的文件正文超过本轮 48,000 字符预算，后续部分已省略]\r\n";
+        private const string NonReusableBinaryMarker =
+            "以下图片或内联文件仅随本轮发送";
         private const float MinimumOutputAreaHeight = 128F;
         private const float CompactComposerHeight = 154F;
         private const float ExpandedComposerHeight = 246F;
@@ -54,7 +56,7 @@ namespace FilePromptAIWin7
         private Panel fileDropTargetPanel;
         private TextBox endpointTextBox;
         private TextBox apiKeyTextBox;
-        private TextBox modelTextBox;
+        private ComboBox modelTextBox;
         private TextBox sessionSearchTextBox;
         private ListBox sessionListBox;
         private Button currentSessionsButton;
@@ -71,9 +73,13 @@ namespace FilePromptAIWin7
         private Button readPathButton;
         private Button generateButton;
         private Button stopButton;
+        private Button retryButton;
+        private Button regenerateButton;
+        private Button quickModelButton;
         private Button copyOutputButton;
         private Button saveOutputButton;
         private ContextMenuStrip exportMenu;
+        private ContextMenuStrip quickModelMenu;
         private Button newSessionButton;
         private Button deleteSessionButton;
         private Button renameSessionButton;
@@ -109,6 +115,10 @@ namespace FilePromptAIWin7
         private bool isUpdatingConversationRows;
         private bool followStreamTail;
         private bool showArchivedSessions;
+        private bool retryAvailable;
+        private bool retryRegeneration;
+        private string retrySessionId;
+        private string retryPromptText;
         private string sendShortcutMode;
         private GroupBox promptGroup;
         private SettingsDialog settingsDialog;
@@ -124,6 +134,13 @@ namespace FilePromptAIWin7
                 Prompt = string.Empty;
                 Items = new List<InputItem>();
             }
+        }
+
+        private sealed class RegenerationTurn
+        {
+            public ConversationMessage UserMessage { get; set; }
+            public ConversationMessage AssistantMessage { get; set; }
+            public int UserMessageIndex { get; set; }
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -286,6 +303,7 @@ namespace FilePromptAIWin7
             endpointTextBox.TextChanged += OnConnectionSettingChanged;
             apiKeyTextBox.TextChanged += OnConnectionSettingChanged;
             modelTextBox.TextChanged += OnConnectionSettingChanged;
+            settingsDialog.FetchModelsButton.Click += OnFetchModelsClick;
             testConnectionButton.Click += OnTestConnectionClick;
             settingsDialog.ModelProfilesButton.Click += OnModelProfilesClick;
             extensionsButton.Click += OnExtensionsClick;
@@ -751,6 +769,10 @@ namespace FilePromptAIWin7
             promptTextBox.AccessibleName = "文字描述或指令";
             promptTextBox.TextChanged += delegate
             {
+                if (!IsBusy && retryAvailable)
+                {
+                    ClearRetryState();
+                }
                 ScheduleContextSummaryUpdate();
             };
             promptTextBox.KeyDown += delegate(object sender, KeyEventArgs args)
@@ -871,6 +893,11 @@ namespace FilePromptAIWin7
                 }
             };
 
+            retryButton = CreateButton("重试", 64);
+            retryButton.Enabled = false;
+            retryButton.AccessibleName = "重试上一次失败的模型请求";
+            retryButton.Click += delegate { RetryLastFailedGeneration(); };
+
             generateButton = CreateButton("发送", 80);
             generateButton.BackColor = UiTheme.Accent;
             generateButton.ForeColor = Color.White;
@@ -888,6 +915,7 @@ namespace FilePromptAIWin7
             composerActions.Controls.Add(fileDropTargetPanel);
             composerActions.Controls.Add(promptActionsButton);
             sendActions.Controls.Add(stopButton);
+            sendActions.Controls.Add(retryButton);
             sendActions.Controls.Add(generateButton);
             actions.Controls.Add(composerActions, 0, 0);
             actions.Controls.Add(sendActions, 1, 0);
@@ -944,6 +972,29 @@ namespace FilePromptAIWin7
             buttons.WrapContents = false;
             buttons.FlowDirection = FlowDirection.LeftToRight;
 
+            quickModelButton = CreateButton("模型", 104);
+            quickModelButton.AccessibleName = "快速切换已保存模型";
+            quickModelButton.AutoEllipsis = true;
+            quickModelMenu = new ContextMenuStrip();
+            quickModelMenu.Opening += delegate(
+                object sender,
+                System.ComponentModel.CancelEventArgs args)
+            {
+                args.Cancel = IsBusy;
+            };
+            quickModelButton.ContextMenuStrip = quickModelMenu;
+            quickModelButton.Click += delegate
+            {
+                ShowQuickModelMenu();
+            };
+
+            regenerateButton = CreateButton("重新生成", 86);
+            regenerateButton.AccessibleName = "原位重新生成最新回复";
+            regenerateButton.Click += delegate
+            {
+                StartRegeneration();
+            };
+
             copyOutputButton = CreateButton("复制回复", 76);
             copyOutputButton.Click += OnCopyOutputClick;
             saveOutputButton = CreateButton("导出文件", 86);
@@ -957,6 +1008,8 @@ namespace FilePromptAIWin7
                     new Point(0, saveOutputButton.Height));
             };
 
+            buttons.Controls.Add(quickModelButton);
+            buttons.Controls.Add(regenerateButton);
             buttons.Controls.Add(copyOutputButton);
             buttons.Controls.Add(saveOutputButton);
             header.Controls.Add(contextSummaryLabel, 0, 0);
@@ -1020,11 +1073,15 @@ namespace FilePromptAIWin7
             ToolStripMenuItem loadPromptItem =
                 new ToolStripMenuItem("\u8f7d\u5165\u4e0a\u4e00\u6761\u6307\u4ee4");
             loadPromptItem.Click += delegate { LoadLastPromptForEditing(); };
+            ToolStripMenuItem regenerateItem =
+                new ToolStripMenuItem("重新生成最新回复");
+            regenerateItem.Click += delegate { StartRegeneration(); };
             ToolStripMenuItem selectAllItem =
                 new ToolStripMenuItem("全选");
             selectAllItem.Click += delegate { outputTextBox.SelectAll(); };
             outputMenu.Items.Add(copySelectionItem);
             outputMenu.Items.Add(copyLatestItem);
+            outputMenu.Items.Add(regenerateItem);
             outputMenu.Items.Add(new ToolStripSeparator());
             outputMenu.Items.Add(loadPromptItem);
             outputMenu.Items.Add(new ToolStripSeparator());
@@ -1034,6 +1091,8 @@ namespace FilePromptAIWin7
                 copySelectionItem.Enabled = outputTextBox.SelectionLength > 0;
                 copyLatestItem.Enabled =
                     !string.IsNullOrEmpty(GetLatestAssistantOutput());
+
+                regenerateItem.Enabled = CanRegenerateLatestTurn();
 
                 loadPromptItem.Enabled = !IsBusy && HasLastUserMessage();            };
             outputTextBox.ContextMenuStrip = outputMenu;
@@ -1134,10 +1193,12 @@ namespace FilePromptAIWin7
                 sendShortcutMode = settingsDialog.SendShortcutMode;
                 UpdatePromptHint();
                 UpdateSendShortcutMenuChecks();
-                SaveSettings();
+                bool saved = SaveSettings();
                 connectionStatusLabel.Text = BuildConnectionStatus();
                 UpdateContextSummary();
-                SetStatus("设置已保存到本机当前 Windows 用户。");
+                SetStatus(saved
+                    ? "设置已保存到本机当前 Windows 用户。"
+                    : "设置已临时应用，但配置未能保存。");
                 return;
             }
 
@@ -1185,6 +1246,14 @@ namespace FilePromptAIWin7
                 !string.IsNullOrWhiteSpace(endpointTextBox.Text) &&
                 !string.IsNullOrWhiteSpace(apiKeyTextBox.Text) &&
                 !string.IsNullOrWhiteSpace(modelTextBox.Text);
+        }
+
+        private bool HasModelListConnectionSettings()
+        {
+            return endpointTextBox != null &&
+                apiKeyTextBox != null &&
+                !string.IsNullOrWhiteSpace(endpointTextBox.Text) &&
+                !string.IsNullOrWhiteSpace(apiKeyTextBox.Text);
         }
 
         private bool IsBusy
@@ -1450,6 +1519,7 @@ namespace FilePromptAIWin7
                 return false;
             }
 
+            ClearRetryState();
             ClearDraft(session.Id);
             return true;
         }
@@ -1527,6 +1597,7 @@ namespace FilePromptAIWin7
             {
                 if (first != null && conversationStore.SelectSession(first.Id))
                 {
+                    ClearRetryState();
                     RefreshSessionList();
                     LoadCurrentSession();
                     RestoreCurrentDraft();
@@ -1792,6 +1863,67 @@ namespace FilePromptAIWin7
             outputTextBox.ScrollToCaret();
         }
 
+        private void PrepareRegenerationTurn(
+            ConversationSession session,
+            RegenerationTurn turn,
+            string visibleUserMessage)
+        {
+            outputTextBox.Clear();
+            int prefixCount = turn == null
+                ? 0
+                : Math.Max(0, turn.UserMessageIndex);
+            if (session != null && session.Messages != null)
+            {
+                for (int index = 0;
+                    index < prefixCount && index < session.Messages.Count;
+                    index++)
+                {
+                    ConversationMessage message = session.Messages[index];
+                    if (message == null)
+                    {
+                        continue;
+                    }
+
+                    string role = string.Equals(
+                        message.Role,
+                        "assistant",
+                        StringComparison.OrdinalIgnoreCase)
+                            ? "模型"
+                            : (string.Equals(
+                                message.Role,
+                                "system",
+                                StringComparison.OrdinalIgnoreCase)
+                                    ? "系统"
+                                    : "你");
+                    Color roleColor = role == "模型"
+                        ? UiTheme.RoleAssistant
+                        : (role == "系统"
+                            ? UiTheme.RoleSystem
+                            : UiTheme.RoleUser);
+                    AppendTranscriptMessage(
+                        role,
+                        FormatMessageForDisplay(message),
+                        roleColor,
+                        role == "模型");
+                }
+            }
+
+            renderedSessionId = session == null ? null : session.Id;
+            renderedMessageCount = prefixCount;
+            renderedSessionCharacterEstimate =
+                CalculateSessionCharacterEstimate(session);
+            streamedTurnStart = outputTextBox.TextLength;
+            followStreamTail = true;
+            AppendTranscriptMessage(
+                "你",
+                visibleUserMessage,
+                UiTheme.RoleUser);
+            AppendTranscriptHeader("模型", UiTheme.RoleAssistant);
+            streamedContentStart = outputTextBox.TextLength;
+            outputTextBox.SelectionStart = outputTextBox.TextLength;
+            outputTextBox.ScrollToCaret();
+        }
+
         private void FinalizeStreamingTurn(
             string userContent,
             string assistantContent)
@@ -1984,6 +2116,75 @@ namespace FilePromptAIWin7
             bool hasReply = !string.IsNullOrEmpty(GetLatestAssistantOutput());
             copyOutputButton.Enabled = !generating && hasReply;
             saveOutputButton.Enabled = !generating && hasReply;
+            if (regenerateButton != null)
+            {
+                regenerateButton.Enabled =
+                    !generating && CanRegenerateLatestTurn();
+            }
+            if (quickModelButton != null)
+            {
+                quickModelButton.Enabled = !IsBusy;
+            }
+        }
+
+        private bool TryGetLatestRegenerationTurn(
+            out RegenerationTurn turn)
+        {
+            turn = null;
+            ConversationSession session = conversationStore.CurrentSession;
+            if (session == null || session.Messages == null ||
+                session.Messages.Count < 2)
+            {
+                return false;
+            }
+
+            int assistantIndex = session.Messages.Count - 1;
+            ConversationMessage assistant =
+                session.Messages[assistantIndex];
+            ConversationMessage user = session.Messages[assistantIndex - 1];
+            if (assistant == null || user == null ||
+                !string.Equals(
+                    assistant.Role,
+                    "assistant",
+                    StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(
+                    user.Role,
+                    "user",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(user.Id))
+            {
+                return false;
+            }
+
+            turn = new RegenerationTurn
+            {
+                UserMessage = user,
+                AssistantMessage = assistant,
+                UserMessageIndex = assistantIndex - 1
+            };
+            return true;
+        }
+
+        private bool CanRegenerateLatestTurn()
+        {
+            if (IsBusy || conversationStore.IsWriteBlocked)
+            {
+                return false;
+            }
+
+            RegenerationTurn turn;
+            return TryGetLatestRegenerationTurn(out turn) &&
+                !ContainsNonReusableBinaryAttachment(turn.UserMessage);
+        }
+
+        private static bool ContainsNonReusableBinaryAttachment(
+            ConversationMessage userMessage)
+        {
+            return userMessage != null &&
+                !string.IsNullOrEmpty(userMessage.Content) &&
+                userMessage.Content.IndexOf(
+                    NonReusableBinaryMarker,
+                    StringComparison.Ordinal) >= 0;
         }
 
         private string BuildConnectionStatus()
@@ -2175,6 +2376,11 @@ namespace FilePromptAIWin7
 
         private void OnConnectionSettingChanged(object sender, EventArgs args)
         {
+            if (retryAvailable && generationCancellation == null)
+            {
+                ClearRetryState();
+            }
+
             if (connectionStatusLabel != null &&
                 generationCancellation == null)
             {
@@ -2187,6 +2393,15 @@ namespace FilePromptAIWin7
                     !IsBusy &&
                     HasCompleteConnectionSettings();
             }
+
+            if (settingsDialog != null &&
+                settingsDialog.FetchModelsButton != null)
+            {
+                settingsDialog.FetchModelsButton.Enabled =
+                    !IsBusy && HasModelListConnectionSettings();
+            }
+
+            UpdateQuickModelButton();
 
             ScheduleContextSummaryUpdate();
         }
@@ -2234,10 +2449,11 @@ namespace FilePromptAIWin7
             settingsDialog.SendShortcutMode = sendShortcutMode;
             connectionStatusLabel.Text = BuildConnectionStatus();
             testConnectionButton.Enabled = HasCompleteConnectionSettings();
+            UpdateQuickModelButton();
             UpdateContextSummary();
         }
 
-        private void SaveSettings()
+        private bool SaveSettings()
         {
             try
             {
@@ -2247,10 +2463,12 @@ namespace FilePromptAIWin7
                 settings.ModelName = modelTextBox.Text.Trim();
                 settings.SendShortcut = sendShortcutMode ?? "Both";
                 settings.Save();
+                return true;
             }
             catch (Exception exception)
             {
                 SetStatus("配置未能保存：" + exception.Message);
+                return false;
             }
         }
 
@@ -2310,8 +2528,10 @@ namespace FilePromptAIWin7
             }
             UpdatePromptHint();
             UpdateSendShortcutMenuChecks();
-            SaveSettings();
-            SetStatus("发送快捷键已设为：" + SendShortcutDisplay(mode));
+            bool saved = SaveSettings();
+            SetStatus(saved
+                ? "发送快捷键已设为：" + SendShortcutDisplay(mode)
+                : "发送快捷键已临时修改，但配置未能保存");
         }
 
         private void UpdatePromptHint()
@@ -2530,6 +2750,7 @@ namespace FilePromptAIWin7
                         extensionPromptCharacterEstimate =
                             CalculateExtensionPromptCharacterEstimate(
                                 extensionSettings);
+                        ClearRetryState();
                         UpdateContextSummary();
                         SetStatus(
                             "新建或导入的 MCP 默认停用，需手动勾选启用 · " +
@@ -2632,6 +2853,11 @@ namespace FilePromptAIWin7
 
         private void OnModelProfilesClick(object sender, EventArgs args)
         {
+            if (IsBusy)
+            {
+                return;
+            }
+
             IWin32Window owner = GetSettingsActionOwner();
             using (ModelProfilesDialog dialog = new ModelProfilesDialog(
                 modelProfiles,
@@ -2657,15 +2883,134 @@ namespace FilePromptAIWin7
                             MessageBoxIcon.Error);
                         return;
                     }
+
+                    UpdateQuickModelButton();
                 }
 
                 if (result == DialogResult.OK && dialog.SelectedProfile != null)
                 {
-                    ApplyModelProfile(dialog.SelectedProfile);
-                    SetStatus("已切换模型配置：" + dialog.SelectedProfile.Name);
+                    bool saved = ApplyModelProfile(dialog.SelectedProfile);
+                    UpdateQuickModelButton();
+                    SetStatus(saved
+                        ? "已切换并保存模型配置：" +
+                            dialog.SelectedProfile.Name
+                        : "已临时切换模型配置，但当前设置未能保存");
                 }
 
             }
+        }
+
+        private void ShowQuickModelMenu()
+        {
+            if (quickModelButton == null || quickModelMenu == null || IsBusy)
+            {
+                return;
+            }
+
+            quickModelMenu.Items.Clear();
+            string currentEndpoint = endpointTextBox == null
+                ? string.Empty
+                : endpointTextBox.Text.Trim();
+            string currentModel = modelTextBox == null
+                ? string.Empty
+                : modelTextBox.Text.Trim();
+            string currentKey = apiKeyTextBox == null
+                ? string.Empty
+                : apiKeyTextBox.Text.Trim();
+            foreach (ModelProfile profile in modelProfiles ??
+                new List<ModelProfile>())
+            {
+                if (profile == null)
+                {
+                    continue;
+                }
+
+                ModelProfile selectedProfile = profile;
+                ToolStripMenuItem item = new ToolStripMenuItem(
+                    profile.Name + "  ·  " + profile.ModelName);
+                item.Checked = ProfileMatchesCurrent(
+                    profile,
+                    currentEndpoint,
+                    currentKey,
+                    currentModel);
+                item.Click += delegate
+                {
+                    if (IsBusy)
+                    {
+                        quickModelMenu.Close();
+                        return;
+                    }
+
+                    bool saved = ApplyModelProfile(selectedProfile);
+                    UpdateQuickModelButton();
+                    SetStatus(saved
+                        ? "已切换并保存模型配置：" + selectedProfile.Name
+                        : "已临时切换模型配置，但当前设置未能保存");
+                };
+                quickModelMenu.Items.Add(item);
+            }
+
+            if (quickModelMenu.Items.Count > 0)
+            {
+                quickModelMenu.Items.Add(new ToolStripSeparator());
+            }
+
+            ToolStripMenuItem manageItem =
+                new ToolStripMenuItem("管理模型配置...");
+            manageItem.Click += OnModelProfilesClick;
+            quickModelMenu.Items.Add(manageItem);
+            quickModelMenu.Show(
+                quickModelButton,
+                new Point(0, quickModelButton.Height));
+        }
+
+        private void UpdateQuickModelButton()
+        {
+            if (quickModelButton == null)
+            {
+                return;
+            }
+
+            string endpoint = endpointTextBox == null
+                ? string.Empty
+                : endpointTextBox.Text.Trim();
+            string model = modelTextBox == null
+                ? string.Empty
+                : modelTextBox.Text.Trim();
+            string key = apiKeyTextBox == null
+                ? string.Empty
+                : apiKeyTextBox.Text.Trim();
+            ModelProfile matched = (modelProfiles ??
+                new List<ModelProfile>()).FirstOrDefault(profile =>
+                    ProfileMatchesCurrent(profile, endpoint, key, model));
+            quickModelButton.Text = matched == null
+                ? (string.IsNullOrWhiteSpace(model) ? "模型" : model)
+                : matched.Name;
+            quickModelButton.AccessibleDescription = string.IsNullOrWhiteSpace(
+                model)
+                    ? "尚未配置模型"
+                    : "当前模型：" + model;
+        }
+
+        private static bool ProfileMatchesCurrent(
+            ModelProfile profile,
+            string endpoint,
+            string apiKey,
+            string model)
+        {
+            return profile != null &&
+                string.Equals(
+                    profile.EndpointUrl ?? string.Empty,
+                    endpoint ?? string.Empty,
+                    StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(
+                    profile.ApiKey ?? string.Empty,
+                    apiKey ?? string.Empty,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    profile.ModelName ?? string.Empty,
+                    model ?? string.Empty,
+                    StringComparison.Ordinal);
         }
 
         private ModelProfile CreateCurrentModelProfile()
@@ -2684,20 +3029,127 @@ namespace FilePromptAIWin7
             };
         }
 
-        private void ApplyModelProfile(ModelProfile profile)
+        private bool ApplyModelProfile(ModelProfile profile)
         {
-            if (profile == null)
+            if (profile == null || IsBusy)
             {
-                return;
+                return false;
             }
 
             endpointTextBox.Text = profile.EndpointUrl ?? string.Empty;
             apiKeyTextBox.Text = profile.ApiKey ?? string.Empty;
             modelTextBox.Text = profile.ModelName ?? string.Empty;
-            SaveSettings();
+            bool saved = SaveSettings();
             connectionStatusLabel.Text = BuildConnectionStatus();
             testConnectionButton.Enabled = HasCompleteConnectionSettings();
+            settingsDialog.FetchModelsButton.Enabled =
+                HasModelListConnectionSettings();
+            UpdateQuickModelButton();
             UpdateContextSummary();
+            return saved;
+        }
+
+        private async void OnFetchModelsClick(object sender, EventArgs args)
+        {
+            if (IsBusy)
+            {
+                return;
+            }
+
+            string endpoint = endpointTextBox.Text.Trim();
+            string key = apiKeyTextBox.Text.Trim();
+            IWin32Window owner = GetSettingsActionOwner();
+            if (string.IsNullOrWhiteSpace(endpoint))
+            {
+                ShowValidation("请先填写完整请求 URL。", endpointTextBox);
+                return;
+            }
+
+            Uri endpointUri;
+            if (!Uri.TryCreate(endpoint, UriKind.Absolute, out endpointUri) ||
+                (endpointUri.Scheme != Uri.UriSchemeHttp &&
+                    endpointUri.Scheme != Uri.UriSchemeHttps) ||
+                !string.IsNullOrEmpty(endpointUri.UserInfo))
+            {
+                ShowValidation(
+                    "请求 URL 必须是完整且不含用户名密码的 http:// 或 https:// 地址。",
+                    endpointTextBox);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                ShowValidation("请先填写 API Key。", apiKeyTextBox);
+                return;
+            }
+
+            CancellationTokenSource cancellation =
+                new CancellationTokenSource();
+            cancellation.CancelAfter(TimeSpan.FromSeconds(30));
+            connectionTestCancellation = cancellation;
+            settingsDialog.FetchModelsButton.Text = "获取中...";
+            SetConnectionTestingState(true);
+            connectionStatusLabel.Text = "正在获取模型列表";
+            SetStatus("正在从当前接口获取模型列表...");
+            try
+            {
+                IList<string> models = await modelClient.FetchModelsAsync(
+                    endpoint,
+                    key,
+                    cancellation.Token);
+                settingsDialog.SetAvailableModels(models);
+                bool saved = SaveSettings();
+                connectionStatusLabel.Text =
+                    "已获取 " + models.Count + " 个模型";
+                SetStatus(
+                    "已获取 " + models.Count + " 个模型，可搜索或手动输入" +
+                    (saved ? string.Empty : "；当前设置未能保存"));
+            }
+            catch (OperationCanceledException)
+            {
+                connectionStatusLabel.Text = "获取模型超时";
+                MessageBox.Show(
+                    owner,
+                    "模型列表在 30 秒内没有返回。仍可手动输入模型名称。",
+                    "获取模型超时",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+            catch (ModelCallException exception)
+            {
+                connectionStatusLabel.Text = "未能获取模型列表";
+                MessageBox.Show(
+                    owner,
+                    exception.Message,
+                    "获取模型失败",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            catch (Exception exception)
+            {
+                connectionStatusLabel.Text = "未能获取模型列表";
+                MessageBox.Show(
+                    owner,
+                    "获取模型列表失败：" + exception.Message +
+                        "\r\n\r\n仍可手动输入模型名称。",
+                    "获取模型失败",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            finally
+            {
+                if (ReferenceEquals(connectionTestCancellation, cancellation))
+                {
+                    connectionTestCancellation = null;
+                }
+
+                cancellation.Dispose();
+                if (!IsDisposed)
+                {
+                    settingsDialog.FetchModelsButton.Text = "获取模型";
+                    SetConnectionTestingState(false);
+                }
+            }
         }
 
         private async void OnTestConnectionClick(object sender, EventArgs args)
@@ -2742,7 +3194,7 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            SaveSettings();
+            bool settingsSaved = SaveSettings();
             CancellationTokenSource cancellation =
                 new CancellationTokenSource();
             cancellation.CancelAfter(TimeSpan.FromSeconds(30));
@@ -2758,7 +3210,9 @@ namespace FilePromptAIWin7
                     model,
                     cancellation.Token);
                 connectionStatusLabel.Text = "连接成功 · " + model;
-                SetStatus("连接测试成功，配置已保存在本机");
+                SetStatus(settingsSaved
+                    ? "连接测试成功，配置已保存在本机"
+                    : "连接测试成功，但当前配置未能保存");
             }
             catch (OperationCanceledException)
             {
@@ -2814,6 +3268,9 @@ namespace FilePromptAIWin7
             endpointTextBox.Enabled = !testing;
             apiKeyTextBox.Enabled = !testing;
             modelTextBox.Enabled = !testing;
+            settingsDialog.FetchModelsButton.Enabled = !testing &&
+                !isAddingFiles && generationCancellation == null &&
+                HasModelListConnectionSettings();
             settingsDialog.ModelProfilesButton.Enabled = !testing;
             settingsDialog.UninstallButton.Enabled = !testing;
             settingsDialog.SendShortcutComboBox.Enabled = !testing;
@@ -2843,6 +3300,8 @@ namespace FilePromptAIWin7
 
             progressBar.Visible = testing || isAddingFiles ||
                 generationCancellation != null;
+            UpdateRetryButton();
+            UpdateOutputButtons(generationCancellation != null);
         }
 
         private void OnNewSessionClick(object sender, EventArgs args)
@@ -2859,6 +3318,7 @@ namespace FilePromptAIWin7
             }
 
             SaveCurrentDraft();
+            ClearRetryState();
             showArchivedSessions = false;
             UpdateSessionViewButtons();
             ClearSessionSearch();
@@ -2910,6 +3370,7 @@ namespace FilePromptAIWin7
                     session.Id,
                     archived,
                     "新会话");
+                ClearRetryState();
                 ClearSessionSearch();
                 showArchivedSessions = false;
                 UpdateSessionViewButtons();
@@ -2961,6 +3422,7 @@ namespace FilePromptAIWin7
                     return;
                 }
 
+                ClearRetryState();
                 showArchivedSessions = false;
                 UpdateSessionViewButtons();
                 ClearSessionSearch();
@@ -3116,6 +3578,7 @@ namespace FilePromptAIWin7
             {
                 if (conversationStore.SelectSession(session.Id))
                 {
+                    ClearRetryState();
                     LoadCurrentSession();
                     RestoreCurrentDraft();
                     SetStatus("已切换到：" + session.Title);
@@ -3298,21 +3761,7 @@ namespace FilePromptAIWin7
 
                 try
                 {
-                    int count = conversationStore.ImportBackup(dialog.FileName);
-                    if (sessionSearchTextBox != null)
-                    {
-                        sessionSearchTextBox.Clear();
-                        if (sessionSearchTimer != null)
-                        {
-                            sessionSearchTimer.Stop();
-                        }
-                    }
-
-                    RefreshSessionList();
-                    LoadCurrentSession();
-                    SetStatus(count == 0
-                        ? "备份中没有可恢复的会话"
-                        : "已恢复 " + count + " 个会话；原有会话已保留");
+                    RestoreSessionsFromPath(dialog.FileName);
                 }
                 catch (Exception exception)
                 {
@@ -3324,6 +3773,30 @@ namespace FilePromptAIWin7
                         MessageBoxIcon.Error);
                 }
             }
+        }
+
+        private void RestoreSessionsFromPath(string path)
+        {
+            int count = conversationStore.ImportBackup(path);
+            if (count > 0)
+            {
+                ClearRetryState();
+            }
+
+            if (sessionSearchTextBox != null)
+            {
+                sessionSearchTextBox.Clear();
+                if (sessionSearchTimer != null)
+                {
+                    sessionSearchTimer.Stop();
+                }
+            }
+
+            RefreshSessionList();
+            LoadCurrentSession();
+            SetStatus(count == 0
+                ? "备份中没有可恢复的会话"
+                : "已恢复 " + count + " 个会话；原有会话已保留");
         }
 
         private void InitializeFileDropTarget()
@@ -3581,8 +4054,11 @@ namespace FilePromptAIWin7
             SetInputButtonsEnabled(false);
             SetSessionNavigationEnabled(false);
             testConnectionButton.Enabled = false;
+            settingsDialog.FetchModelsButton.Enabled = false;
             extensionsButton.Enabled = false;
             progressBar.Visible = true;
+            UpdateRetryButton();
+            UpdateOutputButtons(generationCancellation != null);
             List<string> errors = new List<string>();
             CancellationTokenSource addCancellation =
                 new CancellationTokenSource();
@@ -3707,10 +4183,16 @@ namespace FilePromptAIWin7
                         generationCancellation == null &&
                         connectionTestCancellation == null &&
                         HasCompleteConnectionSettings();
+                    settingsDialog.FetchModelsButton.Enabled =
+                        generationCancellation == null &&
+                        connectionTestCancellation == null &&
+                        HasModelListConnectionSettings();
                     extensionsButton.Enabled = generationCancellation == null &&
                         connectionTestCancellation == null;
                     progressBar.Visible = generationCancellation != null ||
                         connectionTestCancellation != null;
+                    UpdateRetryButton();
+                    UpdateOutputButtons(generationCancellation != null);
                     UpdateInputStatus();
                 }
             }
@@ -3900,6 +4382,7 @@ namespace FilePromptAIWin7
             }
 
             EnsureInputItemRetentionBudget(item);
+            ClearRetryState();
             item.SourcePath = sourcePath;
             inputItems.Add(item);
             ListViewItem row = new ListViewItem(item.Name);
@@ -4019,11 +4502,19 @@ namespace FilePromptAIWin7
                 inputListView.Items.Remove(row);
             }
 
+            if (selected.Length > 0)
+            {
+                ClearRetryState();
+            }
             UpdateInputStatus();
         }
 
         private void OnClearClick(object sender, EventArgs args)
         {
+            if (inputItems.Count > 0)
+            {
+                ClearRetryState();
+            }
             inputItems.Clear();
             inputListView.Items.Clear();
             UpdateInputStatus();
@@ -4044,6 +4535,72 @@ namespace FilePromptAIWin7
         }
 
         private async void StartGeneration()
+        {
+            await GenerateAsync(false, null, null);
+        }
+
+        private async void StartRegeneration()
+        {
+            if (IsBusy)
+            {
+                return;
+            }
+
+            RegenerationTurn turn;
+            if (!TryGetLatestRegenerationTurn(out turn))
+            {
+                SetStatus("当前没有可重新生成的最新回复");
+                return;
+            }
+
+            if (ContainsNonReusableBinaryAttachment(turn.UserMessage))
+            {
+                MessageBox.Show(
+                    this,
+                    "最新一轮包含只随当轮发送的图片或二进制文件。" +
+                    "为了避免生成内容与原请求不一致，请载入上一条指令并重新添加附件后发送。",
+                    "无法原位重新生成",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            await GenerateAsync(true, turn, null);
+        }
+
+        private async void RetryLastFailedGeneration()
+        {
+            if (IsBusy || !retryAvailable)
+            {
+                return;
+            }
+
+            ConversationSession current = conversationStore.CurrentSession;
+            if (current == null || !string.Equals(
+                current.Id,
+                retrySessionId,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                ClearRetryState();
+                SetStatus("上一次失败请求所属会话已改变，不能直接重试");
+                return;
+            }
+
+            RegenerationTurn turn = null;
+            if (retryRegeneration && !TryGetLatestRegenerationTurn(out turn))
+            {
+                ClearRetryState();
+                SetStatus("最新回复已改变，不能重试原位重新生成");
+                return;
+            }
+
+            await GenerateAsync(retryRegeneration, turn, retryPromptText);
+        }
+
+        private async Task GenerateAsync(
+            bool regenerate,
+            RegenerationTurn regenerationTurn,
+            string retryPromptOverride)
         {
             if (IsBusy)
             {
@@ -4084,8 +4641,19 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            if (inputItems.Count == 0 &&
-                string.IsNullOrWhiteSpace(promptTextBox.Text))
+            if (regenerate)
+            {
+                if (regenerationTurn == null ||
+                    regenerationTurn.UserMessage == null ||
+                    SessionChangedForRegeneration(regenerationTurn))
+                {
+                    SetStatus("最新回复已改变，无法原位重新生成");
+                    return;
+                }
+            }
+            else if (inputItems.Count == 0 &&
+                string.IsNullOrWhiteSpace(
+                    retryPromptOverride ?? promptTextBox.Text))
             {
                 ShowValidation(
                     "请拖入或粘贴内容，或者输入文字描述。",
@@ -4093,23 +4661,59 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            string submittedPromptText = promptTextBox.Text ?? string.Empty;
-            string instruction = GetCurrentInstruction();
+            string submittedPromptText = regenerate
+                ? (promptTextBox.Text ?? string.Empty)
+                : (retryPromptOverride ?? promptTextBox.Text ?? string.Empty);
+            string instruction = regenerate
+                ? ExtractStoredInstruction(
+                    regenerationTurn.UserMessage.Content)
+                : (retryPromptOverride ?? GetCurrentInstruction());
             List<InputItem> attachments = inputItems
                 .Where(item => item != null && item.Kind != InputKind.Text)
                 .ToList();
+            if (regenerate)
+            {
+                attachments.Clear();
+            }
             string systemPrompt = extensionSettings == null
                 ? string.Empty
                 : extensionSettings.BuildSystemPrompt();
             string prompt;
             string promptValidationMessage;
             bool fileTextWasTrimmed;
-            if (!TryBuildCombinedPrompt(
-                instruction,
-                systemPrompt,
-                out prompt,
-                out promptValidationMessage,
-                out fileTextWasTrimmed))
+            if (regenerate)
+            {
+                prompt = regenerationTurn.UserMessage.Content ?? string.Empty;
+                promptValidationMessage = string.Empty;
+                fileTextWasTrimmed = false;
+                long systemCharacters =
+                    ConversationContextBudget.CountCharacters(systemPrompt);
+                long promptCharacters =
+                    ConversationContextBudget.CountCharacters(prompt);
+                if (systemCharacters >= MaximumConversationContextCharacters)
+                {
+                    ShowValidation(
+                        "已启用技能生成的系统提示达到或超过 48,000 字符预算。" +
+                        "请在“技能 / MCP”中缩短或停用相关技能后再重新生成。",
+                        promptTextBox);
+                    return;
+                }
+                if (promptCharacters >
+                    MaximumConversationContextCharacters - systemCharacters)
+                {
+                    ShowValidation(
+                        "原请求与已启用技能合计超过 48,000 字符预算。" +
+                        "请缩短或停用部分技能后再重新生成。",
+                        promptTextBox);
+                    return;
+                }
+            }
+            else if (!TryBuildCombinedPrompt(
+                    instruction,
+                    systemPrompt,
+                    out prompt,
+                    out promptValidationMessage,
+                    out fileTextWasTrimmed))
             {
                 ShowValidation(promptValidationMessage, promptTextBox);
                 return;
@@ -4128,10 +4732,16 @@ namespace FilePromptAIWin7
                 RefreshSessionList();
             }
 
-            string visibleUserMessage = BuildVisibleUserMessage(instruction);
+            string visibleUserMessage = regenerate
+                ? FormatMessageForDisplay(regenerationTurn.UserMessage)
+                : BuildVisibleUserMessage(instruction);
+            IList<ConversationMessage> contextMessages = regenerate
+                ? session.Messages.Take(
+                    regenerationTurn.UserMessageIndex).ToList()
+                : session.Messages;
             ConversationContextSelection contextSelection =
                 SelectConversationTextContext(
-                    session.Messages,
+                    contextMessages,
                     systemPrompt,
                     prompt);
             bool historyWasTrimmed = contextSelection.WasTruncated;
@@ -4145,7 +4755,18 @@ namespace FilePromptAIWin7
             request.ConversationMessages = contextSelection.Messages;
 
             SaveSettings();
-            PrepareStreamingTurn(session, visibleUserMessage);
+            ClearRetryState();
+            if (regenerate)
+            {
+                PrepareRegenerationTurn(
+                    session,
+                    regenerationTurn,
+                    visibleUserMessage);
+            }
+            else
+            {
+                PrepareStreamingTurn(session, visibleUserMessage);
+            }
             lock (streamOutputSync)
             {
                 streamedResponse = new StringBuilder();
@@ -4169,6 +4790,7 @@ namespace FilePromptAIWin7
             UpdateContextSummary();
             McpRuntime mcpRuntime = null;
             bool stdioStartupRejected = false;
+            bool turnSaved = false;
 
             try
             {
@@ -4236,21 +4858,58 @@ namespace FilePromptAIWin7
                     ? result
                     : accumulatedResponse;
 
-                string updatedTitle = BuildAutoTitle(session, instruction);
-                bool saved = conversationStore.AddTurn(
-                    session.Id,
-                    new ConversationMessage("user", prompt),
-                    new ConversationMessage(
-                        "assistant",
-                        finalResponse),
-                    updatedTitle);
+                string updatedTitle = regenerate
+                    ? string.Empty
+                    : BuildAutoTitle(session, instruction);
+                bool saved;
+                if (regenerate)
+                {
+                    ConversationMessage assistantMessage =
+                        new ConversationMessage(
+                            "assistant",
+                            finalResponse);
+                    assistantMessage.ParentMessageId =
+                        regenerationTurn.UserMessage.Id;
+                    assistantMessage.VariantIndex =
+                        Math.Max(
+                            1,
+                            regenerationTurn.AssistantMessage == null
+                                ? 1
+                                : regenerationTurn.AssistantMessage
+                                    .VariantIndex + 1);
+                    saved = conversationStore.ReplaceMessageSuffix(
+                        session.Id,
+                        regenerationTurn.UserMessage.Id,
+                        new List<ConversationMessage>
+                        {
+                            assistantMessage
+                        });
+                }
+                else
+                {
+                    saved = conversationStore.AddTurn(
+                        session.Id,
+                        new ConversationMessage("user", prompt),
+                        new ConversationMessage(
+                            "assistant",
+                            finalResponse),
+                        updatedTitle);
+                }
                 if (!saved)
                 {
                     throw new InvalidOperationException(
                         "当前会话已不存在，生成结果未能保存。");
                 }
+                turnSaved = true;
 
-                FinalizeStreamingTurn(prompt, finalResponse);
+                if (regenerate)
+                {
+                    RenderConversation(session);
+                }
+                else
+                {
+                    FinalizeStreamingTurn(prompt, finalResponse);
+                }
                 renderedSessionId = session.Id;
                 renderedMessageCount = session.Messages == null
                     ? 0
@@ -4261,24 +4920,31 @@ namespace FilePromptAIWin7
                 streamedContentStart = -1;
                 RefreshSessionList();
                 sessionTitleLabel.Text = session.Title;
-                ClearDraft(session.Id);
+                if (!regenerate)
+                {
+                    ClearDraft(session.Id);
+                }
                 bool promptUnchanged = string.Equals(
                     promptTextBox.Text,
                     submittedPromptText,
                     StringComparison.Ordinal);
-                if (promptUnchanged)
+                if (!regenerate && promptUnchanged)
                 {
                     promptTextBox.Clear();
                 }
 
-                inputItems.Clear();
-                inputListView.Items.Clear();
+                if (!regenerate)
+                {
+                    inputItems.Clear();
+                    inputListView.Items.Clear();
+                }
                 UpdateContextSummary();
                 SetStatus(
-                    "生成完成，共 " +
+                    (regenerate ? "最新回复已原位重新生成，共 " :
+                        "生成完成，共 ") +
                     finalResponse.Length.ToString("N0") +
                     " 字符" +
-                    (promptUnchanged
+                    (regenerate || promptUnchanged
                         ? string.Empty
                         : "；已保留等待期间输入的下一条指令") +
                     (historyWasTrimmed
@@ -4292,7 +4958,14 @@ namespace FilePromptAIWin7
             catch (OperationCanceledException)
             {
                 DeactivateStreamingOutput();
-                RemoveStreamingTurnPreview(session);
+                if (regenerate)
+                {
+                    RenderConversation(session);
+                }
+                else
+                {
+                    RemoveStreamingTurnPreview(session);
+                }
                 SetStatus(stdioStartupRejected
                     ? "已拒绝启动本地 MCP，本次生成已取消。"
                     : "已停止，本次内容未写入会话。");
@@ -4300,8 +4973,24 @@ namespace FilePromptAIWin7
             catch (ModelCallException exception)
             {
                 DeactivateStreamingOutput();
-                RemoveStreamingTurnPreview(session);
-                SetStatus("生成失败");
+                if (regenerate)
+                {
+                    RenderConversation(session);
+                }
+                else
+                {
+                    RemoveStreamingTurnPreview(session);
+                }
+                if (!turnSaved)
+                {
+                    RememberFailedGeneration(
+                        session,
+                        regenerate,
+                        regenerate ? prompt : instruction);
+                }
+                SetStatus(turnSaved
+                    ? "回复已保存，但界面更新失败；请切换会话后查看"
+                    : "生成失败，可点击“重试”再次请求");
                 MessageBox.Show(
                     exception.Message,
                     "模型调用失败",
@@ -4311,8 +5000,24 @@ namespace FilePromptAIWin7
             catch (McpException exception)
             {
                 DeactivateStreamingOutput();
-                RemoveStreamingTurnPreview(session);
-                SetStatus("MCP 调用失败");
+                if (regenerate)
+                {
+                    RenderConversation(session);
+                }
+                else
+                {
+                    RemoveStreamingTurnPreview(session);
+                }
+                if (!turnSaved)
+                {
+                    RememberFailedGeneration(
+                        session,
+                        regenerate,
+                        regenerate ? prompt : instruction);
+                }
+                SetStatus(turnSaved
+                    ? "回复已保存，但界面更新失败；请切换会话后查看"
+                    : "MCP 调用失败，可点击“重试”再次请求");
                 MessageBox.Show(
                     this,
                     exception.Message,
@@ -4323,8 +5028,24 @@ namespace FilePromptAIWin7
             catch (Exception exception)
             {
                 DeactivateStreamingOutput();
-                RemoveStreamingTurnPreview(session);
-                SetStatus("生成失败");
+                if (regenerate)
+                {
+                    RenderConversation(session);
+                }
+                else
+                {
+                    RemoveStreamingTurnPreview(session);
+                }
+                if (!turnSaved)
+                {
+                    RememberFailedGeneration(
+                        session,
+                        regenerate,
+                        regenerate ? prompt : instruction);
+                }
+                SetStatus(turnSaved
+                    ? "回复已保存，但界面更新失败；请切换会话后查看"
+                    : "生成失败，可点击“重试”再次请求");
                 MessageBox.Show(
                     "发生错误：" + exception.Message,
                     "生成失败",
@@ -4354,6 +5075,76 @@ namespace FilePromptAIWin7
                 SetGeneratingState(false);
                 connectionStatusLabel.Text = BuildConnectionStatus();
                 UpdateContextSummary();
+            }
+        }
+
+        private bool SessionChangedForRegeneration(RegenerationTurn turn)
+        {
+            RegenerationTurn latest;
+            return turn == null || !TryGetLatestRegenerationTurn(out latest) ||
+                latest.UserMessage == null || latest.AssistantMessage == null ||
+                turn.UserMessage == null || turn.AssistantMessage == null ||
+                !string.Equals(
+                    latest.UserMessage.Id,
+                    turn.UserMessage.Id,
+                    StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(
+                    latest.AssistantMessage.Id,
+                    turn.AssistantMessage.Id,
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string ExtractStoredInstruction(string prompt)
+        {
+            string content = prompt ?? string.Empty;
+            const string userHeader = "用户要求：";
+            int start = content.IndexOf(userHeader, StringComparison.Ordinal);
+            if (start < 0)
+            {
+                return content.Trim();
+            }
+
+            start += userHeader.Length;
+            while (start < content.Length &&
+                (content[start] == '\r' || content[start] == '\n' ||
+                    content[start] == ' '))
+            {
+                start++;
+            }
+
+            int end = FindPromptMetadataStart(content, start);
+            return (end >= 0
+                ? content.Substring(start, end - start)
+                : content.Substring(start)).Trim();
+        }
+
+        private void RememberFailedGeneration(
+            ConversationSession session,
+            bool regenerate,
+            string prompt)
+        {
+            retryAvailable = session != null;
+            retryRegeneration = regenerate;
+            retrySessionId = session == null ? string.Empty : session.Id;
+            retryPromptText = prompt ?? string.Empty;
+            UpdateRetryButton();
+        }
+
+        private void ClearRetryState()
+        {
+            retryAvailable = false;
+            retryRegeneration = false;
+            retrySessionId = string.Empty;
+            retryPromptText = string.Empty;
+            UpdateRetryButton();
+        }
+
+        private void UpdateRetryButton()
+        {
+            if (retryButton != null)
+            {
+                retryButton.Enabled = retryAvailable && !IsBusy;
+                retryButton.Text = retryRegeneration ? "重试生成" : "重试";
             }
         }
 
@@ -5137,6 +5928,7 @@ namespace FilePromptAIWin7
         {
             generateButton.Enabled = !generating;
             stopButton.Enabled = generating;
+            UpdateRetryButton();
             promptActionsButton.Enabled = !generating && !isAddingFiles;
             SetInputButtonsEnabled(!generating && !isAddingFiles);
             SetSessionNavigationEnabled(!generating && !isAddingFiles);
@@ -5152,6 +5944,9 @@ namespace FilePromptAIWin7
             endpointTextBox.Enabled = !generating;
             apiKeyTextBox.Enabled = !generating;
             modelTextBox.Enabled = !generating;
+            settingsDialog.FetchModelsButton.Enabled = !generating &&
+                connectionTestCancellation == null && !isAddingFiles &&
+                HasModelListConnectionSettings();
             settingsDialog.ModelProfilesButton.Enabled = !generating;
             settingsDialog.UninstallButton.Enabled = !generating;
             settingsDialog.SendShortcutComboBox.Enabled = !generating;

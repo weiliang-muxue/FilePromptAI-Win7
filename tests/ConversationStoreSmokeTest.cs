@@ -71,6 +71,7 @@ internal static class ConversationStoreSmokeTest
             TestAtomicTurnRollback(path, reloaded);
             TestSessionStatePersistence(path, reloaded);
             TestSessionBranching(path, reloaded);
+            TestMessageSuffixReplacement(path, reloaded);
             TestSessionLifecycle(path, reloaded);
             TestCreateRollback(path);
             TestUnpreservedDamageBlocksWrites(path);
@@ -490,6 +491,260 @@ internal static class ConversationStoreSmokeTest
             source.Messages.Count - 1,
             " last branch ",
             "last branch");
+    }
+
+    private static void TestMessageSuffixReplacement(
+        string path,
+        ConversationStore store)
+    {
+        int previousSessionCount = store.Sessions.Count;
+        string previousCurrentSessionId = store.CurrentSessionId;
+        ConversationSession session = store.CreateSession(
+            "suffix replacement");
+        ConversationMessage firstUser = new ConversationMessage(
+            "user",
+            "first user",
+            new DateTime(2025, 1, 2, 3, 4, 5, DateTimeKind.Utc),
+            "suffix-user-1",
+            null,
+            0);
+        ConversationMessage firstAssistant = new ConversationMessage(
+            "assistant",
+            "first assistant",
+            new DateTime(2025, 1, 2, 3, 5, 6, DateTimeKind.Utc),
+            "suffix-assistant-1",
+            firstUser.Id,
+            1);
+        ConversationMessage latestUser = new ConversationMessage(
+            "user",
+            "latest user",
+            new DateTime(2025, 1, 2, 3, 6, 7, DateTimeKind.Utc),
+            "suffix-user-2",
+            firstAssistant.Id,
+            0);
+        ConversationMessage oldAssistant = new ConversationMessage(
+            "assistant",
+            "old assistant suffix",
+            new DateTime(2025, 1, 2, 3, 7, 8, DateTimeKind.Utc),
+            "suffix-assistant-old",
+            latestUser.Id,
+            2);
+        if (!store.AddMessage(session.Id, firstUser) ||
+            !store.AddMessage(session.Id, firstAssistant) ||
+            !store.AddMessage(session.Id, latestUser) ||
+            !store.AddMessage(session.Id, oldAssistant))
+        {
+            throw new InvalidOperationException(
+                "The suffix replacement fixture was not created.");
+        }
+
+        ConversationMessage replacementAssistant = new ConversationMessage(
+            "assistant",
+            "replacement assistant",
+            new DateTime(2025, 1, 2, 3, 8, 9, DateTimeKind.Utc),
+            "suffix-assistant-new",
+            latestUser.Id,
+            7);
+        if (!store.ReplaceMessageSuffix(
+                session.Id,
+                latestUser.Id,
+                new ConversationMessage[] { replacementAssistant }))
+        {
+            throw new InvalidOperationException(
+                "The assistant suffix was not replaced.");
+        }
+
+        ConversationMessage[] expectedMessages = new ConversationMessage[]
+        {
+            firstUser,
+            firstAssistant,
+            latestUser,
+            replacementAssistant
+        };
+        AssertMessageSequence(
+            expectedMessages,
+            session,
+            "The successful suffix replacement changed message metadata.");
+        for (int index = 0; index < session.Messages.Count; index++)
+        {
+            if (session.Messages[index].Id == oldAssistant.Id ||
+                session.Messages[index].Content == oldAssistant.Content)
+            {
+                throw new InvalidDataException(
+                    "The old assistant suffix was not truncated.");
+            }
+        }
+
+        ConversationStore saved = new ConversationStore(path);
+        ConversationSession restored = saved.GetSession(session.Id);
+        if (restored == null ||
+            restored.CreatedAt != session.CreatedAt ||
+            restored.UpdatedAt != session.UpdatedAt)
+        {
+            throw new InvalidDataException(
+                "Suffix replacement session timestamps did not survive reload.");
+        }
+
+        AssertMessageSequence(
+            expectedMessages,
+            restored,
+            "Suffix replacement message metadata did not survive reload.");
+
+        object stableMessages = session.Messages;
+        DateTime stableUpdatedAt = session.UpdatedAt;
+        if (store.ReplaceMessageSuffix(
+                "missing-session",
+                latestUser.Id,
+                new ConversationMessage[] { replacementAssistant }) ||
+            store.ReplaceMessageSuffix(
+                session.Id,
+                "missing-anchor",
+                new ConversationMessage[] { replacementAssistant }) ||
+            store.ReplaceMessageSuffix(session.Id, latestUser.Id, null) ||
+            store.ReplaceMessageSuffix(
+                session.Id,
+                latestUser.Id,
+                new ConversationMessage[] { null }) ||
+            store.ReplaceMessageSuffix(
+                session.Id,
+                latestUser.Id,
+                new ConversationMessage[]
+                {
+                    new ConversationMessage(
+                        "assistant",
+                        "unknown parent",
+                        DateTime.UtcNow,
+                        "suffix-unknown-parent",
+                        "missing-parent",
+                        0)
+                }) ||
+            store.ReplaceMessageSuffix(
+                session.Id,
+                latestUser.Id,
+                new ConversationMessage[]
+                {
+                    new ConversationMessage(
+                        "assistant",
+                        "duplicate identifier",
+                        DateTime.UtcNow,
+                        firstUser.Id,
+                        latestUser.Id,
+                        0)
+                }))
+        {
+            throw new InvalidDataException(
+                "An invalid suffix replacement was accepted.");
+        }
+
+        if (!object.ReferenceEquals(session.Messages, stableMessages) ||
+            session.UpdatedAt != stableUpdatedAt)
+        {
+            throw new InvalidDataException(
+                "An invalid suffix replacement changed memory state.");
+        }
+
+        AssertMessageSequence(
+            expectedMessages,
+            session,
+            "An invalid suffix replacement changed message state.");
+        ConversationStore unchanged = new ConversationStore(path);
+        ConversationSession unchangedSession = unchanged.GetSession(session.Id);
+        if (unchangedSession == null ||
+            unchangedSession.UpdatedAt != stableUpdatedAt)
+        {
+            throw new InvalidDataException(
+                "An invalid suffix replacement changed persisted timestamps.");
+        }
+
+        AssertMessageSequence(
+            expectedMessages,
+            unchangedSession,
+            "An invalid suffix replacement changed the on-disk state.");
+
+        ConversationMessage lockedReplacement = new ConversationMessage(
+            "assistant",
+            "must roll back",
+            new DateTime(2025, 1, 2, 3, 9, 10, DateTimeKind.Utc),
+            "suffix-assistant-locked",
+            latestUser.Id,
+            8);
+        using (FileStream locked = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read))
+        {
+            ExpectIOException(delegate
+            {
+                store.ReplaceMessageSuffix(
+                    session.Id,
+                    latestUser.Id,
+                    new ConversationMessage[] { lockedReplacement });
+            });
+        }
+
+        if (!object.ReferenceEquals(session.Messages, stableMessages) ||
+            session.UpdatedAt != stableUpdatedAt)
+        {
+            throw new InvalidDataException(
+                "A failed suffix replacement did not roll back memory state.");
+        }
+
+        AssertMessageSequence(
+            expectedMessages,
+            session,
+            "A failed suffix replacement changed message state.");
+        ConversationStore rolledBack = new ConversationStore(path);
+        ConversationSession rolledBackSession = rolledBack.GetSession(session.Id);
+        if (rolledBackSession == null ||
+            rolledBackSession.UpdatedAt != stableUpdatedAt)
+        {
+            throw new InvalidDataException(
+                "A failed suffix replacement changed persisted timestamps.");
+        }
+
+        AssertMessageSequence(
+            expectedMessages,
+            rolledBackSession,
+            "A failed suffix replacement changed the on-disk messages.");
+
+        if (!store.SelectSession(previousCurrentSessionId) ||
+            !store.DeleteSession(session.Id) ||
+            store.Sessions.Count != previousSessionCount ||
+            store.CurrentSessionId != previousCurrentSessionId)
+        {
+            throw new InvalidDataException(
+                "Suffix replacement test cleanup did not restore the store.");
+        }
+    }
+
+    private static void AssertMessageSequence(
+        ConversationMessage[] expected,
+        ConversationSession actual,
+        string failureMessage)
+    {
+        if (actual == null || actual.Messages == null ||
+            actual.Messages.Count != expected.Length)
+        {
+            throw new InvalidDataException(failureMessage);
+        }
+
+        for (int index = 0; index < expected.Length; index++)
+        {
+            ConversationMessage expectedMessage = expected[index];
+            ConversationMessage actualMessage = actual.Messages[index];
+            if (actualMessage == null ||
+                expectedMessage.Id != actualMessage.Id ||
+                expectedMessage.ParentMessageId !=
+                    actualMessage.ParentMessageId ||
+                expectedMessage.VariantIndex != actualMessage.VariantIndex ||
+                expectedMessage.Role != actualMessage.Role ||
+                expectedMessage.Content != actualMessage.Content ||
+                expectedMessage.CreatedAt != actualMessage.CreatedAt)
+            {
+                throw new InvalidDataException(failureMessage);
+            }
+        }
     }
 
     private static void TestBranchBoundary(

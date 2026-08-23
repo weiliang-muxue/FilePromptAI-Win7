@@ -3,8 +3,10 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Microsoft.Win32;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,8 +29,18 @@ namespace FilePromptAIWin7
                 ServicePointManager.Expect100Continue = false;
                 string serverExecutable = Path.GetFullPath(args[0]);
                 TestStdio(serverExecutable);
-                TestBatchPathResolution(serverExecutable);
-                TestBatchArgumentSafety(serverExecutable);
+                TestBatchConstructionWithoutLaunch(serverExecutable);
+                string batchSkipReason;
+                if (TryGetBatchTestSkipReason(out batchSkipReason))
+                {
+                    Console.WriteLine(
+                        "SKIP | batch MCP integration | " + batchSkipReason);
+                }
+                else
+                {
+                    TestBatchPathResolution(serverExecutable);
+                    TestBatchArgumentSafety(serverExecutable);
+                }
                 TestStdioCancellationTree(serverExecutable);
                 TestStdioDisposeTree(serverExecutable);
                 TestServerFailureIsolation(serverExecutable);
@@ -176,6 +188,152 @@ namespace FilePromptAIWin7
                         StringComparison.Ordinal) >= 0,
                     "batch command resolved through PATH/PATHEXT");
             }
+        }
+
+        private static void TestBatchConstructionWithoutLaunch(
+            string serverExecutable)
+        {
+            string commandDirectory = Path.Combine(
+                Path.GetDirectoryName(serverExecutable),
+                "batch construction");
+            Directory.CreateDirectory(commandDirectory);
+            string wrapper = Path.Combine(commandDirectory, "fake-npx.cmd");
+            File.WriteAllText(wrapper, "@echo off\r\n", Encoding.ASCII);
+            Type connectionType = typeof(McpRuntime).Assembly.GetType(
+                "FilePromptAIWin7.StdioMcpConnection",
+                true);
+            MethodInfo resolve = connectionType.GetMethod(
+                "ResolveCommand",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            MethodInfo build = connectionType.GetMethod(
+                "BuildBatchArguments",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Assert(resolve != null && build != null,
+                "batch command helpers are present");
+
+            Dictionary<string, string> environment =
+                new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    { "pAtH", commandDirectory },
+                    { "PathExt", ".CMD;.EXE" }
+                };
+            string resolved = (string)resolve.Invoke(
+                null,
+                new object[]
+                {
+                    "fake-npx",
+                    Path.GetDirectoryName(serverExecutable),
+                    environment
+                });
+            Assert(string.Equals(
+                    resolved,
+                    wrapper,
+                    StringComparison.OrdinalIgnoreCase),
+                "batch command resolves through PATH/PATHEXT without launch");
+
+            string safeValue = "safe & echo remains-an-argument";
+            string arguments = (string)build.Invoke(
+                null,
+                new object[]
+                {
+                    wrapper,
+                    new[] { "--label", safeValue }
+                });
+            Assert(arguments.IndexOf(
+                    "\"" + safeValue + "\"",
+                    StringComparison.Ordinal) >= 0,
+                "batch metacharacters are quoted as one argument");
+
+            AssertPrivateFailure<McpException>(
+                build,
+                new object[] { wrapper, new[] { "%PATH%" } },
+                "batch percent expansion is rejected without launch");
+            AssertPrivateFailure<McpException>(
+                build,
+                new object[] { wrapper, new[] { "line1\r\nline2" } },
+                "batch line injection is rejected without launch");
+        }
+
+        private static bool TryGetBatchTestSkipReason(out string reason)
+        {
+            reason = string.Empty;
+            string commandInterpreter = Path.Combine(
+                Environment.SystemDirectory,
+                "cmd.exe");
+            string layer = GetCompatibilityLayer(
+                Registry.CurrentUser,
+                @"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+                commandInterpreter);
+            if (ContainsRunAsAdministratorLayer(layer))
+            {
+                reason = "current-user compatibility settings force cmd.exe " +
+                    "to require elevation";
+                return true;
+            }
+
+            layer = GetCompatibilityLayer(
+                Registry.LocalMachine,
+                @"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+                commandInterpreter);
+            if (ContainsRunAsAdministratorLayer(layer))
+            {
+                reason = "machine compatibility settings force cmd.exe " +
+                    "to require elevation";
+                return true;
+            }
+
+            return false;
+        }
+
+        private static string GetCompatibilityLayer(
+            RegistryKey root,
+            string subkey,
+            string executable)
+        {
+            try
+            {
+                using (RegistryKey key = root.OpenSubKey(subkey, false))
+                {
+                    return key == null
+                        ? string.Empty
+                        : Convert.ToString(key.GetValue(executable));
+                }
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static bool ContainsRunAsAdministratorLayer(string value)
+        {
+            return (value ?? string.Empty).Split(
+                new[] { ' ', '\t' },
+                StringSplitOptions.RemoveEmptyEntries).Any(
+                    item => string.Equals(
+                        item,
+                        "RUNASADMIN",
+                        StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static void AssertPrivateFailure<TException>(
+            MethodInfo method,
+            object[] arguments,
+            string name)
+            where TException : Exception
+        {
+            Exception failure = null;
+            try
+            {
+                method.Invoke(null, arguments);
+            }
+            catch (TargetInvocationException exception)
+            {
+                failure = exception.InnerException;
+            }
+
+            Assert(failure is TException, name);
         }
 
         private static void TestBatchArgumentSafety(string serverExecutable)

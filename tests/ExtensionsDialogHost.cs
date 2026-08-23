@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Windows.Forms;
@@ -29,6 +30,14 @@ internal static class ExtensionsDialogHost
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Assembly application = Assembly.LoadFrom(applicationPath);
+        if (string.Equals(
+            args[1],
+            "settings",
+            StringComparison.OrdinalIgnoreCase))
+        {
+            return RunSettingsDialog(application);
+        }
+
         Type settingsType = application.GetType(
             "FilePromptAIWin7.ExtensionSettings",
             true);
@@ -59,6 +68,58 @@ internal static class ExtensionsDialogHost
                 tabs.SelectedIndex = 1;
             }
 
+            Application.Run(dialog);
+        }
+
+        return 0;
+    }
+
+    private static int RunSettingsDialog(Assembly application)
+    {
+        Type dialogType = application.GetType(
+            "FilePromptAIWin7.SettingsDialog",
+            true);
+        using (Form dialog = Activator.CreateInstance(
+            dialogType,
+            true) as Form)
+        {
+            if (dialog == null)
+            {
+                return 3;
+            }
+
+            TextBox endpoint = dialogType.GetProperty(
+                "EndpointTextBox").GetValue(dialog, null) as TextBox;
+            TextBox apiKey = dialogType.GetProperty(
+                "ApiKeyTextBox").GetValue(dialog, null) as TextBox;
+            ComboBox model = dialogType.GetProperty(
+                "ModelTextBox").GetValue(dialog, null) as ComboBox;
+            if (endpoint != null)
+            {
+                endpoint.Text =
+                    "https://api.example.com/v1/chat/completions";
+            }
+            if (apiKey != null)
+            {
+                apiKey.Text = "ui-smoke-key";
+            }
+            dialogType.GetMethod("SetAvailableModels").Invoke(
+                dialog,
+                new object[]
+                {
+                    new List<string>
+                    {
+                        "gpt-4.1-mini",
+                        "gpt-4.1",
+                        "o4-mini"
+                    }
+                });
+            if (model != null)
+            {
+                model.Text = "gpt-4.1-mini";
+            }
+
+            dialog.ShowInTaskbar = true;
             Application.Run(dialog);
         }
 

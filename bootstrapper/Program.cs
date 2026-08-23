@@ -3,6 +3,8 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using System.Windows.Forms;
 
@@ -16,6 +18,71 @@ namespace FilePromptAIBootstrapper
         private const string RuntimeSha256 =
             "0A3A390C47E639D0F7FC65B21195FEE6B7F65B066F80F70C60FAB191D14B7E40";
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private sealed class WinTrustFileInfo : IDisposable
+        {
+            public uint StructSize = (uint)Marshal.SizeOf(
+                typeof(WinTrustFileInfo));
+            public IntPtr FilePath;
+            public IntPtr FileHandle = IntPtr.Zero;
+            public IntPtr KnownSubject = IntPtr.Zero;
+
+            public WinTrustFileInfo(string path)
+            {
+                FilePath = Marshal.StringToCoTaskMemUni(path);
+            }
+
+            public void Dispose()
+            {
+                if (FilePath != IntPtr.Zero)
+                {
+                    Marshal.FreeCoTaskMem(FilePath);
+                    FilePath = IntPtr.Zero;
+                }
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private sealed class WinTrustData : IDisposable
+        {
+            public uint StructSize = (uint)Marshal.SizeOf(
+                typeof(WinTrustData));
+            public IntPtr PolicyCallbackData = IntPtr.Zero;
+            public IntPtr SipClientData = IntPtr.Zero;
+            public uint UiChoice = 2;
+            public uint RevocationChecks = 0;
+            public uint UnionChoice = 1;
+            public IntPtr FileInfo;
+            public uint StateAction = 0;
+            public IntPtr StateData = IntPtr.Zero;
+            public IntPtr UrlReference = IntPtr.Zero;
+            public uint ProviderFlags = 0x00001010;
+            public uint UiContext = 0;
+
+            public WinTrustData(WinTrustFileInfo file)
+            {
+                FileInfo = Marshal.AllocCoTaskMem(
+                    Marshal.SizeOf(typeof(WinTrustFileInfo)));
+                Marshal.StructureToPtr(file, FileInfo, false);
+            }
+
+            public void Dispose()
+            {
+                if (FileInfo != IntPtr.Zero)
+                {
+                    Marshal.FreeCoTaskMem(FileInfo);
+                    FileInfo = IntPtr.Zero;
+                }
+            }
+        }
+
+        [DllImport("wintrust.dll", ExactSpelling = true,
+            SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern int WinVerifyTrust(
+            IntPtr window,
+            [MarshalAs(UnmanagedType.LPStruct)] Guid actionId,
+            WinTrustData data);
+
         [STAThread]
         private static void Main()
         {
@@ -27,6 +94,23 @@ namespace FilePromptAIBootstrapper
             string[] arguments = Environment.GetCommandLineArgs();
             bool checkOnly = arguments.Length > 1 &&
                 string.Equals(arguments[1], "--check", StringComparison.OrdinalIgnoreCase);
+            bool verifyRuntimeOnly = arguments.Length > 1 &&
+                string.Equals(
+                    arguments[1],
+                    "--verify-runtime",
+                    StringComparison.OrdinalIgnoreCase);
+            if (verifyRuntimeOnly)
+            {
+                string runtimePath = Path.Combine(
+                    root,
+                    "runtime\\" + RuntimeFileName);
+                Environment.ExitCode = File.Exists(runtimePath) &&
+                    IsApprovedOfflineRuntime(runtimePath)
+                    ? 0
+                    : 4;
+                return;
+            }
+
             if (!File.Exists(applicationPath))
             {
                 if (checkOnly)
@@ -124,10 +208,35 @@ namespace FilePromptAIBootstrapper
                 }
 
                 string actualHash = BitConverter.ToString(digest).Replace("-", string.Empty);
-                return string.Equals(
+                if (!string.Equals(
                     actualHash,
                     RuntimeSha256,
-                    StringComparison.OrdinalIgnoreCase);
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                X509Certificate certificate =
+                    X509Certificate.CreateFromSignedFile(installerPath);
+                if (certificate == null || certificate.Subject == null ||
+                    certificate.Subject.IndexOf(
+                        "O=Microsoft Corporation",
+                        StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return false;
+                }
+
+                Guid action = new Guid(
+                    "00AAC56B-CD44-11D0-8CC2-00C04FC295EE");
+                using (WinTrustFileInfo file =
+                    new WinTrustFileInfo(installerPath))
+                using (WinTrustData trust = new WinTrustData(file))
+                {
+                    return WinVerifyTrust(
+                        new IntPtr(-1),
+                        action,
+                        trust) == 0;
+                }
             }
             catch
             {

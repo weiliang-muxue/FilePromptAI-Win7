@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Skills', 'Mcp')]
+    [ValidateSet('Skills', 'Mcp', 'Settings')]
     [string]$Mode = 'Skills'
 )
 
@@ -14,7 +14,7 @@ $compiler = Join-Path $frameworkRoot 'csc.exe'
 $artifactRoot = Join-Path $testRoot 'build-artifacts'
 $hostExecutable = Join-Path $artifactRoot 'ExtensionsDialogHost.exe'
 $outputPath = Join-Path $artifactRoot (
-    'FilePromptAI-ui-v1.15-extensions-' + $Mode.ToLowerInvariant() + '.png'
+    'FilePromptAI-ui-v1.16-extensions-' + $Mode.ToLowerInvariant() + '.png'
 )
 $profileRoot = Join-Path $artifactRoot 'extensions-ui-profile'
 
@@ -128,7 +128,7 @@ try {
         $bitmap.Dispose()
     }
 
-    Write-Host "PASS | extensions ui capture | mode=$Mode | ${width}x${height} | $outputPath"
+    Write-Host "PASS | dialog ui capture | mode=$Mode | ${width}x${height} | $outputPath"
 }
 finally {
     if (-not $process.HasExited) {

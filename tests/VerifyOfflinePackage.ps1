@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.15'
+    [string]$Version = '1.16'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -139,10 +139,21 @@ $bootstrapperVersion = (Get-Item -LiteralPath (
 )).VersionInfo.FileVersion
 $uninstallerPath = Join-Path $stagingRoot 'Uninstall-FilePromptAI.exe'
 $uninstallerVersion = (Get-Item -LiteralPath $uninstallerPath).VersionInfo.FileVersion
-if ($appVersion -ne '1.15.0.0' -or
-    $bootstrapperVersion -ne '1.15.0.0' -or
-    $uninstallerVersion -ne '1.15.0.0') {
+if ($appVersion -ne '1.16.0.0' -or
+    $bootstrapperVersion -ne '1.16.0.0' -or
+    $uninstallerVersion -ne '1.16.0.0') {
     throw "Unexpected executable versions: app=$appVersion bootstrapper=$bootstrapperVersion uninstaller=$uninstallerVersion"
+}
+
+$bootstrapperPath = Join-Path $stagingRoot 'Start-FilePromptAI.exe'
+$runtimeVerification = Start-Process `
+    -FilePath $bootstrapperPath `
+    -ArgumentList '--verify-runtime' `
+    -WorkingDirectory $stagingRoot `
+    -PassThru `
+    -Wait
+if ($runtimeVerification.ExitCode -ne 0) {
+    throw "Bundled .NET runtime verification failed with exit code $($runtimeVerification.ExitCode)."
 }
 
 $uninstallerCheck = Start-Process `

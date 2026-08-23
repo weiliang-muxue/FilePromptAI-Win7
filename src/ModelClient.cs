@@ -32,6 +32,10 @@ namespace FilePromptAIWin7
         private const long MaximumRequestBytes = 32L * 1024L * 1024L;
         private const long MinimumRequestEnvelopeBytes = 256L * 1024L;
         private const int MaximumDisplayedServerErrorCharacters = 2000;
+        private const int MaximumListedModels = 4096;
+        private const int MaximumModelIdentifierCharacters = 512;
+        private const int MaximumModelListCharacters = 1024 * 1024;
+        private const long MaximumModelListBytes = 2L * 1024L * 1024L;
         private const int MaximumResponseCharacters = 8 * 1024 * 1024;
         private const long MaximumResponseBytes = 16L * 1024L * 1024L;
         private const int DefaultResponseHeadersTimeoutMilliseconds = 30000;
@@ -464,6 +468,119 @@ namespace FilePromptAIWin7
 
                 throw new ModelCallException(
                     "\u8fde\u63a5\u4e2d\u65ad\uff1a" + exception.Message);
+            }
+            catch (ObjectDisposedException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                throw;
+            }
+        }
+
+        public async Task<IList<string>> FetchModelsAsync(
+            string endpointUrl,
+            string apiKey,
+            CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(endpointUrl))
+            {
+                throw new ModelCallException("请填写 URL。");
+            }
+
+            Uri modelsUrl = BuildModelsEndpoint(
+                BuildExactAttempt(endpointUrl).Url);
+            ModelRequest request = new ModelRequest
+            {
+                EndpointUrl = modelsUrl.AbsoluteUri,
+                ApiKey = apiKey ?? string.Empty,
+                Attachments = new List<InputItem>()
+            };
+
+            try
+            {
+                using (HttpRequestMessage message = new HttpRequestMessage(
+                    HttpMethod.Get,
+                    modelsUrl))
+                {
+                    string key = (apiKey ?? string.Empty).Trim();
+                    if (!string.IsNullOrEmpty(key))
+                    {
+                        message.Headers.Authorization =
+                            new AuthenticationHeaderValue("Bearer", key);
+                    }
+
+                    message.Headers.Accept.Add(
+                        new MediaTypeWithQualityHeaderValue(
+                            "application/json"));
+                    HttpResponseMessage response = await SendForHeadersAsync(
+                        message,
+                        responseHeadersTimeout,
+                        cancellationToken).ConfigureAwait(false);
+                    using (response)
+                    using (CancellationTokenRegistration registration =
+                        cancellationToken.Register(
+                            delegate { response.Dispose(); }))
+                    {
+                        string body = await ReadBoundedModelListResponseAsync(
+                            response.Content,
+                            cancellationToken).ConfigureAwait(false);
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            throw CreateModelListException(
+                                (int)response.StatusCode,
+                                body,
+                                GetRequestId(response));
+                        }
+
+                        object parsed;
+                        try
+                        {
+                            parsed = Deserialize(body);
+                        }
+                        catch (Exception exception)
+                        {
+                            throw new ModelCallException(
+                                "模型列表接口返回了无法解析的 JSON：" +
+                                exception.Message);
+                        }
+
+                        IList<string> models = ParseModelIdentifiers(parsed);
+                        if (models.Count == 0)
+                        {
+                            throw new ModelCallException(
+                                "模型列表接口请求成功，但响应中没有可用的模型 ID。" +
+                                "仍可在模型名称框中手动输入。");
+                        }
+
+                        return models;
+                    }
+                }
+            }
+            catch (ModelCallException)
+            {
+                throw;
+            }
+            catch (HttpRequestException exception)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                throw CreateNetworkException(exception, request);
+            }
+            catch (IOException exception)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                throw new ModelCallException(
+                    "读取模型列表时连接中断：" + exception.Message);
             }
             catch (ObjectDisposedException)
             {
@@ -1007,6 +1124,58 @@ namespace FilePromptAIWin7
                     {
                         throw new ModelCallException(
                             "模型接口响应超过 8 MB 字符安全限制。");
+                    }
+
+                    result.Append(buffer, 0, read);
+                }
+            }
+
+            return result.ToString();
+        }
+
+        private async Task<string> ReadBoundedModelListResponseAsync(
+            HttpContent content,
+            CancellationToken cancellationToken)
+        {
+            if (content == null)
+            {
+                return string.Empty;
+            }
+
+            long? contentLength = content.Headers.ContentLength;
+            if (contentLength.HasValue &&
+                contentLength.Value > MaximumModelListBytes)
+            {
+                throw new ModelCallException(
+                    "模型列表响应超过 2 MB 安全限制。");
+            }
+
+            StringBuilder result = new StringBuilder();
+            char[] buffer = new char[4096];
+            using (Stream stream = await content.ReadAsStreamAsync()
+                .ConfigureAwait(false))
+            using (StreamReader reader = new StreamReader(
+                stream,
+                Encoding.UTF8,
+                true,
+                4096,
+                true))
+            {
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    int read = await AwaitReadWithIdleTimeoutAsync(
+                        reader.ReadAsync(buffer, 0, buffer.Length),
+                        cancellationToken).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        break;
+                    }
+
+                    if (result.Length > MaximumModelListCharacters - read)
+                    {
+                        throw new ModelCallException(
+                            "模型列表响应超过 1 MB 字符安全限制。");
                     }
 
                     result.Append(buffer, 0, read);
@@ -2439,6 +2608,153 @@ namespace FilePromptAIWin7
             {
                 Url = uri
             };
+        }
+
+        private static Uri BuildModelsEndpoint(Uri endpoint)
+        {
+            if (endpoint == null)
+            {
+                throw new ArgumentNullException("endpoint");
+            }
+
+            string path = endpoint.AbsolutePath.TrimEnd('/');
+            string[] requestSuffixes =
+            {
+                "/chat/completions",
+                "/completions",
+                "/responses",
+                "/embeddings",
+                "/images/generations"
+            };
+            string modelsPath = null;
+            foreach (string suffix in requestSuffixes)
+            {
+                if (path.EndsWith(
+                    suffix,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    modelsPath = path.Substring(0, path.Length - suffix.Length) +
+                        "/models";
+                    break;
+                }
+            }
+
+            if (modelsPath == null && path.EndsWith(
+                "/models",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                modelsPath = path;
+            }
+            if (modelsPath == null && path.EndsWith(
+                "/v1",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                modelsPath = path + "/models";
+            }
+            if (modelsPath == null)
+            {
+                throw new ModelCallException(
+                    "无法从当前请求 URL 推导模型列表地址。" +
+                    "请使用以 /chat/completions、/responses、/completions、" +
+                    "/embeddings 或 /images/generations 结尾的 OpenAI 兼容 URL，" +
+                    "或继续手动输入模型名称。");
+            }
+
+            UriBuilder builder = new UriBuilder(endpoint);
+            builder.Path = modelsPath;
+            builder.Fragment = string.Empty;
+            return builder.Uri;
+        }
+
+        private IList<string> ParseModelIdentifiers(object parsed)
+        {
+            IDictionary<string, object> root = AsDictionary(parsed);
+            IList entries = root == null
+                ? null
+                : AsList(GetValue(root, "data"));
+
+            HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+            List<string> result = new List<string>();
+            foreach (object entry in entries ?? new object[0])
+            {
+                IDictionary<string, object> item = AsDictionary(entry);
+                object identifierValue = item == null
+                    ? null
+                    : GetValue(item, "id");
+                string identifier = identifierValue as string;
+
+                if (identifier == null ||
+                    identifier.Any(character => char.IsControl(character)))
+                {
+                    continue;
+                }
+
+                identifier = identifier.Trim();
+                if (identifier.Length == 0 ||
+                    identifier.Length > MaximumModelIdentifierCharacters ||
+                    !seen.Add(identifier))
+                {
+                    continue;
+                }
+
+                result.Add(identifier);
+                if (result.Count >= MaximumListedModels)
+                {
+                    break;
+                }
+            }
+
+            result.Sort(delegate(string left, string right)
+            {
+                int comparison = StringComparer.OrdinalIgnoreCase.Compare(
+                    left,
+                    right);
+                return comparison != 0
+                    ? comparison
+                    : StringComparer.Ordinal.Compare(left, right);
+            });
+            return result;
+        }
+
+        private ModelCallException CreateModelListException(
+            int statusCode,
+            string body,
+            string requestId)
+        {
+            string message;
+            switch (statusCode)
+            {
+                case 401:
+                    message = "API Key 无效，无法获取模型列表。";
+                    break;
+                case 403:
+                    message = "当前 Key 没有读取模型列表的权限。";
+                    break;
+                case 404:
+                    message = "当前服务没有提供兼容的 /models 接口。" +
+                        "仍可手动输入模型名称。";
+                    break;
+                default:
+                    message = statusCode >= 300 && statusCode < 400
+                        ? "模型列表接口返回了重定向；为避免把 API Key 发往其他地址，" +
+                            "程序没有跟随重定向。"
+                        : (statusCode >= 500
+                            ? "模型服务暂时无法提供模型列表。"
+                            : "模型列表接口返回错误。");
+                    break;
+            }
+
+            string serverMessage = ExtractErrorMessageFromBody(body);
+            if (!string.IsNullOrWhiteSpace(serverMessage))
+            {
+                message += "\r\n\r\n服务端信息：" + serverMessage;
+            }
+            if (!string.IsNullOrWhiteSpace(requestId))
+            {
+                message += "\r\n请求 ID：" + requestId;
+            }
+
+            return new ModelCallException(message, statusCode, requestId);
         }
 
         private static bool IsStreamUnsupported(AttemptException exception)

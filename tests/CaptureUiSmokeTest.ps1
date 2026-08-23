@@ -2,6 +2,7 @@ param(
     [ValidateSet('Empty', 'Conversation')]
     [string]$Mode = 'Conversation',
     [switch]$MinimumWindow,
+    [switch]$FullHd100,
     [switch]$Physical125
 )
 
@@ -13,13 +14,37 @@ $application = Join-Path $projectRoot 'dist\FilePromptAI.exe'
 $artifactRoot = Join-Path $projectRoot 'tests\build-artifacts'
 $profileRoot = Join-Path $artifactRoot ('ui-profile-' + $Mode.ToLowerInvariant())
 $applicationData = Join-Path $profileRoot 'FilePromptAI-Win7'
-$sizeSuffix = if ($MinimumWindow) { '-minimum' } else { '' }
+$sizeSuffix = if ($FullHd100) {
+    '-fullhd100'
+}
+elseif ($MinimumWindow) {
+    '-minimum'
+}
+else {
+    ''
+}
 $outputPath = Join-Path $artifactRoot (
-    'FilePromptAI-ui-v1.15-' + $Mode.ToLowerInvariant() + $sizeSuffix + '.png'
+    'FilePromptAI-ui-v1.16-' + $Mode.ToLowerInvariant() + $sizeSuffix + '.png'
 )
 
 if (-not (Test-Path -LiteralPath $artifactRoot)) {
     New-Item -ItemType Directory -Path $artifactRoot | Out-Null
+}
+
+if ($FullHd100 -and ($MinimumWindow -or $Physical125)) {
+    throw '-FullHd100 cannot be combined with -MinimumWindow or -Physical125.'
+}
+
+Add-Type -AssemblyName System.Windows.Forms
+$primaryScreen = [Windows.Forms.Screen]::PrimaryScreen
+if ($FullHd100 -and (
+    $primaryScreen.Bounds.Width -ne 1920 -or
+    $primaryScreen.Bounds.Height -ne 1080
+)) {
+    throw (
+        '-FullHd100 requires a 1920x1080 primary display; actual bounds are ' +
+        $primaryScreen.Bounds.Width + 'x' + $primaryScreen.Bounds.Height + '.'
+    )
 }
 
 if (Test-Path -LiteralPath $profileRoot) {
@@ -209,7 +234,23 @@ try {
         throw 'FilePrompt AI main window was not created.'
     }
 
-    if ($MinimumWindow) {
+    if ($FullHd100) {
+        $workingArea = $primaryScreen.WorkingArea
+        if (-not [FilePromptAICaptureNative]::SetWindowPos(
+            $process.MainWindowHandle,
+            [IntPtr]::Zero,
+            $workingArea.X,
+            $workingArea.Y,
+            $workingArea.Width,
+            $workingArea.Height,
+            0x0040
+        )) {
+            throw 'Could not size FilePrompt AI to the Full HD working area.'
+        }
+
+        Start-Sleep -Milliseconds 300
+    }
+    elseif ($MinimumWindow) {
         if (-not [FilePromptAICaptureNative]::SetWindowPos(
             $process.MainWindowHandle,
             [IntPtr]::Zero,
@@ -306,10 +347,14 @@ try {
         $dpi = 96
     }
 
+    if ($FullHd100 -and $dpi -ne 96) {
+        throw "-FullHd100 requires 100% scaling (96 DPI); actual DPI is $dpi."
+    }
+
     $listView = [FilePromptAICaptureNative]::DescribeListView(
         $process.MainWindowHandle
     )
-    Write-Host "PASS | ui capture | mode=$Mode | ${width}x${height} | dpi=$dpi | list=$listView | $outputPath | physical125=$physicalPath"
+    Write-Host "PASS | ui capture | mode=$Mode | ${width}x${height} | dpi=$dpi | screen=$($primaryScreen.Bounds.Width)x$($primaryScreen.Bounds.Height) | working=$($primaryScreen.WorkingArea.Width)x$($primaryScreen.WorkingArea.Height) | list=$listView | $outputPath | physical125=$physicalPath"
 }
 finally {
     if (-not $process.HasExited) {

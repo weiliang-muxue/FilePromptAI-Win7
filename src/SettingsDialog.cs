@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
 
@@ -19,7 +20,9 @@ namespace FilePromptAIWin7
 
         public TextBox ApiKeyTextBox { get; private set; }
 
-        public TextBox ModelTextBox { get; private set; }
+        public ComboBox ModelTextBox { get; private set; }
+
+        public Button FetchModelsButton { get; private set; }
 
         public Button TestConnectionButton { get; private set; }
 
@@ -211,6 +214,32 @@ namespace FilePromptAIWin7
                 extensionSummaryLabel.Text;
         }
 
+        public void SetAvailableModels(IList<string> models)
+        {
+            string current = ModelTextBox.Text ?? string.Empty;
+            ModelTextBox.BeginUpdate();
+            try
+            {
+                ModelTextBox.Items.Clear();
+                foreach (string model in models ?? new List<string>())
+                {
+                    if (!string.IsNullOrWhiteSpace(model))
+                    {
+                        ModelTextBox.Items.Add(model);
+                    }
+                }
+            }
+            finally
+            {
+                ModelTextBox.EndUpdate();
+            }
+
+            if (!string.IsNullOrWhiteSpace(current))
+            {
+                ModelTextBox.Text = current;
+            }
+        }
+
         private Control CreateNavigation()
         {
             Panel panel = new Panel();
@@ -293,11 +322,38 @@ namespace FilePromptAIWin7
             EndpointTextBox = CreateTextBox("完整请求 URL");
             ApiKeyTextBox = CreateTextBox("API Key");
             ApiKeyTextBox.UseSystemPasswordChar = true;
-            ModelTextBox = CreateTextBox("模型名称");
+            ModelTextBox = new ComboBox();
+            ModelTextBox.DropDownStyle = ComboBoxStyle.DropDown;
+            ModelTextBox.FlatStyle = FlatStyle.Flat;
+            ModelTextBox.BackColor = UiTheme.InputBackground;
+            ModelTextBox.ForeColor = UiTheme.TextPrimary;
+            ModelTextBox.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+            ModelTextBox.AutoCompleteSource = AutoCompleteSource.ListItems;
+            ModelTextBox.MaxDropDownItems = 16;
+            ModelTextBox.AccessibleName = "模型名称";
+
+            FetchModelsButton = CreateButton("获取模型", 94);
+            FetchModelsButton.AccessibleName = "从当前接口获取模型列表";
+
+            TableLayoutPanel modelSelector = new TableLayoutPanel();
+            modelSelector.Dock = DockStyle.Fill;
+            modelSelector.Margin = new Padding(0);
+            modelSelector.ColumnCount = 2;
+            modelSelector.RowCount = 1;
+            modelSelector.ColumnStyles.Add(
+                new ColumnStyle(SizeType.Percent, 100F));
+            modelSelector.ColumnStyles.Add(
+                new ColumnStyle(SizeType.Absolute, 102F));
+            ModelTextBox.Dock = DockStyle.Fill;
+            ModelTextBox.Margin = new Padding(0, 3, 8, 3);
+            FetchModelsButton.Dock = DockStyle.Fill;
+            FetchModelsButton.Margin = new Padding(0, 3, 0, 3);
+            modelSelector.Controls.Add(ModelTextBox, 0, 0);
+            modelSelector.Controls.Add(FetchModelsButton, 1, 0);
 
             AddField(layout, 2, "完整请求 URL", EndpointTextBox);
             AddField(layout, 4, "API Key", ApiKeyTextBox);
-            AddField(layout, 6, "模型名称", ModelTextBox);
+            AddField(layout, 6, "模型名称", modelSelector);
 
             showApiKeyCheckBox = new CheckBox();
             showApiKeyCheckBox.Text = "显示 Key";
@@ -527,6 +583,13 @@ namespace FilePromptAIWin7
             if (textBox != null)
             {
                 textBox.SelectAll();
+                return;
+            }
+
+            ComboBox comboBox = focusControl as ComboBox;
+            if (comboBox != null)
+            {
+                comboBox.SelectAll();
             }
         }
 

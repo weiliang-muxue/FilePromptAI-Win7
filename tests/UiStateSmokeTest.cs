@@ -4,16 +4,20 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 internal static class UiStateSmokeTest
 {
     private const int EmGetScrollPosition = 0x04DD;
     private const int EmSetScrollPosition = 0x04DE;
+    private const int WmClose = 0x0010;
     private static Exception uiThreadException;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -29,6 +33,19 @@ internal static class UiStateSmokeTest
         int message,
         IntPtr wordParameter,
         ref NativePoint longParameter);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindWindow(
+        string className,
+        string windowName);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(
+        IntPtr windowHandle,
+        int message,
+        IntPtr wordParameter,
+        IntPtr longParameter);
 
     [STAThread]
     private static int Main(string[] args)
@@ -87,6 +104,9 @@ internal static class UiStateSmokeTest
             TestSearchCharacterBudget(application, formType, form);
             TestExtensionsDialog(application, formType, form);
             TestModelProfilesDialog(application, formType, form);
+            TestRegenerationAndRetryState(application, formType, form);
+            TestGenerationRetryWorkflows(application, formType, form);
+            TestRetryInvalidation(application, formType, form, dataRoot);
             TestUninstallerEntry(formType, form);
             TestMcpApprovalArguments(application, formType, form);
             TestStdioStartupApproval(application, formType, form);
@@ -2167,6 +2187,1343 @@ internal static class UiStateSmokeTest
             dialog.Dispose();
         }
     }
+
+    private static void TestRegenerationAndRetryState(
+        Assembly application,
+        Type formType,
+        object form)
+    {
+        Button quickModel = GetField(
+            formType,
+            form,
+            "quickModelButton") as Button;
+        Button regenerate = GetField(
+            formType,
+            form,
+            "regenerateButton") as Button;
+        Button retry = GetField(
+            formType,
+            form,
+            "retryButton") as Button;
+        AssertTrue(
+            quickModel != null && quickModel.Width == 104 &&
+                quickModel.Height == 27 && quickModel.AutoEllipsis &&
+                !quickModel.AutoSize &&
+                quickModel.AccessibleName == "快速切换已保存模型" &&
+                quickModel.ContextMenuStrip != null,
+            "Quick model control has a stable compact width");
+        AssertTrue(
+            regenerate != null && regenerate.Width == 86 &&
+                regenerate.Height == 27 && !regenerate.AutoSize &&
+                regenerate.AccessibleName == "原位重新生成最新回复",
+            "Regenerate control has a stable compact width");
+        AssertTrue(
+            retry != null && retry.Width == 64 && retry.Height == 27 &&
+                !retry.AutoSize &&
+                retry.AccessibleName == "重试上一次失败的模型请求",
+            "Retry control has a stable compact width");
+
+        object store = GetField(formType, form, "conversationStore");
+        Type storeType = store.GetType();
+        string originalCurrentId = Convert.ToString(
+            storeType.GetProperty("CurrentSessionId").GetValue(store, null));
+        object originalProfiles = GetField(
+            formType,
+            form,
+            "modelProfiles");
+        Control endpoint = GetField(
+            formType,
+            form,
+            "endpointTextBox") as Control;
+        Control apiKey = GetField(
+            formType,
+            form,
+            "apiKeyTextBox") as Control;
+        Control model = GetField(
+            formType,
+            form,
+            "modelTextBox") as Control;
+        string originalEndpoint = endpoint.Text;
+        string originalApiKey = apiKey.Text;
+        string originalModel = model.Text;
+        object originalGeneration = GetField(
+            formType,
+            form,
+            "generationCancellation");
+        object originalConnection = GetField(
+            formType,
+            form,
+            "connectionTestCancellation");
+        bool originalAddingFiles = (bool)GetField(
+            formType,
+            form,
+            "isAddingFiles");
+        bool originalWriteBlocked = (bool)storeType.GetField(
+            "writeBlockedByRecovery",
+            BindingFlags.Instance | BindingFlags.NonPublic).GetValue(store);
+        bool originalRetryAvailable = (bool)GetField(
+            formType,
+            form,
+            "retryAvailable");
+        bool originalRetryRegeneration = (bool)GetField(
+            formType,
+            form,
+            "retryRegeneration");
+        string originalRetrySessionId = (string)GetField(
+            formType,
+            form,
+            "retrySessionId");
+        string originalRetryPrompt = (string)GetField(
+            formType,
+            form,
+            "retryPromptText");
+        Form window = form as Form;
+        Size originalWindowSize = window.Size;
+        object temporarySession = null;
+        CancellationTokenSource busyCancellation = null;
+        try
+        {
+            AssertTrue(
+                originalGeneration == null && originalConnection == null &&
+                    !originalAddingFiles && !originalWriteBlocked,
+                "Regeneration state test starts while the workspace is idle");
+            temporarySession = InvokePublic(
+                store,
+                "CreateSession",
+                "regeneration state " + Guid.NewGuid().ToString("N"));
+            IList messages = (IList)GetProperty(
+                temporarySession,
+                "Messages");
+            Type messageType = application.GetType(
+                "FilePromptAIWin7.ConversationMessage",
+                true);
+
+            object user = CreateConversationMessage(
+                messageType,
+                "user",
+                "latest question");
+            object assistant = CreateConversationMessage(
+                messageType,
+                "assistant",
+                "latest answer");
+            SetProperty(
+                assistant,
+                "ParentMessageId",
+                (string)GetProperty(user, "Id"));
+
+            AssertLatestRegenerationTurn(
+                formType,
+                form,
+                false,
+                null,
+                null,
+                -1,
+                "Fewer than two messages cannot regenerate");
+            messages.Add(user);
+            AssertLatestRegenerationTurn(
+                formType,
+                form,
+                false,
+                null,
+                null,
+                -1,
+                "A single user message cannot regenerate");
+            messages.Add(CreateConversationMessage(
+                messageType,
+                "tool",
+                "tool result"));
+            AssertLatestRegenerationTurn(
+                formType,
+                form,
+                false,
+                null,
+                null,
+                -1,
+                "A non-assistant final message cannot regenerate");
+            messages.Clear();
+            messages.Add(CreateConversationMessage(
+                messageType,
+                "assistant",
+                "wrong predecessor"));
+            messages.Add(assistant);
+            AssertLatestRegenerationTurn(
+                formType,
+                form,
+                false,
+                null,
+                null,
+                -1,
+                "A non-user predecessor cannot regenerate");
+            messages.Clear();
+            SetProperty(user, "Id", string.Empty);
+            messages.Add(user);
+            messages.Add(assistant);
+            AssertLatestRegenerationTurn(
+                formType,
+                form,
+                false,
+                null,
+                null,
+                -1,
+                "A user message without an identifier cannot regenerate");
+            SetProperty(user, "Id", "latest-user-" +
+                Guid.NewGuid().ToString("N"));
+            SetProperty(
+                assistant,
+                "ParentMessageId",
+                (string)GetProperty(user, "Id"));
+            AssertLatestRegenerationTurn(
+                formType,
+                form,
+                true,
+                user,
+                assistant,
+                0,
+                "The final user and assistant pair is identified");
+            object trailingTool = CreateConversationMessage(
+                messageType,
+                "tool",
+                "trailing tool");
+            messages.Add(trailingTool);
+            AssertLatestRegenerationTurn(
+                formType,
+                form,
+                false,
+                null,
+                null,
+                -1,
+                "A trailing message invalidates the latest turn");
+            messages.RemoveAt(messages.Count - 1);
+
+            AssertTrue(
+                (bool)InvokePrivate(
+                    formType,
+                    form,
+                    "CanRegenerateLatestTurn"),
+                "A reusable latest turn can regenerate while idle");
+
+            InvokePrivate(
+                formType,
+                form,
+                "RememberFailedGeneration",
+                temporarySession,
+                false,
+                "retry normal prompt");
+            AssertRetryState(
+                formType,
+                form,
+                true,
+                false,
+                GetSessionId(temporarySession),
+                "retry normal prompt",
+                true,
+                "重试",
+                "Normal failed generation is remembered");
+            InvokePrivate(
+                formType,
+                form,
+                "RememberFailedGeneration",
+                temporarySession,
+                true,
+                "retry regeneration prompt");
+            AssertRetryState(
+                formType,
+                form,
+                true,
+                true,
+                GetSessionId(temporarySession),
+                "retry regeneration prompt",
+                true,
+                "重试生成",
+                "Failed regeneration is remembered");
+
+            busyCancellation = new CancellationTokenSource();
+            SetField(
+                formType,
+                form,
+                "generationCancellation",
+                busyCancellation);
+            InvokePrivate(formType, form, "UpdateRetryButton");
+            InvokePrivate(formType, form, "UpdateOutputButtons", true);
+            AssertTrue(
+                !retry.Enabled && !regenerate.Enabled &&
+                    !quickModel.Enabled &&
+                    !(bool)InvokePrivate(
+                        formType,
+                        form,
+                        "CanRegenerateLatestTurn"),
+                "Generation disables retry and regeneration controls");
+            SetField(formType, form, "generationCancellation", null);
+            busyCancellation.Dispose();
+            busyCancellation = null;
+
+            busyCancellation = new CancellationTokenSource();
+            SetField(
+                formType,
+                form,
+                "connectionTestCancellation",
+                busyCancellation);
+            InvokePrivate(
+                formType,
+                form,
+                "SetConnectionTestingState",
+                true);
+            AssertTrue(
+                !retry.Enabled && !regenerate.Enabled &&
+                    !quickModel.Enabled &&
+                    !(bool)InvokePrivate(
+                        formType,
+                        form,
+                        "CanRegenerateLatestTurn"),
+                "Connection testing disables retry and regeneration controls");
+            SetField(formType, form, "connectionTestCancellation", null);
+            busyCancellation.Dispose();
+            busyCancellation = null;
+            InvokePrivate(
+                formType,
+                form,
+                "SetConnectionTestingState",
+                false);
+
+            SetField(formType, form, "isAddingFiles", true);
+            InvokePrivate(formType, form, "UpdateRetryButton");
+            InvokePrivate(formType, form, "UpdateOutputButtons", false);
+            AssertTrue(
+                !retry.Enabled && !regenerate.Enabled &&
+                    !quickModel.Enabled &&
+                    !(bool)InvokePrivate(
+                        formType,
+                        form,
+                        "CanRegenerateLatestTurn"),
+                "File reading disables retry and regeneration controls");
+            SetField(formType, form, "isAddingFiles", false);
+            InvokePrivate(formType, form, "UpdateRetryButton");
+            InvokePrivate(formType, form, "UpdateOutputButtons", false);
+
+            string reusableContent = (string)GetProperty(user, "Content");
+            SetProperty(
+                user,
+                "Content",
+                reusableContent + "\r\n以下图片或内联文件仅随本轮发送");
+            AssertTrue(
+                !(bool)InvokePrivate(
+                    formType,
+                    form,
+                    "CanRegenerateLatestTurn"),
+                "A binary-only attachment marker prevents regeneration");
+            SetProperty(user, "Content", reusableContent);
+
+            storeType.GetField(
+                "writeBlockedByRecovery",
+                BindingFlags.Instance | BindingFlags.NonPublic).SetValue(
+                    store,
+                    true);
+            AssertTrue(
+                !(bool)InvokePrivate(
+                    formType,
+                    form,
+                    "CanRegenerateLatestTurn"),
+                "Conversation write protection prevents regeneration");
+            storeType.GetField(
+                "writeBlockedByRecovery",
+                BindingFlags.Instance | BindingFlags.NonPublic).SetValue(
+                    store,
+                    false);
+
+            InvokePrivate(formType, form, "ClearRetryState");
+            AssertRetryState(
+                formType,
+                form,
+                false,
+                false,
+                string.Empty,
+                string.Empty,
+                false,
+                "重试",
+                "Clearing retry resets all retry state");
+
+            Type profileType = application.GetType(
+                "FilePromptAIWin7.ModelProfile",
+                true);
+            Type profilesType = typeof(List<>).MakeGenericType(profileType);
+            IList profiles = (IList)Activator.CreateInstance(profilesType);
+            object profile = Activator.CreateInstance(profileType, true);
+            SetProperty(profile, "Name", "Saved profile");
+            SetProperty(
+                profile,
+                "EndpointUrl",
+                "https://example.invalid/v1/chat/completions");
+            SetProperty(profile, "ApiKey", "profile-key");
+            SetProperty(profile, "ModelName", "CaseSensitiveModel");
+            profiles.Add(profile);
+            SetField(formType, form, "modelProfiles", profiles);
+            endpoint.Text = "HTTPS://EXAMPLE.INVALID/v1/chat/completions";
+            apiKey.Text = "profile-key";
+            model.Text = "CaseSensitiveModel";
+            InvokePrivate(formType, form, "UpdateQuickModelButton");
+            AssertTrue(
+                quickModel.Text == "Saved profile" &&
+                    quickModel.AccessibleDescription ==
+                        "当前模型：CaseSensitiveModel",
+                "Quick model matches endpoint without case sensitivity");
+
+            model.Text = "casesensitivemodel";
+            InvokePrivate(formType, form, "UpdateQuickModelButton");
+            AssertTrue(
+                quickModel.Text == "casesensitivemodel" &&
+                    quickModel.AccessibleDescription ==
+                        "当前模型：casesensitivemodel",
+                "Quick model matches model names with ordinal casing");
+
+            model.Text = "  custom-model  ";
+            InvokePrivate(formType, form, "UpdateQuickModelButton");
+            AssertTrue(
+                quickModel.Text == "custom-model" &&
+                    quickModel.AccessibleDescription ==
+                        "当前模型：custom-model",
+                "Quick model shows a trimmed unmatched model name");
+            model.Text = string.Empty;
+            InvokePrivate(formType, form, "UpdateQuickModelButton");
+            AssertTrue(
+                quickModel.Text == "模型" &&
+                    quickModel.AccessibleDescription == "尚未配置模型",
+                "Quick model shows an unconfigured fallback");
+
+            string longName = RepeatText("Long profile ", 24);
+            SetProperty(profile, "Name", longName);
+            model.Text = "CaseSensitiveModel";
+            window.Size = window.MinimumSize;
+            window.PerformLayout();
+            Application.DoEvents();
+            InvokePrivate(formType, form, "UpdateQuickModelButton");
+            AssertTrue(
+                quickModel.Text == longName && quickModel.Width == 104 &&
+                    quickModel.AutoEllipsis && !quickModel.AutoSize &&
+                    quickModel.Parent != null &&
+                    quickModel.Right <= quickModel.Parent.ClientSize.Width,
+                "Long profile names do not resize or overflow the quick control");
+            model.Text = RepeatText("unmatched-model", 20);
+            InvokePrivate(formType, form, "UpdateQuickModelButton");
+            AssertTrue(
+                quickModel.Width == 104 && quickModel.AutoEllipsis &&
+                    !quickModel.AutoSize,
+                "Long custom model names keep the quick control stable");
+        }
+        finally
+        {
+            if (busyCancellation != null)
+            {
+                busyCancellation.Dispose();
+            }
+
+            SetField(
+                formType,
+                form,
+                "generationCancellation",
+                originalGeneration);
+            SetField(
+                formType,
+                form,
+                "connectionTestCancellation",
+                originalConnection);
+            SetField(
+                formType,
+                form,
+                "isAddingFiles",
+                originalAddingFiles);
+            storeType.GetField(
+                "writeBlockedByRecovery",
+                BindingFlags.Instance | BindingFlags.NonPublic).SetValue(
+                    store,
+                    originalWriteBlocked);
+
+            if (temporarySession != null)
+            {
+                ((IList)GetProperty(temporarySession, "Messages")).Clear();
+                InvokePublic(
+                    store,
+                    "DeleteSession",
+                    GetSessionId(temporarySession));
+            }
+            if (!string.IsNullOrEmpty(originalCurrentId))
+            {
+                InvokePublic(store, "SelectSession", originalCurrentId);
+            }
+
+            SetField(formType, form, "modelProfiles", originalProfiles);
+            endpoint.Text = originalEndpoint;
+            apiKey.Text = originalApiKey;
+            model.Text = originalModel;
+            window.Size = originalWindowSize;
+            ((System.Windows.Forms.Timer)GetField(
+                formType,
+                form,
+                "contextSummaryTimer")).Stop();
+            SetField(
+                formType,
+                form,
+                "retryAvailable",
+                originalRetryAvailable);
+            SetField(
+                formType,
+                form,
+                "retryRegeneration",
+                originalRetryRegeneration);
+            SetField(
+                formType,
+                form,
+                "retrySessionId",
+                originalRetrySessionId);
+            SetField(
+                formType,
+                form,
+                "retryPromptText",
+                originalRetryPrompt);
+            InvokePrivate(formType, form, "UpdateRetryButton");
+            InvokePrivate(formType, form, "UpdateQuickModelButton");
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+        }
+    }
+
+    private static void TestGenerationRetryWorkflows(
+        Assembly application,
+        Type formType,
+        object form)
+    {
+        object store = GetField(formType, form, "conversationStore");
+        Type storeType = store.GetType();
+        IList originalSessions = (IList)storeType.GetProperty(
+            "Sessions").GetValue(store, null);
+        HashSet<string> originalIds = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (object session in originalSessions)
+        {
+            originalIds.Add(GetSessionId(session));
+        }
+
+        string originalCurrentId = Convert.ToString(
+            storeType.GetProperty("CurrentSessionId").GetValue(store, null));
+        object originalExtensions = GetField(
+            formType,
+            form,
+            "extensionSettings");
+        Control endpoint = (Control)GetField(
+            formType,
+            form,
+            "endpointTextBox");
+        Control apiKey = (Control)GetField(
+            formType,
+            form,
+            "apiKeyTextBox");
+        Control model = (Control)GetField(
+            formType,
+            form,
+            "modelTextBox");
+        RichTextBox prompt = (RichTextBox)GetField(
+            formType,
+            form,
+            "promptTextBox");
+        RichTextBox output = (RichTextBox)GetField(
+            formType,
+            form,
+            "outputTextBox");
+        string originalEndpoint = endpoint.Text;
+        string originalApiKey = apiKey.Text;
+        string originalModel = model.Text;
+        string originalPrompt = prompt.Text;
+        bool originalRetryAvailable = (bool)GetField(
+            formType,
+            form,
+            "retryAvailable");
+        bool originalRetryRegeneration = (bool)GetField(
+            formType,
+            form,
+            "retryRegeneration");
+        string originalRetrySessionId = (string)GetField(
+            formType,
+            form,
+            "retrySessionId");
+        string originalRetryPrompt = (string)GetField(
+            formType,
+            form,
+            "retryPromptText");
+        string storagePath = (string)storeType.GetField(
+            "storagePath",
+            BindingFlags.Instance | BindingFlags.NonPublic).GetValue(store);
+        Type messageType = application.GetType(
+            "FilePromptAIWin7.ConversationMessage",
+            true);
+        Type extensionType = application.GetType(
+            "FilePromptAIWin7.ExtensionSettings",
+            true);
+        object regenerationSession = null;
+        object normalSession = null;
+        TcpTestServer server = null;
+        System.Windows.Forms.Timer errorDialogTimer = null;
+        bool errorDialogSeen = false;
+        try
+        {
+            SetField(
+                formType,
+                form,
+                "extensionSettings",
+                Activator.CreateInstance(extensionType, true));
+            endpoint.Text = "http://127.0.0.1:1/v1/chat/completions";
+            apiKey.Text = "ui-generation-key";
+            model.Text = "ui-generation-model";
+            prompt.Clear();
+
+            regenerationSession = InvokePublic(
+                store,
+                "CreateSession",
+                "regeneration workflow " + Guid.NewGuid().ToString("N"));
+            string regenerationSessionId = GetSessionId(regenerationSession);
+            object prefixUser = CreateConversationMessage(
+                messageType,
+                "user",
+                "prefix question");
+            object prefixAssistant = CreateConversationMessage(
+                messageType,
+                "assistant",
+                "prefix answer");
+            SetProperty(
+                prefixAssistant,
+                "ParentMessageId",
+                (string)GetProperty(prefixUser, "Id"));
+            object latestUser = CreateConversationMessage(
+                messageType,
+                "user",
+                "用户要求：\r\nlatest regeneration prompt\r\n");
+            SetProperty(
+                latestUser,
+                "ParentMessageId",
+                (string)GetProperty(prefixAssistant, "Id"));
+            object oldAssistant = CreateConversationMessage(
+                messageType,
+                "assistant",
+                "old assistant reply");
+            SetProperty(
+                oldAssistant,
+                "ParentMessageId",
+                (string)GetProperty(latestUser, "Id"));
+            SetProperty(oldAssistant, "VariantIndex", 3);
+            AddPersistedMessage(store, regenerationSessionId, prefixUser);
+            AddPersistedMessage(store, regenerationSessionId, prefixAssistant);
+            AddPersistedMessage(store, regenerationSessionId, latestUser);
+            AddPersistedMessage(store, regenerationSessionId, oldAssistant);
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+
+            IList messages = (IList)GetProperty(
+                regenerationSession,
+                "Messages");
+            TestRegenerationPromptBudgets(
+                application,
+                formType,
+                form,
+                regenerationSession,
+                messages,
+                originalExtensions);
+            string diskBefore = Convert.ToBase64String(
+                File.ReadAllBytes(storagePath));
+            DateTime updatedBefore = (DateTime)GetProperty(
+                regenerationSession,
+                "UpdatedAt");
+
+            server = TcpTestServer.StartStalled();
+            endpoint.Text = server.Url;
+            object turn = GetLatestRegenerationTurn(formType, form);
+            Task cancellationTask = InvokeGenerateAsync(
+                formType,
+                form,
+                true,
+                turn,
+                null);
+            PumpUntil(
+                delegate
+                {
+                    return server.RequestReceived && GetField(
+                        formType,
+                        form,
+                        "generationCancellation") != null;
+                },
+                10000,
+                "Cancelled regeneration reaches the local endpoint");
+            ((CancellationTokenSource)GetField(
+                formType,
+                form,
+                "generationCancellation")).Cancel();
+            PumpTask(
+                cancellationTask,
+                10000,
+                "Cancelled regeneration completes");
+            server.Dispose();
+            server = null;
+            AssertTrue(
+                messages.Count == 4 &&
+                    ReferenceEquals(messages[0], prefixUser) &&
+                    ReferenceEquals(messages[1], prefixAssistant) &&
+                    ReferenceEquals(messages[2], latestUser) &&
+                    ReferenceEquals(messages[3], oldAssistant) &&
+                    (DateTime)GetProperty(
+                        regenerationSession,
+                        "UpdatedAt") == updatedBefore &&
+                    Convert.ToBase64String(File.ReadAllBytes(storagePath)) ==
+                        diskBefore &&
+                    !(bool)GetField(
+                        formType,
+                        form,
+                        "retryAvailable") &&
+                    output.Text.IndexOf(
+                        "old assistant reply",
+                        StringComparison.Ordinal) >= 0,
+                "Cancelled regeneration preserves the original reply");
+
+            string replacementText = "replacement assistant reply";
+            server = TcpTestServer.StartErrorThenSuccess(
+                400,
+                "{\"error\":{\"message\":\"intentional failure\"}}",
+                replacementText);
+            endpoint.Text = server.Url;
+            errorDialogTimer = CreateMessageBoxCloser(
+                "模型调用失败",
+                delegate { errorDialogSeen = true; });
+            errorDialogTimer.Start();
+            turn = GetLatestRegenerationTurn(formType, form);
+            Task failedTask = InvokeGenerateAsync(
+                formType,
+                form,
+                true,
+                turn,
+                null);
+            PumpTask(failedTask, 10000, "Failed regeneration completes");
+            errorDialogTimer.Stop();
+            errorDialogTimer.Dispose();
+            errorDialogTimer = null;
+            AssertTrue(
+                errorDialogSeen && messages.Count == 4 &&
+                    ReferenceEquals(messages[3], oldAssistant) &&
+                    Convert.ToBase64String(File.ReadAllBytes(storagePath)) ==
+                        diskBefore &&
+                    output.Text.IndexOf(
+                        "old assistant reply",
+                        StringComparison.Ordinal) >= 0,
+                "Failed regeneration preserves the original reply");
+            AssertRetryState(
+                formType,
+                form,
+                true,
+                true,
+                regenerationSessionId,
+                (string)GetProperty(latestUser, "Content"),
+                true,
+                "重试生成",
+                "Failed regeneration enables an in-place retry");
+
+            InvokePrivate(formType, form, "RetryLastFailedGeneration");
+            PumpUntil(
+                delegate
+                {
+                    return server.RequestCount == 2 && GetField(
+                        formType,
+                        form,
+                        "generationCancellation") == null;
+                },
+                10000,
+                "Regeneration retry completes");
+            server.Dispose();
+            server = null;
+            messages = (IList)GetProperty(regenerationSession, "Messages");
+            object replacement = messages[messages.Count - 1];
+            AssertTrue(
+                messages.Count == 4 &&
+                    ReferenceEquals(messages[0], prefixUser) &&
+                    ReferenceEquals(messages[1], prefixAssistant) &&
+                    ReferenceEquals(messages[2], latestUser) &&
+                    !ReferenceEquals(replacement, oldAssistant) &&
+                    (string)GetProperty(replacement, "Role") == "assistant" &&
+                    (string)GetProperty(replacement, "Content") ==
+                        replacementText &&
+                    (string)GetProperty(replacement, "ParentMessageId") ==
+                        (string)GetProperty(latestUser, "Id") &&
+                    (int)GetProperty(replacement, "VariantIndex") == 4 &&
+                    !string.Equals(
+                        (string)GetProperty(replacement, "Id"),
+                        (string)GetProperty(oldAssistant, "Id"),
+                        StringComparison.OrdinalIgnoreCase) &&
+                    CountSessionMessagesWithContent(
+                        messages,
+                        replacementText) == 1 &&
+                    CountSessionMessagesWithContent(
+                        messages,
+                        "old assistant reply") == 0,
+                "Successful regeneration retry replaces the assistant in place");
+            AssertRetryState(
+                formType,
+                form,
+                false,
+                false,
+                string.Empty,
+                string.Empty,
+                false,
+                "重试",
+                "Successful regeneration clears retry state");
+            AssertReloadedMessages(
+                storeType,
+                storagePath,
+                regenerationSessionId,
+                4,
+                replacementText,
+                (string)GetProperty(latestUser, "Id"),
+                4,
+                "Regenerated reply persists after reload");
+
+            normalSession = InvokePublic(
+                store,
+                "CreateSession",
+                "normal retry workflow " + Guid.NewGuid().ToString("N"));
+            string normalSessionId = GetSessionId(normalSession);
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            string normalInstruction = "normal retry prompt";
+            string normalPrompt = "用户要求：\r\n" +
+                normalInstruction + "\r\n";
+            server = TcpTestServer.StartSuccess("normal retry answer");
+            endpoint.Text = server.Url;
+            InvokePrivate(
+                formType,
+                form,
+                "RememberFailedGeneration",
+                normalSession,
+                false,
+                normalInstruction);
+            InvokePrivate(formType, form, "RetryLastFailedGeneration");
+            PumpUntil(
+                delegate
+                {
+                    return server.RequestReceived && GetField(
+                        formType,
+                        form,
+                        "generationCancellation") == null;
+                },
+                10000,
+                "Normal retry completes");
+            server.Dispose();
+            server = null;
+            IList normalMessages = (IList)GetProperty(
+                normalSession,
+                "Messages");
+            AssertTrue(
+                normalMessages.Count == 2 &&
+                    (string)GetProperty(normalMessages[0], "Role") == "user" &&
+                    (string)GetProperty(normalMessages[0], "Content") ==
+                        normalPrompt &&
+                    (string)GetProperty(normalMessages[1], "Role") ==
+                        "assistant" &&
+                    (string)GetProperty(normalMessages[1], "Content") ==
+                        "normal retry answer" &&
+                    CountSessionMessagesWithContent(
+                        normalMessages,
+                        normalPrompt) == 1 &&
+                    CountSessionMessagesWithContent(
+                        normalMessages,
+                        "normal retry answer") == 1,
+                "Normal retry saves exactly one user and assistant pair");
+            AssertReloadedMessages(
+                storeType,
+                storagePath,
+                normalSessionId,
+                2,
+                "normal retry answer",
+                string.Empty,
+                0,
+                "Normal retry persists one complete turn after reload");
+        }
+        finally
+        {
+            if (errorDialogTimer != null)
+            {
+                errorDialogTimer.Stop();
+                errorDialogTimer.Dispose();
+            }
+            if (server != null)
+            {
+                server.Dispose();
+            }
+
+            CancellationTokenSource activeCancellation = GetField(
+                formType,
+                form,
+                "generationCancellation") as CancellationTokenSource;
+            if (activeCancellation != null)
+            {
+                activeCancellation.Cancel();
+                PumpUntil(
+                    delegate
+                    {
+                        return GetField(
+                            formType,
+                            form,
+                            "generationCancellation") == null;
+                    },
+                    5000,
+                    "Generation cleanup completes");
+            }
+
+            IList sessions = (IList)storeType.GetProperty(
+                "Sessions").GetValue(store, null);
+            List<string> temporaryIds = new List<string>();
+            foreach (object session in sessions)
+            {
+                string id = GetSessionId(session);
+                if (!originalIds.Contains(id))
+                {
+                    temporaryIds.Add(id);
+                }
+            }
+            foreach (string id in temporaryIds)
+            {
+                InvokePublic(store, "DeleteSession", id);
+            }
+            if (!string.IsNullOrEmpty(originalCurrentId))
+            {
+                InvokePublic(store, "SelectSession", originalCurrentId);
+            }
+
+            SetField(
+                formType,
+                form,
+                "extensionSettings",
+                originalExtensions);
+            endpoint.Text = originalEndpoint;
+            apiKey.Text = originalApiKey;
+            model.Text = originalModel;
+            prompt.Text = originalPrompt;
+            ((System.Windows.Forms.Timer)GetField(
+                formType,
+                form,
+                "contextSummaryTimer")).Stop();
+            SetField(
+                formType,
+                form,
+                "retryAvailable",
+                originalRetryAvailable);
+            SetField(
+                formType,
+                form,
+                "retryRegeneration",
+                originalRetryRegeneration);
+            SetField(
+                formType,
+                form,
+                "retrySessionId",
+                originalRetrySessionId);
+            SetField(
+                formType,
+                form,
+                "retryPromptText",
+                originalRetryPrompt);
+            InvokePrivate(formType, form, "UpdateRetryButton");
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            InvokePrivate(formType, form, "RestoreCurrentDraft");
+        }
+    }
+
+    private static void TestRegenerationPromptBudgets(
+        Assembly application,
+        Type formType,
+        object form,
+        object session,
+        IList messages,
+        object originalExtensions)
+    {
+        Type extensionType = application.GetType(
+            "FilePromptAIWin7.ExtensionSettings",
+            true);
+        Type skillType = application.GetType(
+            "FilePromptAIWin7.SkillDefinition",
+            true);
+        RichTextBox output = (RichTextBox)GetField(
+            formType,
+            form,
+            "outputTextBox");
+        object latestUser = messages[messages.Count - 2];
+        string originalUserContent = (string)GetProperty(
+            latestUser,
+            "Content");
+        string originalOutput = output.Text;
+        DateTime originalUpdatedAt = (DateTime)GetProperty(
+            session,
+            "UpdatedAt");
+        int originalCount = messages.Count;
+        System.Windows.Forms.Timer validationTimer = null;
+        try
+        {
+            object settings = Activator.CreateInstance(extensionType, true);
+            object skill = Activator.CreateInstance(skillType, true);
+            SetProperty(skill, "Name", "budget skill");
+            SetProperty(skill, "Enabled", true);
+            SetProperty(skill, "Instructions", new string('s', 48000));
+            ((IList)GetProperty(settings, "Skills")).Add(skill);
+            SetField(formType, form, "extensionSettings", settings);
+
+            bool dialogSeen = false;
+            validationTimer = CreateMessageBoxCloser(
+                "请检查输入",
+                delegate { dialogSeen = true; });
+            validationTimer.Start();
+            Task systemBudgetTask = InvokeGenerateAsync(
+                formType,
+                form,
+                true,
+                GetLatestRegenerationTurn(formType, form),
+                null);
+            PumpTask(
+                systemBudgetTask,
+                5000,
+                "Regeneration rejects an oversized system prompt");
+            validationTimer.Stop();
+            validationTimer.Dispose();
+            validationTimer = null;
+            AssertTrue(
+                dialogSeen && messages.Count == originalCount &&
+                    ReferenceEquals(
+                        messages[messages.Count - 2],
+                        latestUser) &&
+                    (string)GetProperty(latestUser, "Content") ==
+                        originalUserContent &&
+                    (DateTime)GetProperty(session, "UpdatedAt") ==
+                        originalUpdatedAt &&
+                    output.Text == originalOutput &&
+                    GetField(
+                        formType,
+                        form,
+                        "generationCancellation") == null,
+                "System prompt budget failure leaves the turn and UI unchanged");
+
+            SetProperty(skill, "Instructions", new string('s', 24000));
+            SetProperty(latestUser, "Content", new string('u', 24000));
+            originalOutput = output.Text;
+            dialogSeen = false;
+            validationTimer = CreateMessageBoxCloser(
+                "请检查输入",
+                delegate { dialogSeen = true; });
+            validationTimer.Start();
+            Task combinedBudgetTask = InvokeGenerateAsync(
+                formType,
+                form,
+                true,
+                GetLatestRegenerationTurn(formType, form),
+                null);
+            PumpTask(
+                combinedBudgetTask,
+                5000,
+                "Regeneration rejects a combined prompt overflow");
+            validationTimer.Stop();
+            validationTimer.Dispose();
+            validationTimer = null;
+            AssertTrue(
+                dialogSeen && messages.Count == originalCount &&
+                    ReferenceEquals(
+                        messages[messages.Count - 2],
+                        latestUser) &&
+                    (DateTime)GetProperty(session, "UpdatedAt") ==
+                        originalUpdatedAt &&
+                    output.Text == originalOutput &&
+                    GetField(
+                        formType,
+                        form,
+                        "generationCancellation") == null,
+                "Combined prompt budget failure leaves the turn and UI unchanged");
+        }
+        finally
+        {
+            if (validationTimer != null)
+            {
+                validationTimer.Stop();
+                validationTimer.Dispose();
+            }
+            SetProperty(latestUser, "Content", originalUserContent);
+            SetField(
+                formType,
+                form,
+                "extensionSettings",
+                Activator.CreateInstance(extensionType, true));
+            InvokePrivate(formType, form, "RenderConversation", session);
+        }
+    }
+
+    private static void TestRetryInvalidation(
+        Assembly application,
+        Type formType,
+        object form,
+        string dataRoot)
+    {
+        object store = GetField(formType, form, "conversationStore");
+        Type storeType = store.GetType();
+        IList originalSessions = (IList)storeType.GetProperty(
+            "Sessions").GetValue(store, null);
+        HashSet<string> originalIds = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (object session in originalSessions)
+        {
+            originalIds.Add(GetSessionId(session));
+        }
+
+        string originalCurrentId = Convert.ToString(
+            storeType.GetProperty("CurrentSessionId").GetValue(store, null));
+        bool originalArchiveView = (bool)GetField(
+            formType,
+            form,
+            "showArchivedSessions");
+        bool originalRetryAvailable = (bool)GetField(
+            formType,
+            form,
+            "retryAvailable");
+        bool originalRetryRegeneration = (bool)GetField(
+            formType,
+            form,
+            "retryRegeneration");
+        string originalRetrySessionId = (string)GetField(
+            formType,
+            form,
+            "retrySessionId");
+        string originalRetryPrompt = (string)GetField(
+            formType,
+            form,
+            "retryPromptText");
+        Type messageType = application.GetType(
+            "FilePromptAIWin7.ConversationMessage",
+            true);
+        object source = null;
+        object other = null;
+        string backupPath = Path.Combine(
+            dataRoot,
+            "retry-restore-" + Guid.NewGuid().ToString("N") + ".fpc");
+        string emptyBackupPath = Path.Combine(
+            dataRoot,
+            "retry-empty-" + Guid.NewGuid().ToString("N") + ".fpc");
+        try
+        {
+            source = CreateSessionWithTurn(
+                store,
+                messageType,
+                "retry invalidation source");
+            other = InvokePublic(
+                store,
+                "CreateSession",
+                "retry invalidation other");
+
+            InvokePrivate(
+                formType,
+                form,
+                "RememberFailedGeneration",
+                source,
+                false,
+                "session switch retry");
+            InvokePrivate(formType, form, "RefreshSessionList");
+            ListBox sessionList = (ListBox)GetField(
+                formType,
+                form,
+                "sessionListBox");
+            sessionList.SelectedIndex = FindSessionIndex(
+                sessionList.Items,
+                GetSessionId(other));
+            InvokePrivate(
+                formType,
+                form,
+                "OnSessionSelected",
+                sessionList,
+                EventArgs.Empty);
+            AssertRetryCleared(
+                formType,
+                form,
+                "Switching sessions immediately expires retry state");
+
+            InvokePublic(store, "SelectSession", GetSessionId(source));
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            InvokePrivate(
+                formType,
+                form,
+                "RememberFailedGeneration",
+                source,
+                true,
+                "archive retry");
+            InvokePrivate(
+                formType,
+                form,
+                "OnToggleSessionArchivedClick",
+                form,
+                EventArgs.Empty);
+            AssertRetryCleared(
+                formType,
+                form,
+                "Archiving a session immediately expires retry state");
+            InvokePublic(
+                store,
+                "SetSessionArchived",
+                GetSessionId(source),
+                false);
+
+            InvokePublic(store, "SelectSession", GetSessionId(source));
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            InvokePrivate(
+                formType,
+                form,
+                "RememberFailedGeneration",
+                source,
+                true,
+                "branch retry");
+            InvokePrivate(
+                formType,
+                form,
+                "OnBranchSessionClick",
+                form,
+                EventArgs.Empty);
+            AssertRetryCleared(
+                formType,
+                form,
+                "Branching a session immediately expires retry state");
+
+            InvokePublic(store, "SelectSession", GetSessionId(source));
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            InvokePrivate(
+                formType,
+                form,
+                "RememberFailedGeneration",
+                source,
+                false,
+                "delete retry");
+            AssertTrue(
+                (bool)InvokePrivate(
+                    formType,
+                    form,
+                    "DeleteSessionAndClearDraft",
+                    source),
+                "Retry invalidation fixture deletes its current session");
+            AssertRetryCleared(
+                formType,
+                form,
+                "Deleting a session immediately expires retry state");
+            source = null;
+
+            object backupSourceStore = CreateStore(storeType, Path.Combine(
+                dataRoot,
+                "retry-backup-source-" +
+                    Guid.NewGuid().ToString("N") + ".xml"));
+            object backupSession = InvokePublic(
+                backupSourceStore,
+                "CreateSession",
+                "restored retry session");
+            AddPersistedMessage(
+                backupSourceStore,
+                GetSessionId(backupSession),
+                CreateConversationMessage(
+                    messageType,
+                    "user",
+                    "restored question"));
+            InvokePublic(backupSourceStore, "ExportBackup", backupPath);
+
+            object emptyStore = CreateStore(storeType, Path.Combine(
+                dataRoot,
+                "retry-empty-source-" +
+                    Guid.NewGuid().ToString("N") + ".xml"));
+            InvokePublic(emptyStore, "ExportBackup", emptyBackupPath);
+
+            object current = storeType.GetProperty(
+                "CurrentSession").GetValue(store, null);
+            InvokePrivate(
+                formType,
+                form,
+                "RememberFailedGeneration",
+                current,
+                false,
+                "empty restore retry");
+            InvokePrivate(
+                formType,
+                form,
+                "RestoreSessionsFromPath",
+                emptyBackupPath);
+            AssertRetryState(
+                formType,
+                form,
+                true,
+                false,
+                GetSessionId(current),
+                "empty restore retry",
+                true,
+                "重试",
+                "Restoring an empty backup preserves retry state");
+
+            InvokePrivate(
+                formType,
+                form,
+                "RestoreSessionsFromPath",
+                backupPath);
+            AssertRetryCleared(
+                formType,
+                form,
+                "Restoring sessions immediately expires retry state");
+        }
+        finally
+        {
+            IList sessions = (IList)storeType.GetProperty(
+                "Sessions").GetValue(store, null);
+            List<string> temporaryIds = new List<string>();
+            foreach (object session in sessions)
+            {
+                string id = GetSessionId(session);
+                if (!originalIds.Contains(id))
+                {
+                    temporaryIds.Add(id);
+                }
+            }
+            foreach (string id in temporaryIds)
+            {
+                InvokePublic(store, "DeleteSession", id);
+            }
+            if (!string.IsNullOrEmpty(originalCurrentId))
+            {
+                InvokePublic(store, "SelectSession", originalCurrentId);
+            }
+            SetField(
+                formType,
+                form,
+                "showArchivedSessions",
+                originalArchiveView);
+            SetField(
+                formType,
+                form,
+                "retryAvailable",
+                originalRetryAvailable);
+            SetField(
+                formType,
+                form,
+                "retryRegeneration",
+                originalRetryRegeneration);
+            SetField(
+                formType,
+                form,
+                "retrySessionId",
+                originalRetrySessionId);
+            SetField(
+                formType,
+                form,
+                "retryPromptText",
+                originalRetryPrompt);
+            InvokePrivate(formType, form, "UpdateRetryButton");
+            InvokePrivate(formType, form, "UpdateSessionViewButtons");
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            InvokePrivate(formType, form, "RestoreCurrentDraft");
+        }
+    }
+
     private static void TestUninstallerEntry(Type formType, object form)
     {
         Form settingsDialog = GetField(
@@ -2485,7 +3842,7 @@ internal static class UiStateSmokeTest
             "http://127.0.0.1:1/v1/chat/completions";
         ((TextBox)GetField(formType, form, "apiKeyTextBox")).Text =
             "ui-test-key";
-        ((TextBox)GetField(formType, form, "modelTextBox")).Text =
+        ((Control)GetField(formType, form, "modelTextBox")).Text =
             "ui-test-model";
         ((RichTextBox)GetField(formType, form, "promptTextBox")).Text =
             "拒绝本地 MCP 启动测试";
@@ -2563,6 +3920,558 @@ internal static class UiStateSmokeTest
         }
 
         return false;
+    }
+
+    private static object CreateConversationMessage(
+        Type messageType,
+        string role,
+        string content)
+    {
+        return Activator.CreateInstance(
+            messageType,
+            new object[] { role, content });
+    }
+
+    private static void AddPersistedMessage(
+        object store,
+        string sessionId,
+        object message)
+    {
+        AssertTrue(
+            (bool)InvokePublic(
+                store,
+                "AddMessage",
+                sessionId,
+                message),
+            "Conversation fixture message is persisted");
+    }
+
+    private static object CreateSessionWithTurn(
+        object store,
+        Type messageType,
+        string title)
+    {
+        object session = InvokePublic(store, "CreateSession", title);
+        object user = CreateConversationMessage(
+            messageType,
+            "user",
+            title + " question");
+        object assistant = CreateConversationMessage(
+            messageType,
+            "assistant",
+            title + " answer");
+        SetProperty(
+            assistant,
+            "ParentMessageId",
+            (string)GetProperty(user, "Id"));
+        AddPersistedMessage(store, GetSessionId(session), user);
+        AddPersistedMessage(store, GetSessionId(session), assistant);
+        return session;
+    }
+
+    private static object CreateStore(Type storeType, string storagePath)
+    {
+        ConstructorInfo constructor = storeType.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            null,
+            new Type[] { typeof(string) },
+            null);
+        if (constructor == null)
+        {
+            throw new MissingMethodException(
+                storeType.FullName,
+                ".ctor(string)");
+        }
+
+        return constructor.Invoke(new object[] { storagePath });
+    }
+
+    private static void AssertLatestRegenerationTurn(
+        Type formType,
+        object form,
+        bool expected,
+        object expectedUser,
+        object expectedAssistant,
+        int expectedIndex,
+        string name)
+    {
+        object[] arguments = new object[] { null };
+        bool found = (bool)InvokePrivate(
+            formType,
+            form,
+            "TryGetLatestRegenerationTurn",
+            arguments);
+        object turn = arguments[0];
+        AssertTrue(
+            found == expected &&
+                (!expected ||
+                    (turn != null &&
+                        ReferenceEquals(
+                            GetProperty(turn, "UserMessage"),
+                            expectedUser) &&
+                        ReferenceEquals(
+                            GetProperty(turn, "AssistantMessage"),
+                            expectedAssistant) &&
+                        (int)GetProperty(turn, "UserMessageIndex") ==
+                            expectedIndex)),
+            name);
+    }
+
+    private static object GetLatestRegenerationTurn(
+        Type formType,
+        object form)
+    {
+        object[] arguments = new object[] { null };
+        bool found = (bool)InvokePrivate(
+            formType,
+            form,
+            "TryGetLatestRegenerationTurn",
+            arguments);
+        if (!found || arguments[0] == null)
+        {
+            throw new InvalidOperationException(
+                "The latest regeneration fixture turn was not found.");
+        }
+
+        return arguments[0];
+    }
+
+    private static void AssertRetryState(
+        Type formType,
+        object form,
+        bool available,
+        bool regeneration,
+        string sessionId,
+        string prompt,
+        bool buttonEnabled,
+        string buttonText,
+        string name)
+    {
+        Button button = (Button)GetField(
+            formType,
+            form,
+            "retryButton");
+        AssertTrue(
+            (bool)GetField(formType, form, "retryAvailable") == available &&
+                (bool)GetField(
+                    formType,
+                    form,
+                    "retryRegeneration") == regeneration &&
+                string.Equals(
+                    (string)GetField(
+                        formType,
+                        form,
+                        "retrySessionId"),
+                    sessionId ?? string.Empty,
+                    StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(
+                    (string)GetField(
+                        formType,
+                        form,
+                        "retryPromptText"),
+                    prompt ?? string.Empty,
+                    StringComparison.Ordinal) &&
+                button.Enabled == buttonEnabled &&
+                button.Text == buttonText,
+            name);
+    }
+
+    private static void AssertRetryCleared(
+        Type formType,
+        object form,
+        string name)
+    {
+        AssertRetryState(
+            formType,
+            form,
+            false,
+            false,
+            string.Empty,
+            string.Empty,
+            false,
+            "重试",
+            name);
+    }
+
+    private static Task InvokeGenerateAsync(
+        Type formType,
+        object form,
+        bool regenerate,
+        object regenerationTurn,
+        string retryPrompt)
+    {
+        return (Task)InvokePrivate(
+            formType,
+            form,
+            "GenerateAsync",
+            regenerate,
+            regenerationTurn,
+            retryPrompt);
+    }
+
+    private static void PumpTask(Task task, int timeoutMilliseconds, string name)
+    {
+        if (task == null)
+        {
+            throw new InvalidOperationException(name + " returned no task.");
+        }
+
+        PumpUntil(
+            delegate { return task.IsCompleted; },
+            timeoutMilliseconds,
+            name);
+        task.GetAwaiter().GetResult();
+        ThrowIfUiThreadException();
+    }
+
+    private static void PumpUntil(
+        Func<bool> condition,
+        int timeoutMilliseconds,
+        string name)
+    {
+        DateTime deadline = DateTime.UtcNow.AddMilliseconds(
+            timeoutMilliseconds);
+        while (!condition())
+        {
+            Application.DoEvents();
+            ThrowIfUiThreadException();
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TimeoutException(name + " timed out.");
+            }
+
+            Thread.Sleep(10);
+        }
+
+        Application.DoEvents();
+        ThrowIfUiThreadException();
+    }
+
+    private static System.Windows.Forms.Timer CreateMessageBoxCloser(
+        string title,
+        Action onClosed)
+    {
+        System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+        timer.Interval = 50;
+        timer.Tick += delegate
+        {
+            IntPtr handle = FindWindow(null, title);
+            if (handle == IntPtr.Zero)
+            {
+                return;
+            }
+
+            if (onClosed != null)
+            {
+                onClosed();
+            }
+            PostMessage(
+                handle,
+                WmClose,
+                IntPtr.Zero,
+                IntPtr.Zero);
+        };
+        return timer;
+    }
+
+    private static int CountSessionMessagesWithContent(
+        IList messages,
+        string content)
+    {
+        int count = 0;
+        foreach (object message in messages)
+        {
+            if (message != null && string.Equals(
+                Convert.ToString(GetProperty(message, "Content")),
+                content,
+                StringComparison.Ordinal))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static void AssertReloadedMessages(
+        Type storeType,
+        string storagePath,
+        string sessionId,
+        int expectedCount,
+        string expectedFinalContent,
+        string expectedParentId,
+        int expectedVariantIndex,
+        string name)
+    {
+        object reloadedStore = CreateStore(storeType, storagePath);
+        object session = InvokePublic(
+            reloadedStore,
+            "GetSession",
+            sessionId);
+        IList messages = session == null
+            ? null
+            : (IList)GetProperty(session, "Messages");
+        object finalMessage = messages == null || messages.Count == 0
+            ? null
+            : messages[messages.Count - 1];
+        AssertTrue(
+            messages != null && messages.Count == expectedCount &&
+                finalMessage != null &&
+                (string)GetProperty(finalMessage, "Role") == "assistant" &&
+                (string)GetProperty(finalMessage, "Content") ==
+                    expectedFinalContent &&
+                (expectedParentId.Length == 0 ||
+                    (string)GetProperty(
+                        finalMessage,
+                        "ParentMessageId") == expectedParentId) &&
+                (expectedVariantIndex == 0 ||
+                    (int)GetProperty(
+                        finalMessage,
+                        "VariantIndex") == expectedVariantIndex),
+            name);
+    }
+
+    private sealed class TcpTestServer : IDisposable
+    {
+        private readonly TcpListener listener;
+        private readonly Thread worker;
+        private readonly ManualResetEvent releaseResponse;
+        private readonly int statusCode;
+        private readonly string responseBody;
+        private readonly string secondResponseBody;
+        private readonly bool stalled;
+        private int requestCount;
+        private volatile bool disposed;
+        private Exception workerException;
+
+        private TcpTestServer(
+            int statusCode,
+            string responseBody,
+            bool stalled,
+            string secondResponseBody)
+        {
+            this.statusCode = statusCode;
+            this.responseBody = responseBody ?? string.Empty;
+            this.stalled = stalled;
+            this.secondResponseBody = secondResponseBody;
+            releaseResponse = new ManualResetEvent(false);
+            listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            Url = "http://127.0.0.1:" + port +
+                "/v1/chat/completions";
+            worker = new Thread(Run);
+            worker.IsBackground = true;
+            worker.Name = "UiStateSmokeTest HTTP server";
+            worker.Start();
+        }
+
+        public string Url { get; private set; }
+
+        public bool RequestReceived
+        {
+            get { return Thread.VolatileRead(ref requestCount) > 0; }
+        }
+
+        public int RequestCount
+        {
+            get { return Thread.VolatileRead(ref requestCount); }
+        }
+
+        public static TcpTestServer StartSuccess(string content)
+        {
+            string encoded = JsonEscape(content ?? string.Empty);
+            return new TcpTestServer(
+                200,
+                "data: {\"choices\":[{\"delta\":{\"content\":\"" +
+                    encoded + "\"}}]}\r\n\r\n" +
+                    "data: [DONE]\r\n\r\n",
+                false,
+                null);
+        }
+
+        public static TcpTestServer StartError(
+            int statusCode,
+            string body)
+        {
+            return new TcpTestServer(statusCode, body, false, null);
+        }
+
+        public static TcpTestServer StartErrorThenSuccess(
+            int statusCode,
+            string errorBody,
+            string successContent)
+        {
+            string encoded = JsonEscape(successContent ?? string.Empty);
+            string successBody =
+                "data: {\"choices\":[{\"delta\":{\"content\":\"" +
+                    encoded + "\"}}]}\r\n\r\n" +
+                    "data: [DONE]\r\n\r\n";
+            return new TcpTestServer(
+                statusCode,
+                errorBody,
+                false,
+                successBody);
+        }
+
+        public static TcpTestServer StartStalled()
+        {
+            return new TcpTestServer(200, string.Empty, true, null);
+        }
+
+        private void Run()
+        {
+            try
+            {
+                int responseCount = secondResponseBody == null ? 1 : 2;
+                for (int index = 0; index < responseCount; index++)
+                {
+                    using (TcpClient connection = listener.AcceptTcpClient())
+                    using (NetworkStream stream = connection.GetStream())
+                    {
+                        ReadRequest(stream);
+                        Interlocked.Increment(ref requestCount);
+                        if (stalled)
+                        {
+                            releaseResponse.WaitOne();
+                            return;
+                        }
+
+                        int currentStatus = index == 0 ? statusCode : 200;
+                        string currentBody = index == 0
+                            ? responseBody
+                            : secondResponseBody;
+                        WriteResponse(stream, currentStatus, currentBody);
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                if (!disposed)
+                {
+                    workerException = exception;
+                }
+            }
+        }
+
+        private static void WriteResponse(
+            NetworkStream stream,
+            int statusCode,
+            string responseBody)
+        {
+            byte[] bodyBytes = Encoding.UTF8.GetBytes(responseBody);
+            string reason = statusCode == 200 ? "OK" : "Bad Request";
+            string contentType = statusCode == 200
+                ? "text/event-stream"
+                : "application/json";
+            string headers = "HTTP/1.1 " + statusCode + " " + reason +
+                "\r\nContent-Type: " + contentType +
+                "; charset=utf-8\r\nContent-Length: " + bodyBytes.Length +
+                "\r\nConnection: close\r\n\r\n";
+            byte[] headerBytes = Encoding.ASCII.GetBytes(headers);
+            stream.Write(headerBytes, 0, headerBytes.Length);
+            stream.Write(bodyBytes, 0, bodyBytes.Length);
+            stream.Flush();
+        }
+
+        private static void ReadRequest(NetworkStream stream)
+        {
+            stream.ReadTimeout = 10000;
+            MemoryStream request = new MemoryStream();
+            byte[] buffer = new byte[4096];
+            int headerEnd = -1;
+            int contentLength = 0;
+            while (headerEnd < 0)
+            {
+                int read = stream.Read(buffer, 0, buffer.Length);
+                if (read <= 0)
+                {
+                    return;
+                }
+
+                request.Write(buffer, 0, read);
+                headerEnd = FindHeaderEnd(
+                    request.GetBuffer(),
+                    (int)request.Length);
+            }
+
+            string headers = Encoding.ASCII.GetString(
+                request.GetBuffer(),
+                0,
+                headerEnd);
+            foreach (string line in headers.Split(
+                new string[] { "\r\n" },
+                StringSplitOptions.None))
+            {
+                if (line.StartsWith(
+                    "Content-Length:",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    int.TryParse(
+                        line.Substring("Content-Length:".Length).Trim(),
+                        out contentLength);
+                }
+            }
+
+            int bodyStart = headerEnd + 4;
+            while (request.Length - bodyStart < contentLength)
+            {
+                int read = stream.Read(buffer, 0, buffer.Length);
+                if (read <= 0)
+                {
+                    return;
+                }
+
+                request.Write(buffer, 0, read);
+            }
+        }
+
+        private static int FindHeaderEnd(byte[] value, int length)
+        {
+            for (int index = 0; index <= length - 4; index++)
+            {
+                if (value[index] == 13 && value[index + 1] == 10 &&
+                    value[index + 2] == 13 && value[index + 3] == 10)
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
+
+        private static string JsonEscape(string value)
+        {
+            return value.Replace("\\", "\\\\")
+                .Replace("\"", "\\\"")
+                .Replace("\r", "\\r")
+                .Replace("\n", "\\n");
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            disposed = true;
+            releaseResponse.Set();
+            listener.Stop();
+            if (!worker.Join(5000))
+            {
+                throw new TimeoutException(
+                    "The UI test HTTP server did not stop.");
+            }
+
+            releaseResponse.Dispose();
+            if (workerException != null)
+            {
+                throw new InvalidOperationException(
+                    "The UI test HTTP server failed.",
+                    workerException);
+            }
+        }
     }
 
     private static object GetField(
