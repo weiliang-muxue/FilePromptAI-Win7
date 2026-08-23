@@ -87,6 +87,7 @@ internal static class UiStateSmokeTest
                 true);
             form = Activator.CreateInstance(formType, true);
 
+            TestAnonymousConnectionSettings(formType, form);
             TestWorkspaceLayoutAndIncrementalTranscript(formType, form);
             TestCurrentTurnTextBudget(formType, form);
             TestBinaryRetentionBudget(formType, form);
@@ -103,6 +104,7 @@ internal static class UiStateSmokeTest
             TestWholeConversationExport(formType, form);
             TestSearchCharacterBudget(application, formType, form);
             TestExtensionsDialog(application, formType, form);
+            TestSettingsDialogLayout(application);
             TestModelProfilesDialog(application, formType, form);
             TestRegenerationAndRetryState(application, formType, form);
             TestGenerationRetryWorkflows(application, formType, form);
@@ -149,6 +151,76 @@ internal static class UiStateSmokeTest
             {
                 // Temporary state can be removed on the next run.
             }
+        }
+    }
+
+    private static void TestAnonymousConnectionSettings(
+        Type formType,
+        object form)
+    {
+        TextBox endpoint = (TextBox)GetField(
+            formType,
+            form,
+            "endpointTextBox");
+        TextBox apiKey = (TextBox)GetField(
+            formType,
+            form,
+            "apiKeyTextBox");
+        ComboBox model = (ComboBox)GetField(
+            formType,
+            form,
+            "modelTextBox");
+        string previousEndpoint = endpoint.Text;
+        string previousApiKey = apiKey.Text;
+        string previousModel = model.Text;
+        try
+        {
+            endpoint.Text = "http://127.0.0.1:11434/v1/chat/completions";
+            apiKey.Text = string.Empty;
+            model.Text = "local-model";
+            AssertTrue(
+                (bool)InvokePrivate(
+                    formType,
+                    form,
+                    "HasCompleteConnectionSettings"),
+                "Anonymous URL and model are complete connection settings");
+            AssertTrue(
+                (bool)InvokePrivate(
+                    formType,
+                    form,
+                    "HasModelListConnectionSettings"),
+                "Anonymous URL is sufficient for model discovery");
+
+            model.Text = string.Empty;
+            AssertTrue(
+                !(bool)InvokePrivate(
+                    formType,
+                    form,
+                    "HasCompleteConnectionSettings") &&
+                (bool)InvokePrivate(
+                    formType,
+                    form,
+                    "HasModelListConnectionSettings"),
+                "Model is required only for complete connection settings");
+
+            endpoint.Text = string.Empty;
+            model.Text = "local-model";
+            AssertTrue(
+                !(bool)InvokePrivate(
+                    formType,
+                    form,
+                    "HasCompleteConnectionSettings") &&
+                !(bool)InvokePrivate(
+                    formType,
+                    form,
+                    "HasModelListConnectionSettings"),
+                "URL remains required for connection and model discovery");
+        }
+        finally
+        {
+            endpoint.Text = previousEndpoint;
+            apiKey.Text = previousApiKey;
+            model.Text = previousModel;
         }
     }
 
@@ -2151,6 +2223,16 @@ internal static class UiStateSmokeTest
             profile,
             "test-model",
             null);
+        profileType.GetProperty("SystemPrompt").SetValue(
+            profile,
+            "Answer concisely.",
+            null);
+        profileType.GetProperty("Temperature").SetValue(profile, 0.6d, null);
+        profileType.GetProperty("TopP").SetValue(profile, 0.9d, null);
+        profileType.GetProperty("MaxOutputTokens").SetValue(
+            profile,
+            2048,
+            null);
         profiles.Add(profile);
 
         Type dialogType = application.GetType(
@@ -2162,12 +2244,19 @@ internal static class UiStateSmokeTest
         AssertTrue(dialog != null, "Model profiles dialog can be created");
         try
         {
-            dialog.CreateControl();
+            dialog.StartPosition = FormStartPosition.Manual;
+            dialog.Location = new Point(120, 100);
+            dialog.Show();
+            Application.DoEvents();
             dialog.PerformLayout();
+            Application.DoEvents();
             AssertTrue(
-                dialog.ClientSize.Width >= 640 &&
-                dialog.ClientSize.Height >= 390,
-                "Model profiles dialog size is stable");
+                dialog.ClientSize == new Size(820, 610),
+                "Model profiles dialog keeps its 820x610 client area");
+            AssertTrue(
+                dialog.AutoScaleMode == AutoScaleMode.None &&
+                    FitsCenteredFullHd(dialog),
+                "Model profiles dialog fits 1920x1080 at 96 DPI without scaling");
             AssertTrue(
                 FindControl<ListBox>(dialog, null) != null,
                 "Model profiles list exists");
@@ -2181,9 +2270,176 @@ internal static class UiStateSmokeTest
             AssertTrue(
                 showKey != null && !showKey.Checked,
                 "Model profile API key is hidden by default");
+            TextBox systemPrompt = GetField(
+                dialogType,
+                dialog,
+                "systemPromptBox") as TextBox;
+            NumericUpDown temperature = GetField(
+                dialogType,
+                dialog,
+                "temperatureBox") as NumericUpDown;
+            NumericUpDown topP = GetField(
+                dialogType,
+                dialog,
+                "topPBox") as NumericUpDown;
+            NumericUpDown maxOutputTokens = GetField(
+                dialogType,
+                dialog,
+                "maxOutputTokensBox") as NumericUpDown;
+            AssertTrue(
+                systemPrompt != null && systemPrompt.Multiline &&
+                    systemPrompt.Visible && systemPrompt.Height > 0 &&
+                    temperature != null && temperature.Visible &&
+                    topP != null && topP.Visible &&
+                    maxOutputTokens != null && maxOutputTokens.Visible,
+                "Model profile generation controls are visible");
+            string boundsError = FindVisibleControlBoundsError(dialog);
+            AssertTrue(
+                string.IsNullOrEmpty(boundsError),
+                "Model profile controls remain inside the client area" +
+                    (string.IsNullOrEmpty(boundsError)
+                        ? string.Empty
+                        : ": " + boundsError));
+            string overlapError = FindVisibleButtonOverlapError(dialog);
+            AssertTrue(
+                string.IsNullOrEmpty(overlapError),
+                "Model profile buttons do not overlap" +
+                    (string.IsNullOrEmpty(overlapError)
+                        ? string.Empty
+                        : ": " + overlapError));
         }
         finally
         {
+            dialog.Hide();
+            dialog.Dispose();
+        }
+    }
+
+    private static void TestSettingsDialogLayout(Assembly application)
+    {
+        Type dialogType = application.GetType(
+            "FilePromptAIWin7.SettingsDialog",
+            true);
+        Form dialog = Activator.CreateInstance(dialogType, true) as Form;
+        AssertTrue(dialog != null, "Settings dialog can be created");
+        try
+        {
+            dialog.StartPosition = FormStartPosition.Manual;
+            dialog.Location = new Point(80, 80);
+            dialog.Show();
+            Application.DoEvents();
+            dialog.PerformLayout();
+            Application.DoEvents();
+
+            AssertTrue(
+                dialog.ClientSize == new Size(780, 600),
+                "Settings dialog keeps its 780x600 client area");
+            AssertTrue(
+                dialog.AutoScaleMode == AutoScaleMode.None &&
+                    FitsCenteredFullHd(dialog),
+                "Settings dialog fits 1920x1080 at 96 DPI without scaling");
+
+            Button[] navigationButtons = GetField(
+                dialogType,
+                dialog,
+                "navigationButtons") as Button[];
+            Panel[] pages = GetField(
+                dialogType,
+                dialog,
+                "pages") as Panel[];
+            string[] expectedTitles = new string[]
+            {
+                "模型连接",
+                "生成参数",
+                "技能与 MCP",
+                "会话与输入",
+                "维护"
+            };
+            AssertTrue(
+                navigationButtons != null &&
+                    navigationButtons.Length == expectedTitles.Length &&
+                    pages != null && pages.Length == expectedTitles.Length,
+                "Settings dialog exposes five navigation pages");
+
+            for (int index = 0; index < expectedTitles.Length; index++)
+            {
+                AssertTrue(
+                    string.Equals(
+                        navigationButtons[index].Text,
+                        expectedTitles[index],
+                        StringComparison.Ordinal),
+                    "Settings navigation order " + expectedTitles[index]);
+                navigationButtons[index].PerformClick();
+                dialog.PerformLayout();
+                Application.DoEvents();
+
+                int visiblePageCount = 0;
+                for (int pageIndex = 0;
+                    pageIndex < pages.Length;
+                    pageIndex++)
+                {
+                    if (pages[pageIndex].Visible)
+                    {
+                        visiblePageCount++;
+                    }
+                }
+
+                AssertTrue(
+                    visiblePageCount == 1 && pages[index].Visible &&
+                        pages[index].Width > 0 && pages[index].Height > 0,
+                    "Settings page switch " + expectedTitles[index]);
+                string boundsError = FindVisibleControlBoundsError(dialog);
+                AssertTrue(
+                    string.IsNullOrEmpty(boundsError),
+                    "Settings controls remain inside the client area on " +
+                        expectedTitles[index] +
+                        (string.IsNullOrEmpty(boundsError)
+                            ? string.Empty
+                            : ": " + boundsError));
+                string overlapError = FindVisibleButtonOverlapError(dialog);
+                AssertTrue(
+                    string.IsNullOrEmpty(overlapError),
+                    "Settings buttons do not overlap on " +
+                        expectedTitles[index] +
+                        (string.IsNullOrEmpty(overlapError)
+                            ? string.Empty
+                            : ": " + overlapError));
+            }
+
+            Control[] focusTargets = new Control[]
+            {
+                GetProperty(dialog, "EndpointTextBox") as Control,
+                GetProperty(dialog, "SystemPromptTextBox") as Control,
+                GetProperty(dialog, "ExtensionsButton") as Control,
+                GetProperty(dialog, "SendShortcutComboBox") as Control,
+                GetProperty(dialog, "BackupSessionsButton") as Control
+            };
+            MethodInfo prepareForOpen = dialogType.GetMethod(
+                "PrepareForOpen",
+                new Type[] { typeof(Control), typeof(string) });
+            AssertTrue(
+                prepareForOpen != null,
+                "Settings dialog exposes control-based page routing");
+            for (int index = 0; index < focusTargets.Length; index++)
+            {
+                AssertTrue(
+                    focusTargets[index] != null,
+                    "Settings focus target exists for " +
+                        expectedTitles[index]);
+                prepareForOpen.Invoke(
+                    dialog,
+                    new object[] { focusTargets[index], string.Empty });
+                Application.DoEvents();
+                AssertTrue(
+                    pages[index].Visible &&
+                        CountVisibleControls(pages) == 1,
+                    "Settings focus routing selects " +
+                        expectedTitles[index]);
+            }
+        }
+        finally
+        {
+            dialog.Hide();
             dialog.Dispose();
         }
     }
@@ -3560,6 +3816,122 @@ internal static class UiStateSmokeTest
         }
 
         return null;
+    }
+
+    private static int CountVisibleControls(Control[] controls)
+    {
+        int count = 0;
+        foreach (Control control in controls)
+        {
+            if (control != null && control.Visible)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static bool FitsCenteredFullHd(Form dialog)
+    {
+        const int fullHdWidth = 1920;
+        const int fullHdHeight = 1080;
+        return dialog.Width <= fullHdWidth && dialog.Height <= fullHdHeight &&
+            (fullHdWidth - dialog.Width) / 2 >= 0 &&
+            (fullHdHeight - dialog.Height) / 2 >= 0;
+    }
+
+    private static string FindVisibleControlBoundsError(Control root)
+    {
+        foreach (Control child in root.Controls)
+        {
+            if (!child.Visible)
+            {
+                continue;
+            }
+
+            Rectangle client = root.ClientRectangle;
+            Rectangle bounds = child.Bounds;
+            if (bounds.Width <= 0 || bounds.Height <= 0 ||
+                bounds.Left < client.Left || bounds.Top < client.Top ||
+                bounds.Right > client.Right || bounds.Bottom > client.Bottom)
+            {
+                return DescribeControl(child) + " bounds=" + bounds +
+                    " parent=" + DescribeControl(root) +
+                    " client=" + client;
+            }
+
+            string nestedError = FindVisibleControlBoundsError(child);
+            if (!string.IsNullOrEmpty(nestedError))
+            {
+                return nestedError;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static string FindVisibleButtonOverlapError(Control root)
+    {
+        List<Button> buttons = new List<Button>();
+        AddVisibleButtons(root, buttons);
+        for (int firstIndex = 0;
+            firstIndex < buttons.Count;
+            firstIndex++)
+        {
+            Button first = buttons[firstIndex];
+            Rectangle firstBounds = first.RectangleToScreen(
+                first.ClientRectangle);
+            for (int secondIndex = firstIndex + 1;
+                secondIndex < buttons.Count;
+                secondIndex++)
+            {
+                Button second = buttons[secondIndex];
+                Rectangle secondBounds = second.RectangleToScreen(
+                    second.ClientRectangle);
+                Rectangle intersection = Rectangle.Intersect(
+                    firstBounds,
+                    secondBounds);
+                if (!intersection.IsEmpty &&
+                    intersection.Width > 0 && intersection.Height > 0)
+                {
+                    return DescribeControl(first) + " " + firstBounds +
+                        " overlaps " + DescribeControl(second) + " " +
+                        secondBounds;
+                }
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static void AddVisibleButtons(
+        Control root,
+        IList<Button> result)
+    {
+        foreach (Control child in root.Controls)
+        {
+            if (!child.Visible)
+            {
+                continue;
+            }
+
+            Button button = child as Button;
+            if (button != null)
+            {
+                result.Add(button);
+            }
+
+            AddVisibleButtons(child, result);
+        }
+    }
+
+    private static string DescribeControl(Control control)
+    {
+        string value = string.IsNullOrWhiteSpace(control.Text)
+            ? control.AccessibleName
+            : control.Text;
+        return control.GetType().Name + "[" + (value ?? string.Empty) + "]";
     }
 
     private static bool ContainsMenuText(

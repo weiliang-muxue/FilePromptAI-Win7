@@ -1,0 +1,2 @@
+FilePromptAI offline acceptance text fixture 2026.
+The verifier must extract this exact ASCII content.

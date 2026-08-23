@@ -1,5 +1,8 @@
 * text=auto
 
+# The release tag must preserve the exact UTF-8/CRLF checksum record.
+RELEASE-SHA256.txt -text
+
 # Keep binary fixtures and application assets byte-for-byte identical.
 *.docx binary
 *.ico binary

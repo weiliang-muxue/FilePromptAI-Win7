@@ -31,6 +31,10 @@ internal static class NetworkReliabilitySmokeTest
 
             TestModelEndpointDerivation(clientType);
             TestModelDiscoveryProtocol(clientType);
+            TestAnonymousRequestsDoNotSendAuthorization(
+                clientType,
+                requestType);
+            TestModelTrafficBypassesSystemProxy(clientType, requestType);
             TestUnknownModelEndpointIsRejected(clientType);
             TestModelDiscoveryDoesNotFollowRedirects(clientType);
             TestNonStandardModelResponsesAreRejected(clientType);
@@ -178,6 +182,204 @@ internal static class NetworkReliabilitySmokeTest
         {
             ((IDisposable)client).Dispose();
             listener.Stop();
+        }
+    }
+
+    private static void TestAnonymousRequestsDoNotSendAuthorization(
+        Type clientType,
+        Type requestType)
+    {
+        TcpListener modelsListener = StartListener();
+        int modelsPort = GetPort(modelsListener);
+        string modelsRequest = null;
+        Task<int> modelsServer = Task.Factory.StartNew(
+            delegate
+            {
+                using (TcpClient connection = modelsListener.AcceptTcpClient())
+                {
+                    modelsRequest = ReadRequestText(connection.GetStream());
+                    SendResponse(
+                        connection.GetStream(),
+                        200,
+                        "OK",
+                        "application/json",
+                        "{\"data\":[{\"id\":\"anonymous-model\"}]}",
+                        null);
+                }
+
+                return 1;
+            });
+        object modelsClient = CreateClient(
+            clientType,
+            2000,
+            1000,
+            1,
+            0,
+            2000);
+        try
+        {
+            IList models = FetchModels(
+                clientType,
+                modelsClient,
+                "http://127.0.0.1:" + modelsPort +
+                    "/v1/chat/completions",
+                string.Empty,
+                TimeSpan.FromSeconds(5));
+            AssertEqual(1, Wait(modelsServer), "Anonymous model discovery count");
+            AssertEqual(1, models.Count, "Anonymous model discovery result");
+            AssertNotContains(
+                modelsRequest,
+                "Authorization:",
+                "Anonymous model discovery omits authorization");
+        }
+        finally
+        {
+            ((IDisposable)modelsClient).Dispose();
+            modelsListener.Stop();
+        }
+
+        TcpListener chatListener = StartListener();
+        int chatPort = GetPort(chatListener);
+        string chatRequest = null;
+        Task<int> chatServer = Task.Factory.StartNew(
+            delegate
+            {
+                using (TcpClient connection = chatListener.AcceptTcpClient())
+                {
+                    chatRequest = ReadRequestText(connection.GetStream());
+                    SendResponse(
+                        connection.GetStream(),
+                        200,
+                        "OK",
+                        "text/event-stream",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"anonymous-ok\"}}]}\r\n\r\n" +
+                            "data: [DONE]\r\n\r\n",
+                        null);
+                }
+
+                return 1;
+            });
+        object chatClient = CreateClient(
+            clientType,
+            2000,
+            1000,
+            1,
+            0,
+            2000);
+        try
+        {
+            object request = CreateRequest(
+                requestType,
+                "http://127.0.0.1:" + chatPort +
+                    "/v1/chat/completions");
+            requestType.GetProperty("ApiKey").SetValue(
+                request,
+                string.Empty,
+                null);
+            StringBuilder delta = new StringBuilder();
+            string result = Generate(
+                clientType,
+                chatClient,
+                request,
+                delta,
+                CancellationToken.None,
+                TimeSpan.FromSeconds(5));
+            AssertEqual(1, Wait(chatServer), "Anonymous chat request count");
+            AssertEqual("anonymous-ok", result, "Anonymous chat result");
+            AssertNotContains(
+                chatRequest,
+                "Authorization:",
+                "Anonymous chat omits authorization");
+        }
+        finally
+        {
+            ((IDisposable)chatClient).Dispose();
+            chatListener.Stop();
+        }
+    }
+
+    private static void TestModelTrafficBypassesSystemProxy(
+        Type clientType,
+        Type requestType)
+    {
+        IWebProxy previousProxy = WebRequest.DefaultWebProxy;
+        RejectingProxy proxy = new RejectingProxy();
+        WebRequest.DefaultWebProxy = proxy;
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        Task<int> server = Task.Factory.StartNew(
+            delegate
+            {
+                int requests = 0;
+                for (int index = 0; index < 2; index++)
+                {
+                    using (TcpClient connection = listener.AcceptTcpClient())
+                    {
+                        string request = ReadRequestText(
+                            connection.GetStream());
+                        requests++;
+                        if (request.StartsWith(
+                            "GET ",
+                            StringComparison.Ordinal))
+                        {
+                            SendResponse(
+                                connection.GetStream(),
+                                200,
+                                "OK",
+                                "application/json",
+                                "{\"data\":[{\"id\":\"direct-model\"}]}",
+                                null);
+                        }
+                        else
+                        {
+                            SendResponse(
+                                connection.GetStream(),
+                                200,
+                                "OK",
+                                "text/event-stream",
+                                "data: {\"choices\":[{\"delta\":{\"content\":\"direct\"}}]}\r\n\r\n" +
+                                    "data: [DONE]\r\n\r\n",
+                                null);
+                        }
+                    }
+                }
+                return requests;
+            });
+        object client = CreateClient(
+            clientType,
+            2000,
+            1000,
+            1,
+            0,
+            2000);
+        try
+        {
+            string endpoint = "http://127.0.0.1:" + port +
+                "/v1/chat/completions";
+            IList models = FetchModels(
+                clientType,
+                client,
+                endpoint,
+                string.Empty,
+                TimeSpan.FromSeconds(5));
+            AssertEqual(1, models.Count, "Direct model discovery result");
+            StringBuilder delta = new StringBuilder();
+            string result = Generate(
+                clientType,
+                client,
+                CreateRequest(requestType, endpoint),
+                delta,
+                CancellationToken.None,
+                TimeSpan.FromSeconds(5));
+            AssertEqual("direct", result, "Direct model response");
+            AssertEqual(2, Wait(server), "Direct model request count");
+            AssertEqual(0, proxy.CallCount, "System proxy bypass count");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+            WebRequest.DefaultWebProxy = previousProxy;
         }
     }
 
@@ -1771,6 +1973,30 @@ internal static class NetworkReliabilitySmokeTest
         return current;
     }
 
+    private sealed class RejectingProxy : IWebProxy
+    {
+        private int callCount;
+
+        public int CallCount
+        {
+            get { return Interlocked.CompareExchange(ref callCount, 0, 0); }
+        }
+
+        public ICredentials Credentials { get; set; }
+
+        public Uri GetProxy(Uri destination)
+        {
+            Interlocked.Increment(ref callCount);
+            return new Uri("http://127.0.0.1:1/");
+        }
+
+        public bool IsBypassed(Uri host)
+        {
+            Interlocked.Increment(ref callCount);
+            return false;
+        }
+    }
+
     private static void AssertContains(
         string actual,
         string expected,
@@ -1780,6 +2006,18 @@ internal static class NetworkReliabilitySmokeTest
             actual != null && actual.IndexOf(
                 expected,
                 StringComparison.Ordinal) >= 0,
+            name);
+    }
+
+    private static void AssertNotContains(
+        string actual,
+        string unexpected,
+        string name)
+    {
+        AssertTrue(
+            actual != null && actual.IndexOf(
+                unexpected,
+                StringComparison.OrdinalIgnoreCase) < 0,
             name);
     }
 

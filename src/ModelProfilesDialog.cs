@@ -14,6 +14,13 @@ namespace FilePromptAIWin7
         private readonly TextBox endpointBox;
         private readonly TextBox apiKeyBox;
         private readonly TextBox modelBox;
+        private readonly TextBox systemPromptBox;
+        private readonly CheckBox temperatureEnabled;
+        private readonly NumericUpDown temperatureBox;
+        private readonly CheckBox topPEnabled;
+        private readonly NumericUpDown topPBox;
+        private readonly CheckBox maxOutputTokensEnabled;
+        private readonly NumericUpDown maxOutputTokensBox;
         private readonly Label statusLabel;
         private bool refreshing;
         private int selectedIndex;
@@ -53,8 +60,8 @@ namespace FilePromptAIWin7
             MinimizeBox = false;
             MaximizeBox = false;
             ShowInTaskbar = false;
-            ClientSize = new Size(700, 430);
-            MinimumSize = new Size(640, 390);
+            ClientSize = new Size(820, 610);
+            MinimumSize = new Size(760, 570);
             Font = new Font("Microsoft YaHei", 9F, FontStyle.Regular);
             BackColor = UiTheme.WindowBackground;
             ForeColor = UiTheme.ButtonText;
@@ -111,7 +118,7 @@ namespace FilePromptAIWin7
             editor.Dock = DockStyle.Fill;
             editor.Padding = new Padding(6, 0, 0, 0);
             editor.ColumnCount = 2;
-            editor.RowCount = 9;
+            editor.RowCount = 14;
             editor.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 94F));
             editor.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
             editor.RowStyles.Add(new RowStyle(SizeType.Absolute, 26F));
@@ -123,16 +130,24 @@ namespace FilePromptAIWin7
             editor.RowStyles.Add(new RowStyle(SizeType.Absolute, 26F));
             editor.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
             editor.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
+            editor.RowStyles.Add(new RowStyle(SizeType.Absolute, 26F));
+            editor.RowStyles.Add(new RowStyle(SizeType.Absolute, 76F));
+            editor.RowStyles.Add(new RowStyle(SizeType.Absolute, 38F));
+            editor.RowStyles.Add(new RowStyle(SizeType.Absolute, 38F));
+            editor.RowStyles.Add(new RowStyle(SizeType.Absolute, 38F));
 
             nameBox = CreateTextBox(false);
             endpointBox = CreateTextBox(false);
             apiKeyBox = CreateTextBox(false);
             apiKeyBox.UseSystemPasswordChar = true;
             modelBox = CreateTextBox(false);
+            systemPromptBox = CreateTextBox(true);
+            systemPromptBox.MaxLength = 16000;
             nameBox.AccessibleName = "模型配置名称";
             endpointBox.AccessibleName = "完整请求 URL";
             apiKeyBox.AccessibleName = "API Key";
             modelBox.AccessibleName = "模型名称";
+            systemPromptBox.AccessibleName = "系统提示词";
             AddEditorRow(editor, 0, "名称", nameBox);
             AddEditorRow(editor, 2, "完整 URL", endpointBox);
             AddEditorRow(editor, 4, "API Key", apiKeyBox);
@@ -149,6 +164,43 @@ namespace FilePromptAIWin7
             };
             editor.Controls.Add(showKey, 1, 8);
 
+            AddEditorRow(editor, 9, "系统提示词", systemPromptBox);
+
+            temperatureEnabled = CreateOptionCheckBox("启用");
+            temperatureBox = CreateDecimalBox(0m, 2m, 0.7m, 2);
+            temperatureBox.AccessibleName = "Temperature";
+            AddOptionalNumberRow(
+                editor,
+                11,
+                "Temperature",
+                temperatureEnabled,
+                temperatureBox);
+
+            topPEnabled = CreateOptionCheckBox("启用");
+            topPBox = CreateDecimalBox(0m, 1m, 1m, 2);
+            topPBox.AccessibleName = "Top P";
+            AddOptionalNumberRow(
+                editor,
+                12,
+                "Top P",
+                topPEnabled,
+                topPBox);
+
+            maxOutputTokensEnabled = CreateOptionCheckBox("启用");
+            maxOutputTokensBox = CreateDecimalBox(
+                1m,
+                1048576m,
+                4096m,
+                0);
+            maxOutputTokensBox.Increment = 256m;
+            maxOutputTokensBox.AccessibleName = "最大输出 Token";
+            AddOptionalNumberRow(
+                editor,
+                13,
+                "最大输出",
+                maxOutputTokensEnabled,
+                maxOutputTokensBox);
+
             body.Controls.Add(left, 0, 0);
             body.Controls.Add(editor, 1, 0);
 
@@ -157,7 +209,7 @@ namespace FilePromptAIWin7
             statusLabel.TextAlign = ContentAlignment.MiddleLeft;
             statusLabel.ForeColor = UiTheme.TextMuted;
             statusLabel.AutoEllipsis = true;
-            statusLabel.Text = "可保存多个内网模型配置，API Key 只保存在当前 Windows 用户下。";
+            statusLabel.Text = "每个配置可保存连接、系统提示词和可选生成参数；API Key 可留空。";
 
             FlowLayoutPanel actions = new FlowLayoutPanel();
             actions.Dock = DockStyle.Fill;
@@ -201,6 +253,16 @@ namespace FilePromptAIWin7
             endpointBox.Text = source.EndpointUrl ?? string.Empty;
             apiKeyBox.Text = source.ApiKey ?? string.Empty;
             modelBox.Text = source.ModelName ?? string.Empty;
+            systemPromptBox.Text = source.SystemPrompt ?? string.Empty;
+            SetOptionalValue(
+                temperatureEnabled,
+                temperatureBox,
+                source.Temperature);
+            SetOptionalValue(topPEnabled, topPBox, source.TopP);
+            SetOptionalValue(
+                maxOutputTokensEnabled,
+                maxOutputTokensBox,
+                source.MaxOutputTokens);
         }
 
         private void ReloadProfiles(int index)
@@ -250,6 +312,16 @@ namespace FilePromptAIWin7
             endpointBox.Text = profile.EndpointUrl ?? string.Empty;
             apiKeyBox.Text = profile.ApiKey ?? string.Empty;
             modelBox.Text = profile.ModelName ?? string.Empty;
+            systemPromptBox.Text = profile.SystemPrompt ?? string.Empty;
+            SetOptionalValue(
+                temperatureEnabled,
+                temperatureBox,
+                profile.Temperature);
+            SetOptionalValue(topPEnabled, topPBox, profile.TopP);
+            SetOptionalValue(
+                maxOutputTokensEnabled,
+                maxOutputTokensBox,
+                profile.MaxOutputTokens);
         }
 
         private void OnNewProfile(object sender, EventArgs args)
@@ -262,7 +334,11 @@ namespace FilePromptAIWin7
             endpointBox.Clear();
             apiKeyBox.Clear();
             modelBox.Clear();
-            SetStatus("填写名称、完整 URL、API Key 和模型名称后点击“保存配置”。", false);
+            systemPromptBox.Clear();
+            temperatureEnabled.Checked = false;
+            topPEnabled.Checked = false;
+            maxOutputTokensEnabled.Checked = false;
+            SetStatus("填写名称、完整 URL 和模型名称后点击“保存配置”；API Key 可留空。", false);
             nameBox.Focus();
         }
 
@@ -357,7 +433,17 @@ namespace FilePromptAIWin7
                 Name = nameBox.Text,
                 EndpointUrl = endpointBox.Text,
                 ApiKey = apiKeyBox.Text,
-                ModelName = modelBox.Text
+                ModelName = modelBox.Text,
+                SystemPrompt = systemPromptBox.Text,
+                Temperature = temperatureEnabled.Checked
+                    ? (double?)temperatureBox.Value
+                    : null,
+                TopP = topPEnabled.Checked
+                    ? (double?)topPBox.Value
+                    : null,
+                MaxOutputTokens = maxOutputTokensEnabled.Checked
+                    ? (int?)decimal.ToInt32(maxOutputTokensBox.Value)
+                    : null
             };
         }
 
@@ -393,6 +479,90 @@ namespace FilePromptAIWin7
             box.ForeColor = UiTheme.TextPrimary;
             box.BorderStyle = BorderStyle.FixedSingle;
             return box;
+        }
+
+        private static CheckBox CreateOptionCheckBox(string text)
+        {
+            CheckBox checkBox = new CheckBox();
+            checkBox.Text = text;
+            checkBox.AutoSize = true;
+            checkBox.Anchor = AnchorStyles.Left;
+            checkBox.ForeColor = UiTheme.TextSecondary;
+            return checkBox;
+        }
+
+        private static NumericUpDown CreateDecimalBox(
+            decimal minimum,
+            decimal maximum,
+            decimal value,
+            int decimalPlaces)
+        {
+            NumericUpDown box = new NumericUpDown();
+            box.Minimum = minimum;
+            box.Maximum = maximum;
+            box.Value = value;
+            box.DecimalPlaces = decimalPlaces;
+            box.Width = 132;
+            box.TextAlign = HorizontalAlignment.Right;
+            box.BackColor = UiTheme.InputBackground;
+            box.ForeColor = UiTheme.TextPrimary;
+            return box;
+        }
+
+        private static void SetOptionalValue(
+            CheckBox enabled,
+            NumericUpDown box,
+            double? value)
+        {
+            enabled.Checked = value.HasValue;
+            if (value.HasValue)
+            {
+                box.Value = Math.Max(
+                    box.Minimum,
+                    Math.Min(box.Maximum, (decimal)value.Value));
+            }
+        }
+
+        private static void SetOptionalValue(
+            CheckBox enabled,
+            NumericUpDown box,
+            int? value)
+        {
+            enabled.Checked = value.HasValue;
+            if (value.HasValue)
+            {
+                box.Value = Math.Max(
+                    box.Minimum,
+                    Math.Min(box.Maximum, value.Value));
+            }
+        }
+
+        private static void AddOptionalNumberRow(
+            TableLayoutPanel editor,
+            int row,
+            string labelText,
+            CheckBox enabled,
+            NumericUpDown box)
+        {
+            Label label = new Label();
+            label.Text = labelText;
+            label.AutoSize = true;
+            label.Anchor = AnchorStyles.Left;
+            label.ForeColor = UiTheme.TextSecondary;
+
+            FlowLayoutPanel controls = new FlowLayoutPanel();
+            controls.Dock = DockStyle.Fill;
+            controls.FlowDirection = FlowDirection.LeftToRight;
+            controls.WrapContents = false;
+            controls.Margin = new Padding(0);
+            controls.Padding = new Padding(0, 4, 0, 0);
+            controls.Controls.Add(enabled);
+            controls.Controls.Add(box);
+            enabled.CheckedChanged += delegate { box.Enabled = enabled.Checked; };
+            box.Enabled = enabled.Checked;
+
+            editor.Controls.Add(label, 0, row);
+            editor.Controls.Add(controls, 1, row);
         }
 
         private static Button CreateButton(string text, int width)

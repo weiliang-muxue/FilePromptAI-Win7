@@ -22,6 +22,20 @@ namespace FilePromptAIWin7
 
         public ComboBox ModelTextBox { get; private set; }
 
+        public TextBox SystemPromptTextBox { get; private set; }
+
+        public CheckBox TemperatureEnabledCheckBox { get; private set; }
+
+        public NumericUpDown TemperatureNumericUpDown { get; private set; }
+
+        public CheckBox TopPEnabledCheckBox { get; private set; }
+
+        public NumericUpDown TopPNumericUpDown { get; private set; }
+
+        public CheckBox MaxOutputTokensEnabledCheckBox { get; private set; }
+
+        public NumericUpDown MaxOutputTokensNumericUpDown { get; private set; }
+
         public Button FetchModelsButton { get; private set; }
 
         public Button TestConnectionButton { get; private set; }
@@ -48,8 +62,8 @@ namespace FilePromptAIWin7
 
         public SettingsDialog()
         {
-            navigationButtons = new Button[4];
-            pages = new Panel[4];
+            navigationButtons = new Button[5];
+            pages = new Panel[5];
 
             Text = "设置";
             StartPosition = FormStartPosition.CenterParent;
@@ -57,8 +71,8 @@ namespace FilePromptAIWin7
             MinimizeBox = false;
             MaximizeBox = false;
             ShowInTaskbar = false;
-            ClientSize = new Size(780, 520);
-            MinimumSize = new Size(780, 520);
+            ClientSize = new Size(780, 600);
+            MinimumSize = new Size(780, 600);
             Font = new Font("Microsoft YaHei", 9F, FontStyle.Regular);
             BackColor = UiTheme.WindowBackground;
             ForeColor = UiTheme.TextPrimary;
@@ -252,9 +266,9 @@ namespace FilePromptAIWin7
             layout.Dock = DockStyle.Top;
             layout.AutoSize = true;
             layout.ColumnCount = 1;
-            layout.RowCount = 5;
+            layout.RowCount = 6;
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38F));
-            for (int index = 1; index < 5; index++)
+            for (int index = 1; index < 6; index++)
             {
                 layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44F));
             }
@@ -270,6 +284,7 @@ namespace FilePromptAIWin7
             string[] titles = new string[]
             {
                 "模型连接",
+                "生成参数",
                 "技能与 MCP",
                 "会话与输入",
                 "维护"
@@ -296,9 +311,10 @@ namespace FilePromptAIWin7
             host.BorderStyle = BorderStyle.FixedSingle;
 
             pages[0] = CreateModelConnectionPage();
-            pages[1] = CreateExtensionsPage();
-            pages[2] = CreateConversationPage();
-            pages[3] = CreateMaintenancePage();
+            pages[1] = CreateGenerationPage();
+            pages[2] = CreateExtensionsPage();
+            pages[3] = CreateConversationPage();
+            pages[4] = CreateMaintenancePage();
             foreach (Panel page in pages)
             {
                 page.Dock = DockStyle.Fill;
@@ -316,7 +332,7 @@ namespace FilePromptAIWin7
             AddPageHeader(
                 layout,
                 "模型连接",
-                "完整请求 URL、API Key 和模型名称",
+                "完整请求 URL、可选 API Key 和模型名称",
                 0);
 
             EndpointTextBox = CreateTextBox("完整请求 URL");
@@ -340,6 +356,7 @@ namespace FilePromptAIWin7
             modelSelector.Margin = new Padding(0);
             modelSelector.ColumnCount = 2;
             modelSelector.RowCount = 1;
+            modelSelector.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             modelSelector.ColumnStyles.Add(
                 new ColumnStyle(SizeType.Percent, 100F));
             modelSelector.ColumnStyles.Add(
@@ -403,6 +420,82 @@ namespace FilePromptAIWin7
             actions.Controls.Add(ExtensionsButton);
             layout.Controls.Add(actions, 0, 4);
             layout.SetColumnSpan(actions, 2);
+            page.Controls.Add(layout);
+            return page;
+        }
+
+        private Panel CreateGenerationPage()
+        {
+            Panel page = CreatePage();
+            TableLayoutPanel layout = CreatePageLayout(9);
+            AddPageHeader(
+                layout,
+                "生成参数",
+                "可选项未启用时由模型服务采用默认值",
+                0);
+
+            Label promptLabel = CreateFieldLabel("系统提示词");
+            layout.Controls.Add(promptLabel, 0, 2);
+            layout.SetColumnSpan(promptLabel, 2);
+            SystemPromptTextBox = CreateTextBox("系统提示词");
+            SystemPromptTextBox.Multiline = true;
+            SystemPromptTextBox.ScrollBars = ScrollBars.Vertical;
+            SystemPromptTextBox.MaxLength = 16000;
+            SystemPromptTextBox.AcceptsReturn = true;
+            SystemPromptTextBox.Margin = new Padding(0, 3, 0, 6);
+            layout.Controls.Add(SystemPromptTextBox, 0, 3);
+            layout.SetColumnSpan(SystemPromptTextBox, 2);
+            layout.RowStyles[3] = new RowStyle(SizeType.Absolute, 132F);
+
+            TemperatureEnabledCheckBox = CreateOptionCheckBox("Temperature");
+            TemperatureNumericUpDown = CreateDecimalBox(
+                "Temperature",
+                0m,
+                2m,
+                0.7m,
+                2);
+            AddGenerationOption(
+                layout,
+                4,
+                TemperatureEnabledCheckBox,
+                TemperatureNumericUpDown);
+
+            TopPEnabledCheckBox = CreateOptionCheckBox("Top P");
+            TopPNumericUpDown = CreateDecimalBox(
+                "Top P",
+                0m,
+                1m,
+                1m,
+                2);
+            AddGenerationOption(
+                layout,
+                5,
+                TopPEnabledCheckBox,
+                TopPNumericUpDown);
+
+            MaxOutputTokensEnabledCheckBox =
+                CreateOptionCheckBox("最大输出 Token");
+            MaxOutputTokensNumericUpDown = CreateDecimalBox(
+                "最大输出 Token",
+                1m,
+                1048576m,
+                4096m,
+                0);
+            MaxOutputTokensNumericUpDown.Increment = 256m;
+            AddGenerationOption(
+                layout,
+                6,
+                MaxOutputTokensEnabledCheckBox,
+                MaxOutputTokensNumericUpDown);
+
+            Label note = new Label();
+            note.Dock = DockStyle.Fill;
+            note.Text = "只发送已启用的参数；关闭可提高不同兼容接口之间的通用性。";
+            note.ForeColor = UiTheme.TextMuted;
+            note.TextAlign = ContentAlignment.MiddleLeft;
+            note.AutoEllipsis = true;
+            layout.Controls.Add(note, 0, 7);
+            layout.SetColumnSpan(note, 2);
             page.Controls.Add(layout);
             return page;
         }
@@ -540,21 +633,29 @@ namespace FilePromptAIWin7
 
         private int PageIndexForControl(Control control)
         {
-            if (control == ExtensionsButton)
+            if (control == SystemPromptTextBox ||
+                control == TemperatureNumericUpDown ||
+                control == TopPNumericUpDown ||
+                control == MaxOutputTokensNumericUpDown)
             {
                 return 1;
             }
 
-            if (control == SendShortcutComboBox || control == ContextSummaryLabel)
+            if (control == ExtensionsButton)
             {
                 return 2;
+            }
+
+            if (control == SendShortcutComboBox || control == ContextSummaryLabel)
+            {
+                return 3;
             }
 
             if (control == BackupSessionsButton ||
                 control == RestoreSessionsButton ||
                 control == UninstallButton)
             {
-                return 3;
+                return 4;
             }
 
             return 0;
@@ -697,6 +798,53 @@ namespace FilePromptAIWin7
             textBox.ForeColor = UiTheme.TextPrimary;
             textBox.AccessibleName = accessibleName;
             return textBox;
+        }
+
+        private static CheckBox CreateOptionCheckBox(string text)
+        {
+            CheckBox checkBox = new CheckBox();
+            checkBox.Text = text;
+            checkBox.AutoSize = true;
+            checkBox.Anchor = AnchorStyles.Left;
+            checkBox.ForeColor = UiTheme.TextSecondary;
+            return checkBox;
+        }
+
+        private static NumericUpDown CreateDecimalBox(
+            string accessibleName,
+            decimal minimum,
+            decimal maximum,
+            decimal value,
+            int decimalPlaces)
+        {
+            NumericUpDown box = new NumericUpDown();
+            box.Minimum = minimum;
+            box.Maximum = maximum;
+            box.Value = value;
+            box.DecimalPlaces = decimalPlaces;
+            box.Width = 180;
+            box.TextAlign = HorizontalAlignment.Right;
+            box.BackColor = UiTheme.InputBackground;
+            box.ForeColor = UiTheme.TextPrimary;
+            box.AccessibleName = accessibleName;
+            return box;
+        }
+
+        private static void AddGenerationOption(
+            TableLayoutPanel layout,
+            int row,
+            CheckBox enabled,
+            NumericUpDown value)
+        {
+            enabled.Dock = DockStyle.Fill;
+            value.Anchor = AnchorStyles.Left;
+            enabled.CheckedChanged += delegate
+            {
+                value.Enabled = enabled.Checked;
+            };
+            value.Enabled = enabled.Checked;
+            layout.Controls.Add(enabled, 0, row);
+            layout.Controls.Add(value, 1, row);
         }
 
         private static FlowLayoutPanel CreateLeftActions()

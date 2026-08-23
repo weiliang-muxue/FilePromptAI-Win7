@@ -8,6 +8,8 @@ redist/
 FilePromptAI-offline-release-*/
 FilePromptAI-Win7-Full-v*/
 FilePromptAI-Win7-Full-v*.zip
+# Generated convenience sidecars are not a trust anchor. The authoritative
+# release digest is the tracked RELEASE-SHA256.txt stored in the release tag.
 FilePromptAI-Win7-Full-v*.zip.sha256.txt
 FilePromptAI-Win7-v*.zip
 

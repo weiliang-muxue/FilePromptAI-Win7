@@ -1754,8 +1754,8 @@ namespace FilePromptAIWin7
             handler.AllowAutoRedirect = false;
             handler.AutomaticDecompression =
                 DecompressionMethods.GZip | DecompressionMethods.Deflate;
-            handler.UseProxy = true;
-            handler.Proxy = WebRequest.DefaultWebProxy;
+            handler.UseProxy = false;
+            handler.Proxy = null;
             client = new HttpClient(handler);
             client.Timeout = TimeSpan.FromMilliseconds(Timeout.Infinite);
         }

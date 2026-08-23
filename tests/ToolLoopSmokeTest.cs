@@ -205,6 +205,9 @@ namespace FilePromptAIWin7
                 ApiKey = "tool-secret",
                 ModelName = "tool-model",
                 SystemPrompt = "system instructions",
+                Temperature = 0.45d,
+                TopP = 0.9d,
+                MaxOutputTokens = 1234,
                 Prompt = "current prompt",
                 ConversationMessages = new List<ConversationMessage>
                 {
@@ -433,6 +436,7 @@ namespace FilePromptAIWin7
             IList tools = root["tools"] as IList;
             Assert(Convert.ToBoolean(root["stream"]) == false, "tools non-stream");
             Assert(Convert.ToString(root["tool_choice"]) == "auto", "tool choice auto");
+            AssertGenerationOptions(root, "initial tool request");
             Assert(tools != null && tools.Count == 1, "tool definition sent");
             Assert(messages != null && messages.Count == 4, "initial message count");
             Assert(GetRole(messages[0]) == "system", "system prompt ordering");
@@ -450,6 +454,7 @@ namespace FilePromptAIWin7
         private static void InspectSecondRequest(string request)
         {
             IDictionary<string, object> root = ParseBody(request);
+            AssertGenerationOptions(root, "tool follow-up request");
             IList messages = root["messages"] as IList;
             Assert(messages != null && messages.Count == 6, "tool transcript count");
             IDictionary<string, object> current =
@@ -484,6 +489,23 @@ namespace FilePromptAIWin7
             Assert(
                 Convert.ToString(tool["content"]) == "lookup-result",
                 "tool result content");
+        }
+
+        private static void AssertGenerationOptions(
+            IDictionary<string, object> root,
+            string phase)
+        {
+            Assert(
+                Math.Abs(Convert.ToDouble(root["temperature"]) - 0.45d) <
+                    0.000001d,
+                phase + " carries temperature");
+            Assert(
+                Math.Abs(Convert.ToDouble(root["top_p"]) - 0.9d) <
+                    0.000001d,
+                phase + " carries top_p");
+            Assert(
+                Convert.ToInt32(root["max_tokens"]) == 1234,
+                phase + " carries max_tokens");
         }
 
         private static string GetRole(object message)

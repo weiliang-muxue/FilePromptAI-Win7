@@ -515,6 +515,9 @@ namespace FilePromptAIWin7
             TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
             int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            IWebProxy previousProxy = WebRequest.DefaultWebProxy;
+            RejectingProxy proxy = new RejectingProxy();
+            WebRequest.DefaultWebProxy = proxy;
             Task serverTask = Task.Factory.StartNew(delegate
             {
                 for (int index = 0; index < 4; index++)
@@ -571,10 +574,14 @@ namespace FilePromptAIWin7
                 Assert(
                     serverTask.Wait(TimeSpan.FromSeconds(5)),
                     "HTTP server completed");
+                Assert(
+                    proxy.CallCount == 0,
+                    "HTTP MCP bypasses the default system proxy");
             }
             finally
             {
                 listener.Stop();
+                WebRequest.DefaultWebProxy = previousProxy;
             }
         }
 
@@ -1132,6 +1139,33 @@ namespace FilePromptAIWin7
             }
 
             Console.WriteLine("PASS | " + name);
+        }
+
+        private sealed class RejectingProxy : IWebProxy
+        {
+            private int callCount;
+
+            public int CallCount
+            {
+                get
+                {
+                    return Interlocked.CompareExchange(ref callCount, 0, 0);
+                }
+            }
+
+            public ICredentials Credentials { get; set; }
+
+            public Uri GetProxy(Uri destination)
+            {
+                Interlocked.Increment(ref callCount);
+                return new Uri("http://127.0.0.1:1/");
+            }
+
+            public bool IsBypassed(Uri host)
+            {
+                Interlocked.Increment(ref callCount);
+                return false;
+            }
         }
     }
 }

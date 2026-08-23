@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -17,6 +18,10 @@ namespace FilePromptAIWin7
         public string EndpointUrl { get; set; }
         public string ApiKey { get; set; }
         public string ModelName { get; set; }
+        public string SystemPrompt { get; set; }
+        public double? Temperature { get; set; }
+        public double? TopP { get; set; }
+        public int? MaxOutputTokens { get; set; }
 
         public ModelProfile Clone()
         {
@@ -25,7 +30,11 @@ namespace FilePromptAIWin7
                 Name = Name ?? string.Empty,
                 EndpointUrl = EndpointUrl ?? string.Empty,
                 ApiKey = ApiKey ?? string.Empty,
-                ModelName = ModelName ?? string.Empty
+                ModelName = ModelName ?? string.Empty,
+                SystemPrompt = SystemPrompt ?? string.Empty,
+                Temperature = Temperature,
+                TopP = TopP,
+                MaxOutputTokens = MaxOutputTokens
             };
         }
 
@@ -43,6 +52,7 @@ namespace FilePromptAIWin7
         private const string CurrentVersion = "1";
         private const int MaximumProfiles = 64;
         private const int MaximumFieldCharacters = 4096;
+        private const int MaximumSystemPromptCharacters = 16000;
         private const int MaximumSettingsBytes = 1024 * 1024;
         private static readonly byte[] Entropy = Encoding.UTF8.GetBytes(
             "FilePromptAIWin7.ModelProfiles.v1");
@@ -122,6 +132,7 @@ namespace FilePromptAIWin7
 
                     string protectedKey = GetValue(element, "ProtectedApiKey");
                     string apiKey = string.Empty;
+                    bool keyDecryptionFailed = false;
                     if (!string.IsNullOrWhiteSpace(protectedKey))
                     {
                         try
@@ -133,8 +144,13 @@ namespace FilePromptAIWin7
                             // DPAPI is scoped to the Windows user. Entries
                             // copied from another account are skipped while
                             // the original file remains untouched.
-                            apiKey = string.Empty;
+                            keyDecryptionFailed = true;
                         }
+                    }
+
+                    if (keyDecryptionFailed)
+                    {
+                        continue;
                     }
 
                     ModelProfile profile = new ModelProfile
@@ -142,7 +158,21 @@ namespace FilePromptAIWin7
                         Name = Limit(GetValue(element, "Name")),
                         EndpointUrl = Limit(GetValue(element, "EndpointUrl")),
                         ApiKey = Limit(apiKey),
-                        ModelName = Limit(GetValue(element, "ModelName"))
+                        ModelName = Limit(GetValue(element, "ModelName")),
+                        SystemPrompt = LimitSystemPrompt(
+                            GetValue(element, "SystemPrompt")),
+                        Temperature = ParseOptionalDouble(
+                            GetValue(element, "Temperature"),
+                            0d,
+                            2d),
+                        TopP = ParseOptionalDouble(
+                            GetValue(element, "TopP"),
+                            0d,
+                            1d),
+                        MaxOutputTokens = ParseOptionalInt32(
+                            GetValue(element, "MaxOutputTokens"),
+                            1,
+                            1048576)
                     };
                     try
                     {
@@ -226,6 +256,17 @@ namespace FilePromptAIWin7
                     new XElement("Name", profile.Name),
                     new XElement("EndpointUrl", profile.EndpointUrl),
                     new XElement("ModelName", profile.ModelName),
+                    new XElement("SystemPrompt", profile.SystemPrompt),
+                    new XElement(
+                        "Temperature",
+                        FormatOptionalDouble(profile.Temperature)),
+                    new XElement("TopP", FormatOptionalDouble(profile.TopP)),
+                    new XElement(
+                        "MaxOutputTokens",
+                        profile.MaxOutputTokens.HasValue
+                            ? profile.MaxOutputTokens.Value.ToString(
+                                CultureInfo.InvariantCulture)
+                            : string.Empty),
                     new XElement("ProtectedApiKey", Protect(profile.ApiKey))));
             }
 
@@ -246,6 +287,7 @@ namespace FilePromptAIWin7
             profile.EndpointUrl = (profile.EndpointUrl ?? string.Empty).Trim();
             profile.ApiKey = (profile.ApiKey ?? string.Empty).Trim();
             profile.ModelName = (profile.ModelName ?? string.Empty).Trim();
+            profile.SystemPrompt = (profile.SystemPrompt ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(profile.Name))
             {
                 throw new InvalidOperationException("模型配置名称不能为空。");
@@ -258,6 +300,13 @@ namespace FilePromptAIWin7
             {
                 throw new InvalidOperationException(
                     "模型配置字段长度不能超过 " + MaximumFieldCharacters + " 个字符。");
+            }
+
+            if (profile.SystemPrompt.Length > MaximumSystemPromptCharacters)
+            {
+                throw new InvalidOperationException(
+                    "系统提示词不能超过 " +
+                    MaximumSystemPromptCharacters + " 个字符。");
             }
 
             Uri endpoint;
@@ -273,14 +322,36 @@ namespace FilePromptAIWin7
                     "请求 URL 必须是完整且不含用户名密码的 http:// 或 https:// 地址。");
             }
 
-            if (string.IsNullOrWhiteSpace(profile.ApiKey))
-            {
-                throw new InvalidOperationException("API Key 不能为空。");
-            }
-
             if (string.IsNullOrWhiteSpace(profile.ModelName))
             {
                 throw new InvalidOperationException("模型名称不能为空。");
+            }
+
+            if (profile.Temperature.HasValue &&
+                (double.IsNaN(profile.Temperature.Value) ||
+                 double.IsInfinity(profile.Temperature.Value) ||
+                 profile.Temperature.Value < 0d ||
+                 profile.Temperature.Value > 2d))
+            {
+                throw new InvalidOperationException(
+                    "Temperature 必须在 0 到 2 之间。");
+            }
+
+            if (profile.TopP.HasValue &&
+                (double.IsNaN(profile.TopP.Value) ||
+                 double.IsInfinity(profile.TopP.Value) ||
+                 profile.TopP.Value < 0d ||
+                 profile.TopP.Value > 1d))
+            {
+                throw new InvalidOperationException("Top P 必须在 0 到 1 之间。");
+            }
+
+            if (profile.MaxOutputTokens.HasValue &&
+                (profile.MaxOutputTokens.Value < 1 ||
+                 profile.MaxOutputTokens.Value > 1048576))
+            {
+                throw new InvalidOperationException(
+                    "最大输出 Token 必须在 1 到 1,048,576 之间。");
             }
         }
 
@@ -301,6 +372,69 @@ namespace FilePromptAIWin7
             return value.Length <= MaximumFieldCharacters
                 ? value
                 : value.Substring(0, MaximumFieldCharacters);
+        }
+
+        private static string LimitSystemPrompt(string value)
+        {
+            if (value == null)
+            {
+                return string.Empty;
+            }
+
+            return value.Length <= MaximumSystemPromptCharacters
+                ? value
+                : value.Substring(0, MaximumSystemPromptCharacters);
+        }
+
+        private static double? ParseOptionalDouble(
+            string value,
+            double minimum,
+            double maximum)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return null;
+            }
+
+            double parsed;
+            return double.TryParse(
+                       value,
+                       NumberStyles.Float,
+                       CultureInfo.InvariantCulture,
+                       out parsed) &&
+                   !double.IsNaN(parsed) &&
+                   !double.IsInfinity(parsed) &&
+                   parsed >= minimum && parsed <= maximum
+                ? (double?)parsed
+                : null;
+        }
+
+        private static int? ParseOptionalInt32(
+            string value,
+            int minimum,
+            int maximum)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return null;
+            }
+
+            int parsed;
+            return int.TryParse(
+                       value,
+                       NumberStyles.None,
+                       CultureInfo.InvariantCulture,
+                       out parsed) &&
+                   parsed >= minimum && parsed <= maximum
+                ? (int?)parsed
+                : null;
+        }
+
+        private static string FormatOptionalDouble(double? value)
+        {
+            return value.HasValue
+                ? value.Value.ToString("0.##", CultureInfo.InvariantCulture)
+                : string.Empty;
         }
 
         private static string Protect(string value)

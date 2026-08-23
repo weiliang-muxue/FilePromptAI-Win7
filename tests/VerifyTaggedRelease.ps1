@@ -1,0 +1,155 @@
+param(
+    [string]$Version = '1.17',
+    [string]$ProjectRoot = ''
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+
+if ([string]::IsNullOrWhiteSpace($Version) -or
+    $Version -notmatch '^[0-9A-Za-z](?:[0-9A-Za-z._-]{0,30}[0-9A-Za-z])?$') {
+    throw 'Version may contain only letters, digits, dots, underscores, and hyphens.'
+}
+
+$testRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
+    $ProjectRoot = Split-Path -Parent $testRoot
+}
+$ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
+$tagName = "v$Version"
+$archiveName = "FilePromptAI-Win7-Full-v$Version.zip"
+$archivePath = Join-Path $ProjectRoot $archiveName
+$sidecarPath = "$archivePath.sha256.txt"
+$receiptPath = Join-Path $ProjectRoot (
+    "tests\build-artifacts\release\ReleaseCandidate-v$Version.txt")
+$strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+
+function Read-ReleaseReceipt {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "The successful release-candidate receipt is missing: $Path"
+    }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 3 -and
+        $bytes[0] -eq 0xEF -and
+        $bytes[1] -eq 0xBB -and
+        $bytes[2] -eq 0xBF) {
+        throw 'The release-candidate receipt must be UTF-8 without BOM.'
+    }
+    $text = $strictUtf8.GetString($bytes)
+    $pattern = '\A' +
+        'FilePromptAI-Release-Receipt: 1\r\n' +
+        'Suite: tests/RunAllSmokeTests\.ps1\r\n' +
+        'Result: PASS\r\n' +
+        'Version: (?<Version>[0-9A-Za-z](?:[0-9A-Za-z._-]{0,30}[0-9A-Za-z])?)\r\n' +
+        'Candidate-Commit: (?<Candidate>[0-9a-f]{40}(?:[0-9a-f]{24})?)\r\n' +
+        'Archive-Name: (?<Archive>[0-9A-Za-z._-]+)\r\n' +
+        'Archive-SHA256: (?<Hash>[0-9A-F]{64})\r\n\z'
+    $match = [Text.RegularExpressions.Regex]::Match(
+        $text,
+        $pattern,
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $match.Success) {
+        throw 'The release-candidate receipt has an invalid or non-canonical format.'
+    }
+    return [pscustomobject]@{
+        Version = $match.Groups['Version'].Value
+        Candidate = $match.Groups['Candidate'].Value
+        Archive = $match.Groups['Archive'].Value
+        Hash = $match.Groups['Hash'].Value
+    }
+}
+
+$gitRoot = (& git -C $ProjectRoot rev-parse --show-toplevel 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or
+    -not [string]::Equals(
+        [IO.Path]::GetFullPath($gitRoot).TrimEnd('\'),
+        $ProjectRoot.TrimEnd('\'),
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The tagged release must be verified at the root of its Git worktree.'
+}
+
+$receipt = Read-ReleaseReceipt -Path $receiptPath
+if (-not [string]::Equals($receipt.Version, $Version, [StringComparison]::Ordinal) -or
+    -not [string]::Equals($receipt.Archive, $archiveName, [StringComparison]::Ordinal)) {
+    throw 'The release-candidate receipt is for a different release version or archive.'
+}
+
+$tagType = (& git -C $ProjectRoot cat-file -t "refs/tags/$tagName" 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $tagType -ne 'tag') {
+    throw "The release tag must exist as an annotated tag: $tagName"
+}
+$tagCommit = (& git -C $ProjectRoot rev-parse "$tagName^{commit}" 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to resolve the release tag commit: $tagName"
+}
+$headCommit = (& git -C $ProjectRoot rev-parse HEAD 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $headCommit) {
+    throw "The release tag does not point to HEAD: tag=$tagCommit; HEAD=$headCommit"
+}
+
+$parentLine = (& git -C $ProjectRoot rev-list --parents -n 1 $tagCommit 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to inspect the release seal commit parents.'
+}
+$parentFields = @($parentLine -split '\s+')
+if ($parentFields.Count -ne 2) {
+    throw 'The release seal commit must have exactly one parent.'
+}
+$candidateCommit = $parentFields[1]
+if (-not [string]::Equals(
+    $candidateCommit,
+    $receipt.Candidate,
+    [StringComparison]::OrdinalIgnoreCase)) {
+    throw "The seal commit parent is not the tested candidate: parent=$candidateCommit; receipt=$($receipt.Candidate)"
+}
+
+$sealedPaths = @(& git -C $ProjectRoot diff --name-only --no-renames $candidateCommit $tagCommit --)
+if ($LASTEXITCODE -ne 0 -or
+    $sealedPaths.Count -ne 1 -or
+    -not [string]::Equals(
+        $sealedPaths[0],
+        'RELEASE-SHA256.txt',
+        [StringComparison]::Ordinal)) {
+    throw 'The release seal commit must change exactly RELEASE-SHA256.txt relative to the tested candidate.'
+}
+
+$trackedPath = (& git -C $ProjectRoot ls-tree --name-only $tagCommit -- RELEASE-SHA256.txt 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $trackedPath -ne 'RELEASE-SHA256.txt') {
+    throw 'RELEASE-SHA256.txt is missing from the release tag.'
+}
+$tagBlob = (& git -C $ProjectRoot rev-parse "${tagName}:RELEASE-SHA256.txt" 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to resolve the tagged release digest blob.'
+}
+$workingBlob = (& git -C $ProjectRoot hash-object --no-filters -- RELEASE-SHA256.txt 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $tagBlob -ne $workingBlob) {
+    throw 'The tagged release digest differs byte-for-byte from the working copy.'
+}
+
+foreach ($required in @($archivePath, $sidecarPath)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Required release artifact is missing: $required"
+    }
+}
+$archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+if (-not [string]::Equals(
+    $archiveHash,
+    $receipt.Hash,
+    [StringComparison]::Ordinal)) {
+    throw 'The local release ZIP no longer matches the successfully tested candidate receipt.'
+}
+
+& powershell.exe `
+    -NoLogo `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File (Join-Path $testRoot 'VerifyReleaseSha256.ps1') `
+    -Version $Version `
+    -ProjectRoot $ProjectRoot
+if ($LASTEXITCODE -ne 0) {
+    throw 'The tagged release digest does not verify the local release ZIP.'
+}
+
+Write-Host "PASS | annotated release tag | tag=$tagName | commit=$tagCommit | candidate=$candidateCommit | sha256=$archiveHash"

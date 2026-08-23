@@ -91,6 +91,18 @@ internal static class ApiSmokeTest
                 request,
                 SystemPrompt,
                 null);
+            requestType.GetProperty("Temperature").SetValue(
+                request,
+                (double?)0.35d,
+                null);
+            requestType.GetProperty("TopP").SetValue(
+                request,
+                (double?)0.8d,
+                null);
+            requestType.GetProperty("MaxOutputTokens").SetValue(
+                request,
+                (int?)2048,
+                null);
             requestType.GetProperty("Prompt").SetValue(
                 request,
                 CurrentPrompt,
@@ -321,6 +333,13 @@ internal static class ApiSmokeTest
         results.Stream = root != null &&
             root.ContainsKey("stream") &&
             Convert.ToBoolean(root["stream"]);
+        results.GenerationOptions = root != null &&
+            root.ContainsKey("temperature") &&
+            Math.Abs(Convert.ToDouble(root["temperature"]) - 0.35d) < 0.0001d &&
+            root.ContainsKey("top_p") &&
+            Math.Abs(Convert.ToDouble(root["top_p"]) - 0.8d) < 0.0001d &&
+            root.ContainsKey("max_tokens") &&
+            Convert.ToInt32(root["max_tokens"]) == 2048;
         results.SystemPromptOrder = HasSystemPromptFirst(messages);
         results.HistoryOrder = HasHistoryInOrder(messages);
         results.CurrentContent = HasCurrentContent(messages);
@@ -374,6 +393,9 @@ internal static class ApiSmokeTest
             root.Count == 3 &&
             message != null &&
             message.Count == 2 &&
+            !root.ContainsKey("temperature") &&
+            !root.ContainsKey("top_p") &&
+            !root.ContainsKey("max_tokens") &&
             Convert.ToString(message["role"]) == "user" &&
             Convert.ToString(message["content"]) == "ping";
         results.NoHistory = messages != null &&
@@ -704,6 +726,7 @@ internal static class ApiSmokeTest
         public bool BearerKey { get; set; }
         public bool Model { get; set; }
         public bool Stream { get; set; }
+        public bool GenerationOptions { get; set; }
         public bool SystemPromptOrder { get; set; }
         public bool HistoryOrder { get; set; }
         public bool CurrentContent { get; set; }
@@ -718,6 +741,7 @@ internal static class ApiSmokeTest
             get
             {
                 return ExactUrl && BearerKey && Model && Stream &&
+                    GenerationOptions &&
                     SystemPromptOrder && HistoryOrder && CurrentContent &&
                     InlineImage && InlineFile && NoLocalPath &&
                     SingleProtocol && SseOutput;
@@ -730,6 +754,7 @@ internal static class ApiSmokeTest
             PrintResult("Bearer key", BearerKey);
             PrintResult("Model field", Model);
             PrintResult("Streaming request", Stream);
+            PrintResult("Optional generation parameters", GenerationOptions);
             PrintResult("System prompt ordering", SystemPromptOrder);
             PrintResult("History order", HistoryOrder);
             PrintResult("Current authorized content", CurrentContent);

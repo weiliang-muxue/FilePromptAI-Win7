@@ -4,7 +4,7 @@ FilePrompt AI for Windows 7 离线完整版
 版本说明
 --------
 
-当前包为 FilePrompt AI v1.16，也是当前唯一维护版本。界面采用左侧会话导航、右侧会话
+当前包为 FilePrompt AI v1.17，也是当前唯一维护版本。界面采用左侧会话导航、右侧会话
 记录和底部消息编辑器布局；模型、技能/MCP、会话和维护选项统一收进左侧
 “设置”窗口，不占用主工作区。附件列表收进底部消息编辑器，通过“+ 添加”选择文件、
 粘贴内容或打开路径窗口，有资料时才展开；新回复只更新本轮内容，不会清空并重画已有历史。源码仓库与离线包
@@ -13,12 +13,17 @@ FilePrompt AI for Windows 7 离线完整版
 使用方法
 --------
 
-1. 请先完整解压 ZIP，不要在压缩包中直接运行，也不要只复制 EXE。
-2. 双击“Start-FilePromptAI.exe”。
-3. 启动器会自动检测 Microsoft .NET Framework 4.8。
-4. 如果缺少运行环境，选择“是”。启动器会先校验随包安装程序的大小和
+1. 在解压或运行任何文件前，从可信的 v1.17 Git 标签取得仓库根目录中的
+   RELEASE-SHA256.txt，并用 certutil -hashfile FilePromptAI-Win7-Full-v1.17.zip
+   SHA256 核对整个 ZIP。两个摘要必须完全相同。
+2. ZIP 旁的 .zip.sha256.txt 只是便利副本；若二者来自同一下载位置，它不能独立
+   证明 ZIP 未被替换。RELEASE-SHA256.txt 刻意不放进 ZIP，以免摘要自引用。
+3. 校验成功后完整解压 ZIP，不要在压缩包中直接运行，也不要只复制 EXE。
+4. 双击“Start-FilePromptAI.exe”。
+5. 启动器会自动检测 Microsoft .NET Framework 4.8。
+6. 如果缺少运行环境，选择“是”。启动器会先校验随包安装程序的大小和
    SHA-256，再调用微软官方完整离线安装程序；此过程不会下载任何文件。
-5. 安装完成后会自动启动 FilePrompt AI；如果提示重启，请重启电脑后再次
+7. 安装完成后会自动启动 FilePrompt AI；如果提示重启，请重启电脑后再次
    双击启动器。
 
 卸载方法
@@ -65,6 +70,8 @@ FilePrompt AI for Windows 7 离线完整版
 - 连接自检、流式输出、Markdown 排版、资料预览和长会话上下文控制。
 - 可在左侧“设置”→“模型连接”→“模型配置...”保存多个内网模型预设；
   预设 API Key 使用当前用户 DPAPI 加密。
+- API Key 可留空，支持无需鉴权的 Ollama、vLLM 等 OpenAI 兼容内网服务；
+  留空时不会发送 Authorization 请求头。
 - 文本资料正文会进入会话历史；图片和无文本内联文件只在当前轮发送，后续轮次
   需要再次主动添加，不会根据路径自动重读。
 - 最新回复或整个会话可导出 Word、PDF、PowerPoint 和 XMind，Markdown 表格可
@@ -115,8 +122,33 @@ Windows 7 基础要求
 --------
 
 程序安装和启动不访问互联网，也不会在线下载依赖。生成内容时，程序只会连接
-界面中填写的完整请求 URL；该 URL 可以是内网地址。若内网模型服务不可达，
-程序无法生成内容，这与安装依赖无关。
+界面中填写的完整请求 URL；该 URL 可以是内网地址。模型请求和主动模型列表请求
+不使用 Windows 系统代理，也不访问更新、遥测、扩展商店或其他辅助服务。未启用
+可选 MCP 时，基础问答只需要这个 OpenAI Chat Completions 兼容模型端点。若内网
+模型服务不可达，程序无法生成内容，这与安装依赖无关。
+
+Windows 7 一键验收
+------------------
+
+在目标 Windows 7 SP1 电脑上安装 .NET Framework 4.8，将主屏设置为
+1920×1080、100% 缩放，然后直接运行根目录中的 Verify-FilePromptAI.exe。
+
+验收程序不访问公网、不修改注册表、不请求管理员权限，也不使用现有用户会话。
+运行前必须先按“使用方法”从可信 Git 标签核对整个 ZIP；包内清单不能单独证明
+Verify-FilePromptAI.exe 自身未被替换。
+它先验证 PACKAGE-CHECKSUMS-SHA256.txt 的精确文件集合和每个文件的 SHA-256；
+只有包校验通过才会加载和启动真实 app\FilePromptAI.exe。随后用独立临时数据目录
+检查窗口启动，以 127.0.0.1 回环服务验证无 API Key 的主动 /models 发现和流式
+Chat Completions，并调用真实程序检查 TXT、PDF、DOCX、PNG 解析以及 DOCX、PDF、
+PPTX、XLSX、CSV、XMind 导出。整个过程不连接外部模型服务。
+
+XML 报告和同名 .sha256.txt 默认写到 %TEMP%；如果该目录位于发布包内，则写到
+%LocalAppData%\FilePromptAI-Acceptance\AcceptanceReports，绝不会向发布目录添加
+报告。只有 Windows 7 SP1、.NET Framework 4.8、1920×1080@96 DPI 和全部检查
+同时通过时，程序才输出总 PASS 并返回退出码 0。退出码按位表示失败：1=系统、
+2=.NET、4=显示、8=包清单、16=启动、32=API、64=文件、128=验收程序内部错误。
+在 Windows 8/10/11 上运行会明确失败 os.win7-sp1，这是预期行为，不能作为
+Windows 7 通过报告。
 
 源码离线重建
 ------------

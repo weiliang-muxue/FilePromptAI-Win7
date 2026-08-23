@@ -4,19 +4,22 @@
 
 ## 当前发布
 
-当前版本为 **v1.16**。这是仓库和离线安装包的唯一维护版本；界面采用左侧会话导航、
+当前版本为 **v1.17**。这是仓库和离线安装包的唯一维护版本；界面采用左侧会话导航、
 右侧会话记录和底部消息编辑器布局；模型、技能/MCP、会话和维护选项
 统一收进左侧“设置”窗口，不占用主工作区。
 附件列表直接收进底部消息编辑器：通过“+ 添加”选择文件、粘贴内容或打开路径窗口，
 有资料时才展开；发送新消息时只追加和更新本轮内容，不再清空并重画已有历史。
 左侧会话支持置顶、当前/已归档视图，并可从最新模型回复创建独立分支；分支复制
 此前上下文，原会话保持不变。
-打包脚本会在项目根目录生成 `FilePromptAI-Win7-Full-v1.16.zip` 及其 SHA-256
-校验文件；源码和构建脚本均保留在仓库中，便于内网环境审计、重建和离线分发。
+打包脚本会在项目根目录生成 `FilePromptAI-Win7-Full-v1.17.zip` 及其 SHA-256
+校验 sidecar；正式发布的固定摘要另存于对应 Git 标签跟踪的
+`RELEASE-SHA256.txt`。源码和构建脚本均保留在仓库中，便于内网环境审计、
+重建和离线分发。
 
 ## 当前功能
 
-- 配置完整请求 URL、API Key、模型名称。
+- 配置完整请求 URL、模型名称和可选 API Key；无需鉴权的 Ollama、vLLM 等
+  OpenAI 兼容服务可将 Key 留空。
 - 对标准 OpenAI 兼容 URL 可主动读取同源 `/models` 列表并选择模型；模型框仍可编辑，
   服务未提供列表接口时继续支持手动输入。
 - 可在左侧“设置”→“模型连接”→“模型配置...”保存多个内网模型预设，随时选择应用或删除；预设中的 API Key 使用 Windows DPAPI 加密。
@@ -62,7 +65,7 @@
   （`.xlsx`）或 CSV。全部导出均在本机完成。
 - 底部“快捷指令”可填入总结、提炼、翻译、PPT 大纲、XMind 结构和 Markdown
   表格模板；右键对话记录可载入上一条用户指令进行编辑重发，模板不会自动发送。
-- API Key 使用 Windows DPAPI 加密后保存在当前用户的本地配置目录。
+- 填写的 API Key 使用 Windows DPAPI 加密后保存在当前用户的本地配置目录。
 - MCP 的命令、参数、工作目录、环境变量、URL 和请求头整体使用 Windows DPAPI
   加密保存；不会把这些连接配置作为提示词发给模型。
 - 完整请求 URL 不跟随 3xx 重定向，避免把用户资料转发到其他地址。
@@ -79,7 +82,7 @@
 ## 固定接口格式
 
 程序把填写的 URL 当作完整请求地址，原样发起 `POST`，不会补路径或切换接口。
-认证头固定为：
+填写 API Key 时发送认证头；Key 留空时不发送 `Authorization`：
 
 ```text
 Authorization: Bearer <API Key>
@@ -177,7 +180,19 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 
 ## Windows 7 离线完整版
 
-优先使用 `FilePromptAI-Win7-Full-v1.16.zip`。完整解压后运行
+优先使用 `FilePromptAI-Win7-Full-v1.17.zip`。在解压或运行其中任何程序前，
+先从可信的 `v1.17` Git 标签取得 `RELEASE-SHA256.txt`，再核对 ZIP 的 SHA-256：
+
+```powershell
+git show v1.17:RELEASE-SHA256.txt
+certutil -hashfile .\FilePromptAI-Win7-Full-v1.17.zip SHA256
+```
+
+两个摘要必须完全相同。随 ZIP 生成的 `.zip.sha256.txt` 只是便利副本，若它与 ZIP
+来自同一下载位置，不能独立证明 ZIP 未被替换。`RELEASE-SHA256.txt` 刻意不放进
+ZIP，避免摘要自引用；它也为包内 `Verify-FilePromptAI.exe` 提供外部身份锚点。
+
+校验成功后完整解压并运行
 `Start-FilePromptAI.exe`，启动器会检测 .NET Framework 4.8；缺少时会调用包内
 经过微软数字签名的官方完整离线安装程序。安装过程不下载文件，也不需要访问
 互联网。不要只复制 `app` 目录中的 EXE。
@@ -186,7 +201,9 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 XLS/XLSX 和图片处理所需的 33 个托管 DLL；安装和启动不会联网下载依赖，
 不需要另装 WebView2、VC++ 运行库、Node.js、Python、Java 或 Microsoft Office。
 实际生成内容时，电脑仍需能够访问用户填写的完整请求 URL；该地址可以是内网
-模型服务，不要求连接公网。用户主动启用的 stdio MCP 及其运行环境不属于客户端
+模型服务，不要求连接公网。模型请求和主动模型列表请求不使用 Windows 系统代理，
+也不会访问更新、遥测、扩展商店或其他辅助服务；基础问答只需要这个 OpenAI
+Chat Completions 兼容端点。用户主动启用的 stdio MCP 及其运行环境不属于客户端
 运行 ZIP，仍需按“离线技能与 MCP”一节由管理员另行准备。
 
 卸载时运行 `Uninstall-FilePromptAI.exe`，或在左侧“设置”→“维护”中选择
@@ -199,6 +216,30 @@ XLS/XLSX 和图片处理所需的 33 个托管 DLL；安装和启动不会联网
 
 对于长期未更新或被精简过的 Windows 7，上述微软系统更新和字体必须由内网管理员
 通过可信离线介质预先安装。应用包不会联网获取系统补丁、证书或字体。
+
+### Windows 7 一键验收
+
+在目标 Windows 7 SP1 电脑上完整解压离线包，先安装包内 .NET Framework 4.8，
+将主屏设置为 1920×1080、100% 缩放，然后直接运行：
+
+```text
+Verify-FilePromptAI.exe
+```
+
+验收程序不访问公网、不修改注册表、不请求管理员权限，也不使用用户现有会话数据。
+运行前必须先按上一节从可信 Git 标签核对整个 ZIP；包内清单不能单独证明验收程序
+自身未被替换。
+它会校验精确包清单，使用独立临时数据目录启动真实客户端，并通过 127.0.0.1
+回环服务验证无 API Key 的主动 `/models` 发现及流式 Chat Completions；TXT、PDF、
+DOCX、PNG 解析和 DOCX、PDF、PPTX、XLSX、CSV、XMind 导出也直接调用包内真实程序。
+XML 报告和同名 `.sha256.txt` 写到 `%TEMP%`；如果该目录位于发布包内，则改写到
+`%LocalAppData%\FilePromptAI-Acceptance\AcceptanceReports`，不会改变包内文件集合。
+
+只有 Windows 7 SP1、.NET Framework 4.8、1920×1080@96 DPI 和全部功能检查同时
+通过时才返回退出码 0 并输出总 `PASS`。退出码按位表示失败：1=系统、2=.NET、
+4=显示、8=包清单、16=启动、32=API、64=文件、128=验收程序内部错误。在
+Windows 8/10/11 上运行会明确失败 `os.win7-sp1`，这是防止伪造 Win7 验收结论的
+预期行为；其他检查仍可独立给出诊断。
 
 ## 构建
 
@@ -227,9 +268,43 @@ powershell -ExecutionPolicy Bypass -File .\build-offline-package.ps1
 Microsoft Authenticode 签名，并生成 `PACKAGE-CHECKSUMS-SHA256.txt`。仅准备和
 检查发布目录而不生成 ZIP 时，可加 `-StageOnly`。
 
+发布维护者先提交待发布源码，确认工作树和索引均为空，再以发布候选模式运行完整
+测试。只有全部测试和离线包验证成功后，脚本才会在被 Git 忽略的
+`tests\build-artifacts\release` 中写入 receipt，把测试通过的 candidate HEAD 与
+最终 ZIP 的名称和 SHA-256 绑定：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1 `
+    -Version 1.17 -WriteReleaseReceipt
+```
+
+receipt 生成后不得重建 ZIP 或移动 HEAD。随后显式封存固定摘要：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\seal-release.ps1 -Version 1.17
+```
+
+封存要求 HEAD 仍是 receipt 中的已测试 candidate、索引完全为空，并且除未暂存的
+`RELEASE-SHA256.txt` 外源码工作树干净；实际 ZIP 和 sidecar 也必须与 receipt 完全
+一致。摘要文件固定使用 UTF-8 无 BOM 和 CRLF，且 `.gitattributes` 禁止 Git 对它
+做换行转换。随后只提交 `RELEASE-SHA256.txt`，创建指向该提交的 annotated 标签。
+封存后不得再次运行会重建 ZIP 的命令。
+
+标签建立后运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass `
+    -File .\tests\VerifyTaggedRelease.ps1 -Version 1.17
+```
+
+验证脚本要求标签指向 HEAD；seal commit 必须只有一个父提交，该父提交必须是 receipt
+记录的 candidate，并且两者之间只能修改 `RELEASE-SHA256.txt`。它还会按原始字节
+复核标签中的 CRLF 摘要，并确认本地 ZIP、sidecar 和 receipt 一致。全部通过后，再将
+同一 ZIP 与摘要上传为 GitHub Release 资产并做一次下载后复核。
+
 ## 测试
 
-构建、生成离线包并运行全部 21 组自动回归测试：
+构建、生成离线包并运行全部自动回归测试：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1

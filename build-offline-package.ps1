@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.16',
+    [string]$Version = '1.17',
     [switch]$StageOnly
 )
 
@@ -22,6 +22,7 @@ $libraryRoot = Join-Path $projectRoot 'lib'
 $libraryChecksumPath = Join-Path $projectRoot 'LIBRARIES-SHA256.txt'
 $bootstrapperRoot = Join-Path $projectRoot 'bootstrapper'
 $uninstallerRoot = Join-Path $projectRoot 'uninstaller'
+$acceptanceRoot = Join-Path $projectRoot 'acceptance'
 $appIcon = Join-Path $projectRoot 'assets\FilePromptAI.ico'
 $redistRoot = Join-Path $projectRoot 'redist'
 $releaseFolderName = "FilePromptAI-offline-release-v$Version"
@@ -33,6 +34,10 @@ $referenceRoot = 'C:\Windows\Microsoft.NET\Framework\v2.0.50727'
 $compiler = Join-Path $compilerRoot 'csc.exe'
 $bootstrapperExe = Join-Path $releaseRoot 'Start-FilePromptAI.exe'
 $uninstallerExe = Join-Path $releaseRoot 'Uninstall-FilePromptAI.exe'
+$acceptanceExe = Join-Path $releaseRoot 'Verify-FilePromptAI.exe'
+$releaseAcceptanceFixtureRoot = Join-Path $releaseRoot 'acceptance\fixtures'
+$acceptanceTrustedResourceName = 'FilePromptAI.Acceptance.TrustedPayload.sha256'
+$acceptanceBuildRoot = Join-Path $projectRoot 'tests\build-artifacts\acceptance'
 $runtimeSource = Join-Path $redistRoot $runtimeFileName
 $archivePath = Join-Path $projectRoot ("FilePromptAI-Win7-Full-v$Version.zip")
 
@@ -96,6 +101,11 @@ Assert-FileExists -Path (Join-Path $uninstallerRoot 'Program.cs') -Description '
 Assert-FileExists -Path (Join-Path $uninstallerRoot 'AssemblyInfo.cs') -Description 'uninstaller assembly metadata'
 Assert-FileExists -Path (Join-Path $uninstallerRoot 'uninstaller.manifest') -Description 'uninstaller manifest'
 Assert-FileExists -Path (Join-Path $uninstallerRoot 'Uninstall-FilePromptAI.exe.config') -Description 'uninstaller configuration'
+Assert-FileExists -Path (Join-Path $acceptanceRoot 'Program.cs') -Description 'acceptance verifier source'
+Assert-FileExists -Path (Join-Path $acceptanceRoot 'AssemblyInfo.cs') -Description 'acceptance verifier metadata'
+Assert-FileExists -Path (Join-Path $acceptanceRoot 'acceptance.manifest') -Description 'acceptance verifier manifest'
+Assert-FileExists -Path (Join-Path $acceptanceRoot 'Verify-FilePromptAI.exe.config') -Description 'acceptance verifier configuration'
+Assert-FileExists -Path (Join-Path $acceptanceRoot 'fixtures\acceptance.txt') -Description 'acceptance text fixture'
 Assert-FileExists -Path $compiler -Description '.NET Framework 3.5 compiler'
 Assert-FileExists -Path (Join-Path $referenceRoot 'System.dll') -Description '.NET 2.0 System.dll reference'
 Assert-FileExists -Path (Join-Path $referenceRoot 'System.Drawing.dll') -Description '.NET 2.0 System.Drawing.dll reference'
@@ -127,6 +137,7 @@ if (Test-Path -LiteralPath $releaseRoot) {
 
 New-Item -ItemType Directory -Path $releaseAppRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $releaseRuntimeRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $releaseAcceptanceFixtureRoot -Force | Out-Null
 
 Copy-RequiredFile `
     -Source (Join-Path $appDistribution 'FilePromptAI.exe') `
@@ -215,12 +226,80 @@ Copy-RequiredFile `
     -Source (Join-Path $uninstallerRoot 'Uninstall-FilePromptAI.exe.config') `
     -Destination $releaseRoot `
     -Description 'uninstaller configuration'
+
+Copy-RequiredFile `
+    -Source (Join-Path $acceptanceRoot 'Verify-FilePromptAI.exe.config') `
+    -Destination $releaseRoot `
+    -Description 'acceptance verifier configuration'
+Copy-RequiredFile `
+    -Source (Join-Path $acceptanceRoot 'fixtures\acceptance.txt') `
+    -Destination $releaseAcceptanceFixtureRoot `
+    -Description 'acceptance text fixture'
+foreach ($fixtureName in @('sample.pdf', 'sample.docx', 'sample.png')) {
+    Copy-RequiredFile `
+        -Source (Join-Path $projectRoot "tests\fixtures\$fixtureName") `
+        -Destination $releaseAcceptanceFixtureRoot `
+        -Description "acceptance $fixtureName fixture"
+}
+
 Copy-Item -LiteralPath $runtimeSource -Destination $releaseRuntimeRoot -Force
 Assert-OfflineRuntime -Path (Join-Path $releaseRuntimeRoot $runtimeFileName)
 Copy-RequiredFile `
     -Source (Join-Path $projectRoot 'OFFLINE-README.txt') `
     -Destination $releaseRoot `
     -Description 'offline README'
+
+# Embed the expected payload hashes before compiling the verifier. The
+# verifier itself is intentionally absent, avoiding a self-referential hash;
+# its identity is anchored by the ZIP checksum published outside the archive.
+New-Item -ItemType Directory -Path $acceptanceBuildRoot -Force | Out-Null
+$trustedPayloadManifestPath = Join-Path $acceptanceBuildRoot (
+    'TrustedPayload-' + [Guid]::NewGuid().ToString('N') + '.txt'
+)
+$trustedPayloadLines = @(
+    Get-ChildItem -LiteralPath $releaseRoot -File -Recurse |
+        Sort-Object FullName |
+        ForEach-Object {
+            $relativePath = $_.FullName.Substring($releaseRoot.Length).TrimStart('\')
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+            "$hash *$relativePath"
+        }
+)
+[IO.File]::WriteAllLines(
+    $trustedPayloadManifestPath,
+    $trustedPayloadLines,
+    (New-Object Text.UTF8Encoding($false)))
+
+$acceptanceCompilerArguments = @(
+    '/nologo',
+    '/target:exe',
+    '/platform:anycpu',
+    '/optimize+',
+    '/codepage:65001',
+    '/warn:4',
+    "/out:$acceptanceExe",
+    "/win32manifest:$(Join-Path $acceptanceRoot 'acceptance.manifest')",
+    "/resource:$trustedPayloadManifestPath,$acceptanceTrustedResourceName",
+    "/reference:$(Join-Path $referenceRoot 'System.dll')",
+    "/reference:$(Join-Path $referenceRoot 'System.Xml.dll')",
+    (Join-Path $acceptanceRoot 'AssemblyInfo.cs'),
+    (Join-Path $acceptanceRoot 'Program.cs')
+)
+
+$acceptanceCompilerExitCode = -1
+try {
+    & $compiler $acceptanceCompilerArguments
+    $acceptanceCompilerExitCode = $LASTEXITCODE
+}
+finally {
+    if (Test-Path -LiteralPath $trustedPayloadManifestPath -PathType Leaf) {
+        Remove-Item -LiteralPath $trustedPayloadManifestPath -Force
+    }
+}
+if ($acceptanceCompilerExitCode -ne 0) {
+    throw "Acceptance verifier compilation failed with exit code $acceptanceCompilerExitCode."
+}
+Assert-FileExists -Path $acceptanceExe -Description 'acceptance verifier executable'
 
 # The checksum list lets an administrator verify every delivered payload file without Internet access.
 $checksumLines = @(

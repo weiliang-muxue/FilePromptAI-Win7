@@ -132,8 +132,8 @@ namespace FilePromptAIWin7
             handler.AutomaticDecompression =
                 DecompressionMethods.GZip | DecompressionMethods.Deflate;
             handler.AllowAutoRedirect = false;
-            handler.UseProxy = true;
-            handler.Proxy = WebRequest.DefaultWebProxy;
+            handler.UseProxy = false;
+            handler.Proxy = null;
 
             client = new HttpClient(handler);
             client.Timeout = TimeSpan.FromMilliseconds(Timeout.Infinite);
@@ -1647,7 +1647,28 @@ namespace FilePromptAIWin7
             root["model"] = request.ModelName;
             root["stream"] = stream;
             root["messages"] = BuildInitialMessages(request, true).ToArray();
+            AddGenerationOptions(root, request);
             return json.Serialize(root);
+        }
+
+        private static void AddGenerationOptions(
+            IDictionary<string, object> root,
+            ModelRequest request)
+        {
+            if (request.Temperature.HasValue)
+            {
+                root["temperature"] = request.Temperature.Value;
+            }
+
+            if (request.TopP.HasValue)
+            {
+                root["top_p"] = request.TopP.Value;
+            }
+
+            if (request.MaxOutputTokens.HasValue)
+            {
+                root["max_tokens"] = request.MaxOutputTokens.Value;
+            }
         }
 
         private List<object> BuildInitialMessages(
@@ -1730,6 +1751,7 @@ namespace FilePromptAIWin7
             root["messages"] = messages.ToArray();
             root["tools"] = tools;
             root["tool_choice"] = "auto";
+            AddGenerationOptions(root, request);
             string payload = json.Serialize(root);
             EnsureSerializedRequestSize(
                 payload,
@@ -3040,6 +3062,33 @@ namespace FilePromptAIWin7
             if (string.IsNullOrWhiteSpace(request.Prompt))
             {
                 throw new ModelCallException("没有可提交的文字内容。");
+            }
+
+            if (request.Temperature.HasValue &&
+                (double.IsNaN(request.Temperature.Value) ||
+                 double.IsInfinity(request.Temperature.Value) ||
+                 request.Temperature.Value < 0d ||
+                 request.Temperature.Value > 2d))
+            {
+                throw new ModelCallException(
+                    "temperature 必须在 0 到 2 之间。");
+            }
+
+            if (request.TopP.HasValue &&
+                (double.IsNaN(request.TopP.Value) ||
+                 double.IsInfinity(request.TopP.Value) ||
+                 request.TopP.Value < 0d ||
+                 request.TopP.Value > 1d))
+            {
+                throw new ModelCallException("top_p 必须在 0 到 1 之间。");
+            }
+
+            if (request.MaxOutputTokens.HasValue &&
+                (request.MaxOutputTokens.Value < 1 ||
+                 request.MaxOutputTokens.Value > 1048576))
+            {
+                throw new ModelCallException(
+                    "最大输出 Token 必须在 1 到 1,048,576 之间。");
             }
 
             ValidateBinaryAttachmentBudget(request, 0L);

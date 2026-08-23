@@ -57,6 +57,13 @@ namespace FilePromptAIWin7
         private TextBox endpointTextBox;
         private TextBox apiKeyTextBox;
         private ComboBox modelTextBox;
+        private TextBox systemPromptTextBox;
+        private CheckBox temperatureEnabledCheckBox;
+        private NumericUpDown temperatureNumericUpDown;
+        private CheckBox topPEnabledCheckBox;
+        private NumericUpDown topPNumericUpDown;
+        private CheckBox maxOutputTokensEnabledCheckBox;
+        private NumericUpDown maxOutputTokensNumericUpDown;
         private TextBox sessionSearchTextBox;
         private ListBox sessionListBox;
         private Button currentSessionsButton;
@@ -295,6 +302,17 @@ namespace FilePromptAIWin7
             endpointTextBox = settingsDialog.EndpointTextBox;
             apiKeyTextBox = settingsDialog.ApiKeyTextBox;
             modelTextBox = settingsDialog.ModelTextBox;
+            systemPromptTextBox = settingsDialog.SystemPromptTextBox;
+            temperatureEnabledCheckBox =
+                settingsDialog.TemperatureEnabledCheckBox;
+            temperatureNumericUpDown =
+                settingsDialog.TemperatureNumericUpDown;
+            topPEnabledCheckBox = settingsDialog.TopPEnabledCheckBox;
+            topPNumericUpDown = settingsDialog.TopPNumericUpDown;
+            maxOutputTokensEnabledCheckBox =
+                settingsDialog.MaxOutputTokensEnabledCheckBox;
+            maxOutputTokensNumericUpDown =
+                settingsDialog.MaxOutputTokensNumericUpDown;
             testConnectionButton = settingsDialog.TestConnectionButton;
             extensionsButton = settingsDialog.ExtensionsButton;
             backupSessionsButton = settingsDialog.BackupSessionsButton;
@@ -303,6 +321,17 @@ namespace FilePromptAIWin7
             endpointTextBox.TextChanged += OnConnectionSettingChanged;
             apiKeyTextBox.TextChanged += OnConnectionSettingChanged;
             modelTextBox.TextChanged += OnConnectionSettingChanged;
+            systemPromptTextBox.TextChanged += OnGenerationSettingChanged;
+            temperatureEnabledCheckBox.CheckedChanged +=
+                OnGenerationSettingChanged;
+            temperatureNumericUpDown.ValueChanged +=
+                OnGenerationSettingChanged;
+            topPEnabledCheckBox.CheckedChanged += OnGenerationSettingChanged;
+            topPNumericUpDown.ValueChanged += OnGenerationSettingChanged;
+            maxOutputTokensEnabledCheckBox.CheckedChanged +=
+                OnGenerationSettingChanged;
+            maxOutputTokensNumericUpDown.ValueChanged +=
+                OnGenerationSettingChanged;
             settingsDialog.FetchModelsButton.Click += OnFetchModelsClick;
             testConnectionButton.Click += OnTestConnectionClick;
             settingsDialog.ModelProfilesButton.Click += OnModelProfilesClick;
@@ -1180,6 +1209,16 @@ namespace FilePromptAIWin7
             string previousEndpoint = endpointTextBox.Text;
             string previousKey = apiKeyTextBox.Text;
             string previousModel = modelTextBox.Text;
+            string previousSystemPrompt = systemPromptTextBox.Text;
+            bool previousTemperatureEnabled =
+                temperatureEnabledCheckBox.Checked;
+            decimal previousTemperature = temperatureNumericUpDown.Value;
+            bool previousTopPEnabled = topPEnabledCheckBox.Checked;
+            decimal previousTopP = topPNumericUpDown.Value;
+            bool previousMaxOutputTokensEnabled =
+                maxOutputTokensEnabledCheckBox.Checked;
+            decimal previousMaxOutputTokens =
+                maxOutputTokensNumericUpDown.Value;
             string previousShortcut = sendShortcutMode ?? "Both";
             settingsDialog.SendShortcutMode = previousShortcut;
             settingsDialog.SetContextSummary(BuildContextSummary());
@@ -1205,6 +1244,14 @@ namespace FilePromptAIWin7
             endpointTextBox.Text = previousEndpoint;
             apiKeyTextBox.Text = previousKey;
             modelTextBox.Text = previousModel;
+            systemPromptTextBox.Text = previousSystemPrompt;
+            temperatureEnabledCheckBox.Checked = previousTemperatureEnabled;
+            temperatureNumericUpDown.Value = previousTemperature;
+            topPEnabledCheckBox.Checked = previousTopPEnabled;
+            topPNumericUpDown.Value = previousTopP;
+            maxOutputTokensEnabledCheckBox.Checked =
+                previousMaxOutputTokensEnabled;
+            maxOutputTokensNumericUpDown.Value = previousMaxOutputTokens;
             sendShortcutMode = previousShortcut;
             settingsDialog.SendShortcutMode = previousShortcut;
             UpdatePromptHint();
@@ -1241,19 +1288,15 @@ namespace FilePromptAIWin7
         private bool HasCompleteConnectionSettings()
         {
             return endpointTextBox != null &&
-                apiKeyTextBox != null &&
                 modelTextBox != null &&
                 !string.IsNullOrWhiteSpace(endpointTextBox.Text) &&
-                !string.IsNullOrWhiteSpace(apiKeyTextBox.Text) &&
                 !string.IsNullOrWhiteSpace(modelTextBox.Text);
         }
 
         private bool HasModelListConnectionSettings()
         {
             return endpointTextBox != null &&
-                apiKeyTextBox != null &&
-                !string.IsNullOrWhiteSpace(endpointTextBox.Text) &&
-                !string.IsNullOrWhiteSpace(apiKeyTextBox.Text);
+                !string.IsNullOrWhiteSpace(endpointTextBox.Text);
         }
 
         private bool IsBusy
@@ -2192,17 +2235,13 @@ namespace FilePromptAIWin7
             string endpoint = endpointTextBox == null
                 ? string.Empty
                 : endpointTextBox.Text.Trim();
-            string key = apiKeyTextBox == null
-                ? string.Empty
-                : apiKeyTextBox.Text.Trim();
             string model = modelTextBox == null
                 ? string.Empty
                 : modelTextBox.Text.Trim();
             if (string.IsNullOrEmpty(endpoint) ||
-                string.IsNullOrEmpty(key) ||
                 string.IsNullOrEmpty(model))
             {
-                return "尚未配置完整 · 请填写 URL / Key / 模型";
+                return "尚未配置完整 · 请填写 URL / 模型";
             }
 
             return "配置就绪 · " + model;
@@ -2252,7 +2291,7 @@ namespace FilePromptAIWin7
                 }
             }
 
-            currentTurnCharacters += extensionPromptCharacterEstimate;
+            currentTurnCharacters += GetSystemPromptCharacterEstimate();
 
             // Keep the default line scannable at 900px. The tooltip and
             // AccessibleDescription retain the full character estimates.
@@ -2297,7 +2336,7 @@ namespace FilePromptAIWin7
 
             currentTurnCharacters = AddSaturated(
                 currentTurnCharacters,
-                extensionPromptCharacterEstimate);
+                GetSystemPromptCharacterEstimate());
             long totalCharacters = AddSaturated(
                 historyCharacters,
                 currentTurnCharacters);
@@ -2374,6 +2413,55 @@ namespace FilePromptAIWin7
             return string.IsNullOrEmpty(prompt) ? 0L : prompt.Length;
         }
 
+        private long GetSystemPromptCharacterEstimate()
+        {
+            string custom = systemPromptTextBox == null
+                ? string.Empty
+                : systemPromptTextBox.Text.Trim();
+            long customCharacters =
+                ConversationContextBudget.CountCharacters(custom);
+            long separatorCharacters = customCharacters > 0L &&
+                extensionPromptCharacterEstimate > 0L
+                    ? 4L
+                    : 0L;
+            return AddSaturated(
+                customCharacters,
+                AddSaturated(
+                    separatorCharacters,
+                    extensionPromptCharacterEstimate));
+        }
+
+        private string BuildCombinedSystemPrompt()
+        {
+            string custom = systemPromptTextBox == null
+                ? string.Empty
+                : (systemPromptTextBox.Text ?? string.Empty).Trim();
+            string skills = extensionSettings == null
+                ? string.Empty
+                : extensionSettings.BuildSystemPrompt();
+            if (string.IsNullOrEmpty(custom))
+            {
+                return skills;
+            }
+
+            if (string.IsNullOrEmpty(skills))
+            {
+                return custom;
+            }
+
+            return custom + "\r\n\r\n" + skills;
+        }
+
+        private void OnGenerationSettingChanged(object sender, EventArgs args)
+        {
+            if (retryAvailable && generationCancellation == null)
+            {
+                ClearRetryState();
+            }
+
+            ScheduleContextSummaryUpdate();
+        }
+
         private void OnConnectionSettingChanged(object sender, EventArgs args)
         {
             if (retryAvailable && generationCancellation == null)
@@ -2441,6 +2529,19 @@ namespace FilePromptAIWin7
             endpointTextBox.Text = settings.EndpointUrl;
             apiKeyTextBox.Text = settings.ApiKey;
             modelTextBox.Text = settings.ModelName;
+            systemPromptTextBox.Text = settings.SystemPrompt ?? string.Empty;
+            SetOptionalNumber(
+                temperatureEnabledCheckBox,
+                temperatureNumericUpDown,
+                settings.Temperature);
+            SetOptionalNumber(
+                topPEnabledCheckBox,
+                topPNumericUpDown,
+                settings.TopP);
+            SetOptionalNumber(
+                maxOutputTokensEnabledCheckBox,
+                maxOutputTokensNumericUpDown,
+                settings.MaxOutputTokens);
             sendShortcutMode = IsValidSendShortcutMode(settings.SendShortcut)
                 ? settings.SendShortcut
                 : "Both";
@@ -2462,6 +2563,18 @@ namespace FilePromptAIWin7
                 settings.ApiKey = apiKeyTextBox.Text.Trim();
                 settings.ModelName = modelTextBox.Text.Trim();
                 settings.SendShortcut = sendShortcutMode ?? "Both";
+                settings.SystemPrompt = systemPromptTextBox.Text.Trim();
+                settings.Temperature = temperatureEnabledCheckBox.Checked
+                    ? (double?)temperatureNumericUpDown.Value
+                    : null;
+                settings.TopP = topPEnabledCheckBox.Checked
+                    ? (double?)topPNumericUpDown.Value
+                    : null;
+                settings.MaxOutputTokens =
+                    maxOutputTokensEnabledCheckBox.Checked
+                        ? (int?)decimal.ToInt32(
+                            maxOutputTokensNumericUpDown.Value)
+                        : null;
                 settings.Save();
                 return true;
             }
@@ -2477,6 +2590,34 @@ namespace FilePromptAIWin7
             return mode == "Enter" ||
                 mode == "CtrlEnter" ||
                 mode == "Both";
+        }
+
+        private static void SetOptionalNumber(
+            CheckBox enabled,
+            NumericUpDown control,
+            double? value)
+        {
+            enabled.Checked = value.HasValue;
+            if (value.HasValue)
+            {
+                control.Value = Math.Max(
+                    control.Minimum,
+                    Math.Min(control.Maximum, (decimal)value.Value));
+            }
+        }
+
+        private static void SetOptionalNumber(
+            CheckBox enabled,
+            NumericUpDown control,
+            int? value)
+        {
+            enabled.Checked = value.HasValue;
+            if (value.HasValue)
+            {
+                control.Value = Math.Max(
+                    control.Minimum,
+                    Math.Min(control.Maximum, value.Value));
+            }
         }
 
         private bool IsEnterSendShortcut(bool control, bool shift)
@@ -2917,6 +3058,12 @@ namespace FilePromptAIWin7
             string currentKey = apiKeyTextBox == null
                 ? string.Empty
                 : apiKeyTextBox.Text.Trim();
+            string currentSystemPrompt = systemPromptTextBox == null
+                ? string.Empty
+                : systemPromptTextBox.Text.Trim();
+            double? currentTemperature = GetTemperature();
+            double? currentTopP = GetTopP();
+            int? currentMaxOutputTokens = GetMaxOutputTokens();
             foreach (ModelProfile profile in modelProfiles ??
                 new List<ModelProfile>())
             {
@@ -2932,7 +3079,11 @@ namespace FilePromptAIWin7
                     profile,
                     currentEndpoint,
                     currentKey,
-                    currentModel);
+                    currentModel,
+                    currentSystemPrompt,
+                    currentTemperature,
+                    currentTopP,
+                    currentMaxOutputTokens);
                 item.Click += delegate
                 {
                     if (IsBusy)
@@ -2980,9 +3131,23 @@ namespace FilePromptAIWin7
             string key = apiKeyTextBox == null
                 ? string.Empty
                 : apiKeyTextBox.Text.Trim();
+            string systemPrompt = systemPromptTextBox == null
+                ? string.Empty
+                : systemPromptTextBox.Text.Trim();
+            double? temperature = GetTemperature();
+            double? topP = GetTopP();
+            int? maxOutputTokens = GetMaxOutputTokens();
             ModelProfile matched = (modelProfiles ??
                 new List<ModelProfile>()).FirstOrDefault(profile =>
-                    ProfileMatchesCurrent(profile, endpoint, key, model));
+                    ProfileMatchesCurrent(
+                        profile,
+                        endpoint,
+                        key,
+                        model,
+                        systemPrompt,
+                        temperature,
+                        topP,
+                        maxOutputTokens));
             quickModelButton.Text = matched == null
                 ? (string.IsNullOrWhiteSpace(model) ? "模型" : model)
                 : matched.Name;
@@ -2996,7 +3161,11 @@ namespace FilePromptAIWin7
             ModelProfile profile,
             string endpoint,
             string apiKey,
-            string model)
+            string model,
+            string systemPrompt,
+            double? temperature,
+            double? topP,
+            int? maxOutputTokens)
         {
             return profile != null &&
                 string.Equals(
@@ -3010,7 +3179,14 @@ namespace FilePromptAIWin7
                 string.Equals(
                     profile.ModelName ?? string.Empty,
                     model ?? string.Empty,
-                    StringComparison.Ordinal);
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    profile.SystemPrompt ?? string.Empty,
+                    systemPrompt ?? string.Empty,
+                    StringComparison.Ordinal) &&
+                Nullable.Equals(profile.Temperature, temperature) &&
+                Nullable.Equals(profile.TopP, topP) &&
+                Nullable.Equals(profile.MaxOutputTokens, maxOutputTokens);
         }
 
         private ModelProfile CreateCurrentModelProfile()
@@ -3025,7 +3201,13 @@ namespace FilePromptAIWin7
                     : apiKeyTextBox.Text.Trim(),
                 ModelName = modelTextBox == null
                     ? string.Empty
-                    : modelTextBox.Text.Trim()
+                    : modelTextBox.Text.Trim(),
+                SystemPrompt = systemPromptTextBox == null
+                    ? string.Empty
+                    : systemPromptTextBox.Text.Trim(),
+                Temperature = GetTemperature(),
+                TopP = GetTopP(),
+                MaxOutputTokens = GetMaxOutputTokens()
             };
         }
 
@@ -3039,6 +3221,19 @@ namespace FilePromptAIWin7
             endpointTextBox.Text = profile.EndpointUrl ?? string.Empty;
             apiKeyTextBox.Text = profile.ApiKey ?? string.Empty;
             modelTextBox.Text = profile.ModelName ?? string.Empty;
+            systemPromptTextBox.Text = profile.SystemPrompt ?? string.Empty;
+            SetOptionalNumber(
+                temperatureEnabledCheckBox,
+                temperatureNumericUpDown,
+                profile.Temperature);
+            SetOptionalNumber(
+                topPEnabledCheckBox,
+                topPNumericUpDown,
+                profile.TopP);
+            SetOptionalNumber(
+                maxOutputTokensEnabledCheckBox,
+                maxOutputTokensNumericUpDown,
+                profile.MaxOutputTokens);
             bool saved = SaveSettings();
             connectionStatusLabel.Text = BuildConnectionStatus();
             testConnectionButton.Enabled = HasCompleteConnectionSettings();
@@ -3047,6 +3242,42 @@ namespace FilePromptAIWin7
             UpdateQuickModelButton();
             UpdateContextSummary();
             return saved;
+        }
+
+        private double? GetTemperature()
+        {
+            return temperatureEnabledCheckBox != null &&
+                temperatureEnabledCheckBox.Checked
+                    ? (double?)temperatureNumericUpDown.Value
+                    : null;
+        }
+
+        private double? GetTopP()
+        {
+            return topPEnabledCheckBox != null &&
+                topPEnabledCheckBox.Checked
+                    ? (double?)topPNumericUpDown.Value
+                    : null;
+        }
+
+        private int? GetMaxOutputTokens()
+        {
+            return maxOutputTokensEnabledCheckBox != null &&
+                maxOutputTokensEnabledCheckBox.Checked
+                    ? (int?)decimal.ToInt32(maxOutputTokensNumericUpDown.Value)
+                    : null;
+        }
+
+        private void ApplyGenerationOptions(ModelRequest request)
+        {
+            if (request == null)
+            {
+                throw new ArgumentNullException("request");
+            }
+
+            request.Temperature = GetTemperature();
+            request.TopP = GetTopP();
+            request.MaxOutputTokens = GetMaxOutputTokens();
         }
 
         private async void OnFetchModelsClick(object sender, EventArgs args)
@@ -3074,12 +3305,6 @@ namespace FilePromptAIWin7
                 ShowValidation(
                     "请求 URL 必须是完整且不含用户名密码的 http:// 或 https:// 地址。",
                     endpointTextBox);
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(key))
-            {
-                ShowValidation("请先填写 API Key。", apiKeyTextBox);
                 return;
             }
 
@@ -3182,12 +3407,6 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(key))
-            {
-                ShowValidation("请先填写 API Key。", apiKeyTextBox);
-                return;
-            }
-
             if (string.IsNullOrWhiteSpace(model))
             {
                 ShowValidation("请先填写模型名称。", modelTextBox);
@@ -3268,6 +3487,7 @@ namespace FilePromptAIWin7
             endpointTextBox.Enabled = !testing;
             apiKeyTextBox.Enabled = !testing;
             modelTextBox.Enabled = !testing;
+            SetGenerationControlsEnabled(!testing);
             settingsDialog.FetchModelsButton.Enabled = !testing &&
                 !isAddingFiles && generationCancellation == null &&
                 HasModelListConnectionSettings();
@@ -4629,12 +4849,6 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(key))
-            {
-                ShowSettingsDialog(apiKeyTextBox, "请先填写 API Key。");
-                return;
-            }
-
             if (string.IsNullOrWhiteSpace(model))
             {
                 ShowSettingsDialog(modelTextBox, "请先填写模型名称。");
@@ -4675,9 +4889,7 @@ namespace FilePromptAIWin7
             {
                 attachments.Clear();
             }
-            string systemPrompt = extensionSettings == null
-                ? string.Empty
-                : extensionSettings.BuildSystemPrompt();
+            string systemPrompt = BuildCombinedSystemPrompt();
             string prompt;
             string promptValidationMessage;
             bool fileTextWasTrimmed;
@@ -4693,8 +4905,8 @@ namespace FilePromptAIWin7
                 if (systemCharacters >= MaximumConversationContextCharacters)
                 {
                     ShowValidation(
-                        "已启用技能生成的系统提示达到或超过 48,000 字符预算。" +
-                        "请在“技能 / MCP”中缩短或停用相关技能后再重新生成。",
+                        "系统提示词与已启用技能达到或超过 48,000 字符预算。" +
+                        "请在设置中缩短系统提示词或停用部分技能。",
                         promptTextBox);
                     return;
                 }
@@ -4702,8 +4914,8 @@ namespace FilePromptAIWin7
                     MaximumConversationContextCharacters - systemCharacters)
                 {
                     ShowValidation(
-                        "原请求与已启用技能合计超过 48,000 字符预算。" +
-                        "请缩短或停用部分技能后再重新生成。",
+                        "原请求与系统提示合计超过 48,000 字符预算。" +
+                        "请缩短系统提示词或停用部分技能。",
                         promptTextBox);
                     return;
                 }
@@ -4751,6 +4963,7 @@ namespace FilePromptAIWin7
             request.ModelName = model;
             request.Prompt = prompt;
             request.SystemPrompt = systemPrompt;
+            ApplyGenerationOptions(request);
             request.Attachments = attachments;
             request.ConversationMessages = contextSelection.Messages;
 
@@ -5670,8 +5883,8 @@ namespace FilePromptAIWin7
             if (systemCharacters >= MaximumConversationContextCharacters)
             {
                 validationMessage =
-                    "已启用技能生成的系统提示达到或超过 48,000 字符预算。" +
-                    "请在“技能 / MCP”中缩短或停用相关技能后再发送。";
+                    "系统提示词与已启用技能达到或超过 48,000 字符预算。" +
+                    "请在设置中缩短系统提示词或停用部分技能。";
                 return false;
             }
 
@@ -5683,8 +5896,8 @@ namespace FilePromptAIWin7
             if (prefixCharacters > promptCharacterBudget)
             {
                 validationMessage =
-                    "当前文字描述与已启用技能合计超过 48,000 字符预算。" +
-                    "请缩短文字描述或停用部分技能后再发送。";
+                    "当前文字描述与系统提示合计超过 48,000 字符预算。" +
+                    "请缩短文字描述、系统提示词或停用部分技能。";
                 return false;
             }
 
@@ -5704,8 +5917,8 @@ namespace FilePromptAIWin7
             if (fixedPromptCharacters > promptCharacterBudget)
             {
                 validationMessage =
-                    "当前文字描述、资料名称与已启用技能合计超过 " +
-                    "48,000 字符预算。请缩短文字描述、减少资料或停用部分技能。";
+                    "当前文字描述、资料名称与系统提示合计超过 " +
+                    "48,000 字符预算。请缩短相关内容或停用部分技能。";
                 return false;
             }
 
@@ -5723,8 +5936,8 @@ namespace FilePromptAIWin7
                 if (noticeCharacters > availableTextBodyCharacters)
                 {
                     validationMessage =
-                        "当前文字描述与已启用技能没有为文件正文留下足够的字符预算。" +
-                        "请缩短文字描述或停用部分技能后再发送。";
+                        "当前文字描述与系统提示没有为文件正文留下足够的字符预算。" +
+                        "请缩短相关内容或停用部分技能后再发送。";
                     return false;
                 }
 
@@ -5944,6 +6157,7 @@ namespace FilePromptAIWin7
             endpointTextBox.Enabled = !generating;
             apiKeyTextBox.Enabled = !generating;
             modelTextBox.Enabled = !generating;
+            SetGenerationControlsEnabled(!generating);
             settingsDialog.FetchModelsButton.Enabled = !generating &&
                 connectionTestCancellation == null && !isAddingFiles &&
                 HasModelListConnectionSettings();
@@ -5958,6 +6172,44 @@ namespace FilePromptAIWin7
             }
             progressBar.Visible = generating || isAddingFiles;
             UpdateOutputButtons(generating);
+        }
+
+        private void SetGenerationControlsEnabled(bool enabled)
+        {
+            if (systemPromptTextBox != null)
+            {
+                systemPromptTextBox.Enabled = enabled;
+            }
+
+            if (temperatureEnabledCheckBox != null)
+            {
+                temperatureEnabledCheckBox.Enabled = enabled;
+            }
+            if (temperatureNumericUpDown != null)
+            {
+                temperatureNumericUpDown.Enabled = enabled &&
+                    temperatureEnabledCheckBox.Checked;
+            }
+
+            if (topPEnabledCheckBox != null)
+            {
+                topPEnabledCheckBox.Enabled = enabled;
+            }
+            if (topPNumericUpDown != null)
+            {
+                topPNumericUpDown.Enabled = enabled &&
+                    topPEnabledCheckBox.Checked;
+            }
+
+            if (maxOutputTokensEnabledCheckBox != null)
+            {
+                maxOutputTokensEnabledCheckBox.Enabled = enabled;
+            }
+            if (maxOutputTokensNumericUpDown != null)
+            {
+                maxOutputTokensNumericUpDown.Enabled = enabled &&
+                    maxOutputTokensEnabledCheckBox.Checked;
+            }
         }
 
         private void SetSessionNavigationEnabled(bool enabled)

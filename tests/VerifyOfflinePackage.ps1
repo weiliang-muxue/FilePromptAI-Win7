@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.16'
+    [string]$Version = '1.17'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -215,6 +215,9 @@ try {
 
         $entryNames.Add($name)
     }
+    if ($entryNames.Contains('RELEASE-SHA256.txt')) {
+        throw 'RELEASE-SHA256.txt must remain outside the ZIP to avoid a self-referential release digest.'
+    }
 }
 finally {
     $zip.Dispose()
@@ -277,10 +280,28 @@ $bootstrapperVersion = (Get-Item -LiteralPath (
 )).VersionInfo.FileVersion
 $uninstallerPath = Join-Path $stagingRoot 'Uninstall-FilePromptAI.exe'
 $uninstallerVersion = (Get-Item -LiteralPath $uninstallerPath).VersionInfo.FileVersion
-if ($appVersion -ne '1.16.0.0' -or
-    $bootstrapperVersion -ne '1.16.0.0' -or
-    $uninstallerVersion -ne '1.16.0.0') {
-    throw "Unexpected executable versions: app=$appVersion bootstrapper=$bootstrapperVersion uninstaller=$uninstallerVersion"
+$acceptancePath = Join-Path $stagingRoot 'Verify-FilePromptAI.exe'
+$acceptanceVersion = (Get-Item -LiteralPath $acceptancePath).VersionInfo.FileVersion
+if ($appVersion -ne '1.17.0.0' -or
+    $bootstrapperVersion -ne '1.17.0.0' -or
+    $uninstallerVersion -ne '1.17.0.0' -or
+    $acceptanceVersion -ne '1.17.0.0') {
+    throw "Unexpected executable versions: app=$appVersion bootstrapper=$bootstrapperVersion uninstaller=$uninstallerVersion acceptance=$acceptanceVersion"
+}
+
+foreach ($requiredAcceptancePath in @(
+    'Verify-FilePromptAI.exe',
+    'Verify-FilePromptAI.exe.config',
+    'acceptance\fixtures\acceptance.txt',
+    'acceptance\fixtures\sample.pdf',
+    'acceptance\fixtures\sample.docx',
+    'acceptance\fixtures\sample.png'
+)) {
+    if (-not (Test-Path -LiteralPath (
+        Join-Path $stagingRoot $requiredAcceptancePath
+    ) -PathType Leaf)) {
+        throw "Missing acceptance artifact: $requiredAcceptancePath"
+    }
 }
 
 $bootstrapperPath = Join-Path $stagingRoot 'Start-FilePromptAI.exe'

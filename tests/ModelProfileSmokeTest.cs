@@ -21,7 +21,11 @@ namespace FilePromptAIWin7
                     Name = "内网主模型",
                     EndpointUrl = "https://127.0.0.1:9443/v1/chat/completions",
                     ApiKey = "profile-secret-42",
-                    ModelName = "offline-model"
+                    ModelName = "offline-model",
+                    SystemPrompt = "Answer with cited evidence.",
+                    Temperature = 0.25d,
+                    TopP = 0.85d,
+                    MaxOutputTokens = 3072
                 };
 
                 ModelProfileStore store = new ModelProfileStore(path);
@@ -37,6 +41,64 @@ namespace FilePromptAIWin7
                 Assert(loaded.EndpointUrl == profile.EndpointUrl, "URL round trip");
                 Assert(loaded.ApiKey == profile.ApiKey, "API key round trip");
                 Assert(loaded.ModelName == profile.ModelName, "model name round trip");
+                Assert(
+                    loaded.SystemPrompt == profile.SystemPrompt,
+                    "system prompt round trip");
+                Assert(
+                    loaded.Temperature == profile.Temperature &&
+                        loaded.TopP == profile.TopP &&
+                        loaded.MaxOutputTokens == profile.MaxOutputTokens,
+                    "generation options round trip");
+
+                string anonymousPath = Path.Combine(root, "anonymous.xml");
+                ModelProfile anonymousProfile = new ModelProfile
+                {
+                    Name = "匿名内网模型",
+                    EndpointUrl = "http://127.0.0.1:11434/v1/chat/completions",
+                    ApiKey = string.Empty,
+                    ModelName = "local-model"
+                };
+                ModelProfileStore anonymousStore =
+                    new ModelProfileStore(anonymousPath);
+                anonymousStore.Save(new[] { anonymousProfile });
+                ModelProfile loadedAnonymous = anonymousStore.Load().Single();
+                Assert(
+                    loadedAnonymous.ApiKey == string.Empty,
+                    "empty API key profile round trip");
+                Assert(
+                    loadedAnonymous.Name == anonymousProfile.Name &&
+                        loadedAnonymous.EndpointUrl ==
+                            anonymousProfile.EndpointUrl &&
+                        loadedAnonymous.ModelName == anonymousProfile.ModelName,
+                    "empty API key profile fields round trip");
+                Assert(
+                    loadedAnonymous.SystemPrompt == string.Empty &&
+                        !loadedAnonymous.Temperature.HasValue &&
+                        !loadedAnonymous.TopP.HasValue &&
+                        !loadedAnonymous.MaxOutputTokens.HasValue,
+                    "legacy optional generation settings default empty");
+
+                string invalidOptionsPath = Path.Combine(
+                    root,
+                    "invalid-options.xml");
+                File.WriteAllText(
+                    invalidOptionsPath,
+                    "<FilePromptAIModelProfiles version=\"1\">" +
+                    "<Profile><Name>兼容配置</Name>" +
+                    "<EndpointUrl>http://127.0.0.1/v1/chat/completions</EndpointUrl>" +
+                    "<ModelName>model</ModelName>" +
+                    "<Temperature>NaN</Temperature><TopP>4</TopP>" +
+                    "<MaxOutputTokens>-3</MaxOutputTokens>" +
+                    "<ProtectedApiKey></ProtectedApiKey>" +
+                    "</Profile></FilePromptAIModelProfiles>",
+                    Encoding.UTF8);
+                ModelProfile invalidOptions = new ModelProfileStore(
+                    invalidOptionsPath).Load().Single();
+                Assert(
+                    !invalidOptions.Temperature.HasValue &&
+                        !invalidOptions.TopP.HasValue &&
+                        !invalidOptions.MaxOutputTokens.HasValue,
+                    "invalid optional generation settings ignored safely");
 
                 string crossUserPath = Path.Combine(root, "cross-user.xml");
                 File.WriteAllText(

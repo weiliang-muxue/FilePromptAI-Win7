@@ -997,7 +997,7 @@ namespace FilePromptAIWin7
 
         private static Type FindNpoiType(string fullName)
         {
-            LoadAssembliesMatching("NPOI*.dll");
+            LoadNpoiAssemblies();
             foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
                 Type type = assembly.GetType(fullName, false);
@@ -1010,24 +1010,21 @@ namespace FilePromptAIWin7
             return null;
         }
 
-        private static void LoadAssembliesMatching(string pattern)
+        private static void LoadNpoiAssemblies()
         {
-            string directory = AppDomain.CurrentDomain.BaseDirectory;
-            string[] files;
-            try
+            string[] fileNames =
             {
-                files = Directory.GetFiles(directory, pattern);
-            }
-            catch
-            {
-                return;
-            }
+                "NPOI.Core.dll",
+                "NPOI.OOXML.dll",
+                "NPOI.OpenXml4Net.dll",
+                "NPOI.OpenXmlFormats.dll"
+            };
 
-            foreach (string file in files)
+            for (int index = 0; index < fileNames.Length; index++)
             {
                 try
                 {
-                    Assembly.LoadFrom(file);
+                    LoadAssemblyFromApplicationDirectory(fileNames[index]);
                 }
                 catch
                 {
