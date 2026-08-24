@@ -30,6 +30,8 @@ namespace FilePromptAIWin7
         private readonly Button okButton;
         private readonly Label dialogStatus;
         private readonly string readOnlyReason;
+        private ContextMenuStrip skillImportMenu;
+        private ContextMenuStrip mcpImportMenu;
         private CancellationTokenSource testCancellation;
         private int selectedSkillIndex;
         private int selectedServerIndex;
@@ -206,7 +208,7 @@ namespace FilePromptAIWin7
             TableLayoutPanel left = CreateListLayout();
             FlowLayoutPanel listActions = CreateLeftActions();
             Button add = CreateButton("新建", 72);
-            Button paste = CreateButton("从剪贴板安装", 112);
+            Button import = CreateButton("导入", 72);
             Button remove = CreateButton("删除", 72);
             add.Click += delegate
             {
@@ -214,10 +216,24 @@ namespace FilePromptAIWin7
                 working.Skills.Add(new SkillDefinition());
                 ReloadSkills(working.Skills.Count - 1);
             };
-            paste.Click += OnPasteSkill;
+            skillImportMenu = new ContextMenuStrip();
+            ToolStripMenuItem pasteItem =
+                new ToolStripMenuItem("从剪贴板安装");
+            ToolStripMenuItem fileItem =
+                new ToolStripMenuItem("从文件安装...");
+            pasteItem.Click += OnPasteSkill;
+            fileItem.Click += OnImportSkillFile;
+            skillImportMenu.Items.Add(pasteItem);
+            skillImportMenu.Items.Add(fileItem);
+            import.ContextMenuStrip = skillImportMenu;
+            import.AccessibleName = "导入离线技能";
+            import.Click += delegate
+            {
+                skillImportMenu.Show(import, new Point(0, import.Height));
+            };
             remove.Click += OnDeleteSkill;
             listActions.Controls.Add(add);
-            listActions.Controls.Add(paste);
+            listActions.Controls.Add(import);
             listActions.Controls.Add(remove);
             left.Controls.Add(skillList, 0, 0);
             left.Controls.Add(listActions, 0, 1);
@@ -254,7 +270,7 @@ namespace FilePromptAIWin7
             TableLayoutPanel left = CreateListLayout();
             FlowLayoutPanel listActions = CreateLeftActions();
             Button add = CreateButton("新建", 72);
-            Button import = CreateButton("粘贴 JSON", 92);
+            Button import = CreateButton("导入", 72);
             Button remove = CreateButton("删除", 72);
             add.Click += delegate
             {
@@ -262,7 +278,21 @@ namespace FilePromptAIWin7
                 working.McpServers.Add(new McpServerDefinition());
                 ReloadServers(working.McpServers.Count - 1);
             };
-            import.Click += OnImportMcp;
+            mcpImportMenu = new ContextMenuStrip();
+            ToolStripMenuItem pasteItem =
+                new ToolStripMenuItem("粘贴 JSON");
+            ToolStripMenuItem fileItem =
+                new ToolStripMenuItem("导入 JSON 文件...");
+            pasteItem.Click += OnImportMcp;
+            fileItem.Click += OnImportMcpFile;
+            mcpImportMenu.Items.Add(pasteItem);
+            mcpImportMenu.Items.Add(fileItem);
+            import.ContextMenuStrip = mcpImportMenu;
+            import.AccessibleName = "导入 MCP 配置";
+            import.Click += delegate
+            {
+                mcpImportMenu.Show(import, new Point(0, import.Height));
+            };
             remove.Click += OnDeleteServer;
             listActions.Controls.Add(add);
             listActions.Controls.Add(import);
@@ -569,16 +599,60 @@ namespace FilePromptAIWin7
             try
             {
                 string content = Clipboard.GetText(TextDataFormat.UnicodeText);
-                SkillDefinition skill = ExtensionImport.ParseSkill(content);
-                CaptureSkill(selectedSkillIndex);
-                working.Skills.Add(skill);
-                ReloadSkills(working.Skills.Count - 1);
+                AddImportedSkill(ExtensionImport.ParseSkill(content));
                 SetDialogStatus("技能已从剪贴板添加，保存后生效。", false);
             }
             catch (Exception exception)
             {
+                SetDialogStatus("技能导入失败：" + exception.Message, true);
                 ShowError(exception.Message);
             }
+        }
+
+        private void OnImportSkillFile(object sender, EventArgs args)
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = "选择离线技能文件";
+                dialog.Filter =
+                    "技能文件|SKILL.md;*.skill.md;*.md;*.json;*.txt|" +
+                    "所有文件|*.*";
+                dialog.CheckFileExists = true;
+                dialog.Multiselect = false;
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                try
+                {
+                    string content = ExtensionImport.ReadUtf8ImportFile(
+                        dialog.FileName);
+                    AddImportedSkill(ExtensionImport.ParseSkill(content));
+                    SetDialogStatus(
+                        "技能已从文件添加，保存后生效。",
+                        false);
+                }
+                catch (Exception exception)
+                {
+                    SetDialogStatus(
+                        "技能导入失败：" + exception.Message,
+                        true);
+                    ShowError(exception.Message);
+                }
+            }
+        }
+
+        private void AddImportedSkill(SkillDefinition skill)
+        {
+            CaptureSkill(selectedSkillIndex);
+            ExtensionSettings candidate = working.Clone();
+            candidate.Skills.Add(skill == null ? null : skill.Clone());
+            ExtensionStore.Validate(candidate);
+            SkillDefinition validated = candidate.Skills[
+                candidate.Skills.Count - 1];
+            working.Skills.Add(validated);
+            ReloadSkills(working.Skills.Count - 1);
         }
 
         private void OnImportMcp(object sender, EventArgs args)
@@ -586,23 +660,110 @@ namespace FilePromptAIWin7
             try
             {
                 string content = Clipboard.GetText(TextDataFormat.UnicodeText);
-                IList<McpServerDefinition> imported =
-                    ExtensionImport.ParseMcpServers(content);
-                CaptureServer(selectedServerIndex);
-                foreach (McpServerDefinition server in imported)
-                {
-                    working.McpServers.Add(server);
-                }
-
-                ReloadServers(working.McpServers.Count - imported.Count);
+                int importedCount = AddImportedMcpServers(
+                    ExtensionImport.ParseMcpServers(content));
                 SetDialogStatus(
-                    "已导入 " + imported.Count + " 个 MCP 服务，保存后生效。",
+                    "已导入 " + importedCount +
+                        " 个 MCP 服务，保存后生效。",
                     false);
             }
             catch (Exception exception)
             {
+                SetDialogStatus("MCP 导入失败：" + exception.Message, true);
                 ShowError(exception.Message);
             }
+        }
+
+        private void OnImportMcpFile(object sender, EventArgs args)
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = "选择 MCP JSON 配置";
+                dialog.Filter = "JSON 配置|*.json|所有文件|*.*";
+                dialog.CheckFileExists = true;
+                dialog.Multiselect = false;
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                try
+                {
+                    string content = ExtensionImport.ReadUtf8ImportFile(
+                        dialog.FileName);
+                    int importedCount = AddImportedMcpServers(
+                        ExtensionImport.ParseMcpServers(content));
+                    SetDialogStatus(
+                        "已从文件导入 " + importedCount +
+                            " 个 MCP 服务；为安全起见均保持停用。",
+                        false);
+                }
+                catch (Exception exception)
+                {
+                    SetDialogStatus(
+                        "MCP 导入失败：" + exception.Message,
+                        true);
+                    ShowError(exception.Message);
+                }
+            }
+        }
+
+        private int AddImportedMcpServers(
+            IList<McpServerDefinition> imported)
+        {
+            CaptureServer(selectedServerIndex);
+            if (imported == null || imported.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "没有可导入的 MCP 服务。");
+            }
+
+            ExtensionSettings candidate = working.Clone();
+            foreach (McpServerDefinition server in imported)
+            {
+                McpServerDefinition copy = server == null
+                    ? null
+                    : server.Clone();
+                if (copy != null)
+                {
+                    copy.Enabled = false;
+                }
+
+                candidate.McpServers.Add(copy);
+            }
+
+            ExtensionStore.Validate(candidate);
+            int firstImportedIndex = candidate.McpServers.Count -
+                imported.Count;
+            for (int index = firstImportedIndex;
+                index < candidate.McpServers.Count;
+                index++)
+            {
+                working.McpServers.Add(candidate.McpServers[index]);
+            }
+
+            ReloadServers(working.McpServers.Count - imported.Count);
+            return imported.Count;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (skillImportMenu != null)
+                {
+                    skillImportMenu.Dispose();
+                    skillImportMenu = null;
+                }
+
+                if (mcpImportMenu != null)
+                {
+                    mcpImportMenu.Dispose();
+                    mcpImportMenu = null;
+                }
+            }
+
+            base.Dispose(disposing);
         }
 
         private void OnDeleteSkill(object sender, EventArgs args)

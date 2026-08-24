@@ -6,6 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Text;
 using System.Xml;
 using System.Xml.Linq;
@@ -122,13 +123,12 @@ namespace FilePromptAIWin7
             {
                 sessions.Clear();
                 currentSessionId = string.Empty;
-                loadWarning = string.Empty;
-                writeBlockedByRecovery = false;
-                if (!File.Exists(storagePath))
+                if (writeBlockedByRecovery)
                 {
                     return;
                 }
 
+                loadWarning = string.Empty;
                 try
                 {
                     XDocument document = ReadActiveDocument(storagePath);
@@ -156,34 +156,80 @@ namespace FilePromptAIWin7
                         currentSessionId = sessions[0].Id;
                     }
                 }
-                catch (Exception)
+                catch (InvalidDataException exception)
                 {
-                    string preservedPath = PreserveDamagedStore(storagePath);
-                    writeBlockedByRecovery =
-                        string.IsNullOrEmpty(preservedPath);
-                    loadWarning = writeBlockedByRecovery
-                        ? "会话历史文件无法读取且无法安全重命名，原文件保持不变；" +
-                            "本次运行已禁止会话写入。请先手工备份文件并解除占用：" +
-                            storagePath
-                        : "会话历史文件异常，损坏副本已保留：" +
-                            preservedPath;
-                    sessions.Clear();
-                    currentSessionId = string.Empty;
+                    HandleDamagedStore(exception);
+                }
+                catch (XmlException exception)
+                {
+                    HandleDamagedStore(exception);
+                }
+                catch (FileNotFoundException)
+                {
+                }
+                catch (DirectoryNotFoundException)
+                {
+                }
+                catch (IOException exception)
+                {
+                    HandleUnavailableStore(exception);
+                }
+                catch (UnauthorizedAccessException exception)
+                {
+                    HandleUnavailableStore(exception);
+                }
+                catch (SecurityException exception)
+                {
+                    HandleUnavailableStore(exception);
                 }
             }
+        }
+
+        private void HandleDamagedStore(Exception exception)
+        {
+            if (writeBlockedByRecovery)
+            {
+                sessions.Clear();
+                currentSessionId = string.Empty;
+                return;
+            }
+
+            string preservedPath = PreserveDamagedStore(storagePath);
+            if (string.IsNullOrEmpty(preservedPath))
+            {
+                writeBlockedByRecovery = true;
+                loadWarning =
+                    "会话历史文件内容损坏，但无法创建安全备份；" +
+                    "原文件保持不变，本次运行已进入只读保护并禁止会话写入。" +
+                    "请先手工备份并解除占用：" + storagePath +
+                    "（" + exception.Message + "）";
+            }
+            else
+            {
+                loadWarning = "会话历史文件内容损坏，损坏副本已保留：" +
+                    preservedPath + "（" + exception.Message + "）";
+            }
+
+            sessions.Clear();
+            currentSessionId = string.Empty;
+        }
+
+        private void HandleUnavailableStore(Exception exception)
+        {
+            writeBlockedByRecovery = true;
+            loadWarning = "会话历史文件当前无法安全读取，原文件保持不变；" +
+                "本次运行已进入只读保护并禁止会话写入。" +
+                "请检查文件占用或权限：" + storagePath +
+                "（" + exception.Message + "）";
+            sessions.Clear();
+            currentSessionId = string.Empty;
         }
 
         private static XDocument ReadActiveDocument(string path)
         {
             FileInfo file = new FileInfo(path);
-            if (!file.Exists)
-            {
-                throw new FileNotFoundException(
-                    "The conversation store was not found.",
-                    path);
-            }
-
-            if (file.Length == 0 || file.Length > MaximumConversationBytes)
+            long length = file.Length;
+            if (length == 0 || length > MaximumConversationBytes)
             {
                 throw new InvalidDataException(
                     "The conversation store has an invalid size.");

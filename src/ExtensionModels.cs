@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -205,6 +206,98 @@ namespace FilePromptAIWin7
     internal static class ExtensionImport
     {
         private const int MaximumServers = 20;
+        internal const int MaximumImportFileBytes = 2 * 1024 * 1024;
+
+        public static string ReadUtf8ImportFile(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new ArgumentException("必须选择一个导入文件。", "path");
+            }
+
+            if (Directory.Exists(path))
+            {
+                throw new InvalidOperationException(
+                    "导入路径必须指向单个文件，不能是文件夹。");
+            }
+
+            if (!File.Exists(path))
+            {
+                throw new FileNotFoundException("找不到导入文件。", path);
+            }
+
+            byte[] bytes;
+            using (FileStream stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read))
+            {
+                if (stream.Length == 0)
+                {
+                    throw new InvalidDataException("导入文件为空。");
+                }
+
+                if (stream.Length > MaximumImportFileBytes)
+                {
+                    throw new InvalidDataException(
+                        "导入文件超过 2 MiB 大小限制。");
+                }
+
+                using (MemoryStream content = new MemoryStream(
+                    (int)Math.Min(stream.Length, MaximumImportFileBytes)))
+                {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        if (content.Length > MaximumImportFileBytes - read)
+                        {
+                            throw new InvalidDataException(
+                                "导入文件超过 2 MiB 大小限制。");
+                        }
+
+                        content.Write(buffer, 0, read);
+                    }
+
+                    bytes = content.ToArray();
+                }
+            }
+
+            int offset = HasUtf8Bom(bytes) ? 3 : 0;
+            if (bytes.Length == offset)
+            {
+                throw new InvalidDataException("导入文件不包含文本内容。");
+            }
+
+            string text;
+            try
+            {
+                text = new UTF8Encoding(false, true).GetString(
+                    bytes,
+                    offset,
+                    bytes.Length - offset);
+            }
+            catch (DecoderFallbackException exception)
+            {
+                throw new InvalidDataException(
+                    "导入文件不是有效的 UTF-8 文本。",
+                    exception);
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                throw new InvalidDataException("导入文件不包含文本内容。");
+            }
+
+            return text;
+        }
+
+        private static bool HasUtf8Bom(byte[] bytes)
+        {
+            return bytes != null && bytes.Length >= 3 &&
+                bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+        }
 
         public static IList<McpServerDefinition> ParseMcpServers(
             string configuration)
@@ -278,7 +371,7 @@ namespace FilePromptAIWin7
                     value,
                     "requireConfirmation",
                     true);
-                // Clipboard configuration never grants execution authority.
+                // Imported configuration never grants execution authority.
                 server.Enabled = false;
 
                 bool hasCommand = !string.IsNullOrWhiteSpace(server.Command);

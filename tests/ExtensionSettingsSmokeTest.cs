@@ -32,6 +32,8 @@ namespace FilePromptAIWin7
                 Directory.CreateDirectory(root);
                 TestSkillParsing();
                 TestMcpImport();
+                TestUtf8FileImport(root);
+                TestUtf8FileImportRejections(root);
                 TestMcpValidation();
                 TestEncryptedRoundTrip(root);
                 TestUtf8SizeBoundary(root);
@@ -130,6 +132,138 @@ namespace FilePromptAIWin7
             Assert(
                 servers.All(server => !server.Enabled),
                 "MCP import cannot auto-enable servers");
+        }
+
+        private static void TestUtf8FileImport(string root)
+        {
+            string markdownPath = Path.Combine(root, "SKILL.md");
+            File.WriteAllText(
+                markdownPath,
+                "---\r\n" +
+                "name: file-review\r\n" +
+                "description: \"从离线文件导入\"\r\n" +
+                "---\r\n" +
+                "# 审阅流程\r\n先列风险，再列依据。",
+                new UTF8Encoding(true));
+            string markdownText = ExtensionImport.ReadUtf8ImportFile(
+                markdownPath);
+            SkillDefinition markdown = ExtensionImport.ParseSkill(
+                markdownText);
+            Assert(
+                markdownText.Length > 0 && markdownText[0] != '\uFEFF' &&
+                markdown.Name == "file-review" &&
+                markdown.Description == "从离线文件导入" &&
+                markdown.Instructions.IndexOf(
+                    "先列风险",
+                    StringComparison.Ordinal) >= 0,
+                "strict UTF-8 SKILL.md file import");
+
+            string skillJsonPath = Path.Combine(root, "skill.json");
+            File.WriteAllText(
+                skillJsonPath,
+                "{\"name\":\"离线合同审阅\",\"description\":\"文件 JSON\"," +
+                "\"instructions\":\"逐条列出风险\",\"enabled\":false}",
+                new UTF8Encoding(false));
+            SkillDefinition jsonSkill = ExtensionImport.ParseSkill(
+                ExtensionImport.ReadUtf8ImportFile(skillJsonPath));
+            Assert(
+                jsonSkill.Name == "离线合同审阅" &&
+                jsonSkill.Description == "文件 JSON" &&
+                jsonSkill.Instructions == "逐条列出风险" &&
+                !jsonSkill.Enabled,
+                "strict UTF-8 skill JSON file import");
+
+            string mcpJsonPath = Path.Combine(root, "mcp.json");
+            File.WriteAllText(
+                mcpJsonPath,
+                "{\"mcpServers\":{" +
+                "\"local-file\":{\"command\":\"tool.exe\",\"enabled\":true}," +
+                "\"http-file\":{\"url\":\"http://127.0.0.1:19002/mcp\"," +
+                "\"enabled\":true}}}",
+                new UTF8Encoding(false));
+            IList<McpServerDefinition> fileServers =
+                ExtensionImport.ParseMcpServers(
+                    ExtensionImport.ReadUtf8ImportFile(mcpJsonPath));
+            Assert(
+                fileServers.Count == 2 &&
+                fileServers[0].Transport == "stdio" &&
+                fileServers[1].Transport == "http" &&
+                fileServers.All(server => !server.Enabled),
+                "MCP JSON file import remains disabled");
+        }
+
+        private static void TestUtf8FileImportRejections(string root)
+        {
+            Exception directoryFailure = CaptureFailure(delegate
+            {
+                ExtensionImport.ReadUtf8ImportFile(root);
+            });
+            Assert(
+                directoryFailure is InvalidOperationException,
+                "import directory rejected");
+
+            string emptyPath = Path.Combine(root, "empty-import.txt");
+            File.WriteAllBytes(emptyPath, new byte[0]);
+            Exception emptyFailure = CaptureFailure(delegate
+            {
+                ExtensionImport.ReadUtf8ImportFile(emptyPath);
+            });
+            Assert(
+                emptyFailure is InvalidDataException,
+                "empty import file rejected");
+
+            string bomOnlyPath = Path.Combine(root, "bom-only-import.txt");
+            File.WriteAllBytes(
+                bomOnlyPath,
+                new byte[] { 0xEF, 0xBB, 0xBF });
+            Exception bomOnlyFailure = CaptureFailure(delegate
+            {
+                ExtensionImport.ReadUtf8ImportFile(bomOnlyPath);
+            });
+            Assert(
+                bomOnlyFailure is InvalidDataException,
+                "BOM-only import file rejected");
+
+            string invalidPath = Path.Combine(root, "invalid-utf8.txt");
+            File.WriteAllBytes(
+                invalidPath,
+                new byte[] { 0xE4, 0xB8, 0xAD, 0xC3, 0x28 });
+            Exception invalidFailure = CaptureFailure(delegate
+            {
+                ExtensionImport.ReadUtf8ImportFile(invalidPath);
+            });
+            Assert(
+                invalidFailure is InvalidDataException &&
+                invalidFailure.InnerException is DecoderFallbackException,
+                "invalid UTF-8 import file rejected");
+
+            string boundaryPath = Path.Combine(root, "maximum-import.txt");
+            File.WriteAllBytes(
+                boundaryPath,
+                Enumerable.Repeat(
+                    (byte)'a',
+                    ExtensionImport.MaximumImportFileBytes).ToArray());
+            Assert(
+                ExtensionImport.ReadUtf8ImportFile(boundaryPath).Length ==
+                    ExtensionImport.MaximumImportFileBytes,
+                "2 MiB import file accepted");
+
+            string oversizedPath = Path.Combine(root, "oversized-import.txt");
+            File.WriteAllBytes(
+                oversizedPath,
+                Enumerable.Repeat(
+                    (byte)'a',
+                    ExtensionImport.MaximumImportFileBytes + 1).ToArray());
+            Exception oversizedFailure = CaptureFailure(delegate
+            {
+                ExtensionImport.ReadUtf8ImportFile(oversizedPath);
+            });
+            Assert(
+                oversizedFailure is InvalidDataException &&
+                oversizedFailure.Message.IndexOf(
+                    "2 MiB",
+                    StringComparison.Ordinal) >= 0,
+                "import file above 2 MiB rejected");
         }
 
         private static void TestEncryptedRoundTrip(string root)

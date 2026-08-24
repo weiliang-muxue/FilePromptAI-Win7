@@ -2254,12 +2254,30 @@ internal static class UiStateSmokeTest
             AssertTrue(
                 split != null && split.SplitterDistance >= 250,
                 "Extensions navigation width is stable");
+            Button skillImport = FindControlByAccessibleName<Button>(
+                dialog,
+                "导入离线技能");
+            Button mcpImport = FindControlByAccessibleName<Button>(
+                dialog,
+                "导入 MCP 配置");
             AssertTrue(
-                FindControl<Button>(dialog, "从剪贴板安装") != null,
-                "Skill clipboard install exists");
+                skillImport != null &&
+                    ContainsMenuText(
+                        skillImport.ContextMenuStrip,
+                        "从剪贴板安装") &&
+                    ContainsMenuText(
+                        skillImport.ContextMenuStrip,
+                        "从文件安装..."),
+                "Skill import menu exposes clipboard and local file");
             AssertTrue(
-                FindControl<Button>(dialog, "粘贴 JSON") != null,
-                "MCP JSON import exists");
+                mcpImport != null &&
+                    ContainsMenuText(
+                        mcpImport.ContextMenuStrip,
+                        "粘贴 JSON") &&
+                    ContainsMenuText(
+                        mcpImport.ContextMenuStrip,
+                        "导入 JSON 文件..."),
+                "MCP import menu exposes clipboard and local JSON file");
             AssertTrue(
                 FindControl<Button>(dialog, "测试所选") != null,
                 "MCP connection test exists");
@@ -2270,8 +2288,69 @@ internal static class UiStateSmokeTest
                 confirmation != null && confirmation.Checked,
                 "MCP confirmation defaults on in UI");
             AssertTrue(
-                FindControl<Button>(dialog, "选择技能文件") == null,
-                "Skill install does not scan local files");
+                FindControl<Button>(dialog, "选择技能文件") == null &&
+                    FindControl<Button>(dialog, "选择技能目录") == null,
+                "Skill import does not expose directory scanning");
+
+            Type skillType = application.GetType(
+                "FilePromptAIWin7.SkillDefinition",
+                true);
+            Type serverType = application.GetType(
+                "FilePromptAIWin7.McpServerDefinition",
+                true);
+            object working = GetField(dialogType, dialog, "working");
+            IList workingSkills = (IList)GetProperty(working, "Skills");
+            IList workingServers = (IList)GetProperty(
+                working,
+                "McpServers");
+            while (workingSkills.Count < 50)
+            {
+                workingSkills.Add(Activator.CreateInstance(skillType, true));
+            }
+
+            object overflowSkill = Activator.CreateInstance(skillType, true);
+            Exception skillOverflow = CaptureInvocationFailure(delegate
+            {
+                InvokePrivate(
+                    dialogType,
+                    dialog,
+                    "AddImportedSkill",
+                    overflowSkill);
+            });
+            AssertTrue(
+                skillOverflow is InvalidOperationException &&
+                    workingSkills.Count == 50,
+                "Skill import validates capacity without partial mutation");
+
+            while (workingServers.Count < 19)
+            {
+                object server = Activator.CreateInstance(serverType, true);
+                SetProperty(server, "Command", "tool.exe");
+                workingServers.Add(server);
+            }
+
+            Type serverListType = typeof(List<>).MakeGenericType(serverType);
+            IList importedServers = (IList)Activator.CreateInstance(
+                serverListType);
+            for (int index = 0; index < 2; index++)
+            {
+                object server = Activator.CreateInstance(serverType, true);
+                SetProperty(server, "Command", "tool.exe");
+                importedServers.Add(server);
+            }
+
+            Exception serverOverflow = CaptureInvocationFailure(delegate
+            {
+                InvokePrivate(
+                    dialogType,
+                    dialog,
+                    "AddImportedMcpServers",
+                    importedServers);
+            });
+            AssertTrue(
+                serverOverflow is InvalidOperationException &&
+                    workingServers.Count == 19,
+                "MCP import validates capacity without partial mutation");
         }
         finally
         {
@@ -2289,9 +2368,12 @@ internal static class UiStateSmokeTest
             readOnlyDialog.PerformLayout();
             Button save = FindControl<Button>(readOnlyDialog, "保存");
             Button cancel = FindControl<Button>(readOnlyDialog, "取消");
-            Button paste = FindControl<Button>(
+            Button skillImport = FindControlByAccessibleName<Button>(
                 readOnlyDialog,
-                "从剪贴板安装");
+                "导入离线技能");
+            Button mcpImport = FindControlByAccessibleName<Button>(
+                readOnlyDialog,
+                "导入 MCP 配置");
             TextBox skillName = FindControl<TextBox>(readOnlyDialog, null);
             Label warning = FindControl<Label>(
                 readOnlyDialog,
@@ -2299,7 +2381,8 @@ internal static class UiStateSmokeTest
             AssertTrue(
                 save != null && !save.Enabled &&
                 cancel != null && cancel.Enabled &&
-                paste != null && !paste.Enabled &&
+                skillImport != null && !skillImport.Enabled &&
+                mcpImport != null && !mcpImport.Enabled &&
                 skillName != null && !skillName.Enabled,
                 "Read-only extensions UI disables every modification entry");
             AssertTrue(
@@ -3993,6 +4076,33 @@ internal static class UiStateSmokeTest
         return null;
     }
 
+    private static T FindControlByAccessibleName<T>(
+        Control root,
+        string accessibleName) where T : Control
+    {
+        foreach (Control child in root.Controls)
+        {
+            T match = child as T;
+            if (match != null && string.Equals(
+                match.AccessibleName,
+                accessibleName,
+                StringComparison.Ordinal))
+            {
+                return match;
+            }
+
+            T nested = FindControlByAccessibleName<T>(
+                child,
+                accessibleName);
+            if (nested != null)
+            {
+                return nested;
+            }
+        }
+
+        return null;
+    }
+
     private static int CountVisibleControls(Control[] controls)
     {
         int count = 0;
@@ -5208,6 +5318,19 @@ internal static class UiStateSmokeTest
             BindingFlags.Instance | BindingFlags.NonPublic |
                 BindingFlags.DeclaredOnly)
             .Invoke(instance, arguments);
+    }
+
+    private static Exception CaptureInvocationFailure(Action action)
+    {
+        try
+        {
+            action();
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return Unwrap(exception);
+        }
     }
 
     private static void RaiseKeyDown(Control control, KeyEventArgs arguments)

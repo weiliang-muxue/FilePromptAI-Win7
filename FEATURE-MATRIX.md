@@ -47,7 +47,7 @@
 
 | 常见能力 | v1.17 状态 | 当前实现与证据 | 明确边界 |
 | --- | --- | --- | --- |
-| 本地持久会话 | 已实现 | `src/ConversationStore.cs` 的原子 XML 存储、完整问答提交和损坏文件保留；会话存储、备份及 UI smoke tests。 | 数据固定在当前用户的 `%LocalAppData%\FilePromptAI-Win7`。 |
+| 本地持久会话 | 已实现 | `src/ConversationStore.cs` 的原子 XML 存储、完整问答提交、损坏文件保留和临时占用只读保护；会话存储、备份及 UI smoke tests。 | 数据固定在当前用户的 `%LocalAppData%\FilePromptAI-Win7`；暂时被占用或无权限的有效文件不会被移动或覆盖。 |
 | 会话新建、重命名、删除和搜索 | 已实现 | `ConversationStore.CreateSession`、`RenameSession`、`DeleteSession`；`src/MainForm.cs` 搜索标题和近期内容。 | 搜索是本地文本匹配，不是向量或语义检索。 |
 | 置顶、归档与分支 | 已实现 | `ConversationStore.SetSessionPinned`、`SetSessionArchivedAndResolveCurrent`；`src/MainForm.cs` 的 `OnBranchSessionClick`。 | 分支复制已有上下文，不建立跨会话实时联动。 |
 | 草稿保留 | 已实现 | `src/MainForm.cs` 在当前运行期按会话保存未发送草稿，并实施跨会话二进制草稿预算。 | 关闭应用后的草稿不作为云草稿同步。 |
@@ -60,10 +60,10 @@
 
 | 常见能力 | v1.17 状态 | 当前实现与证据 | 明确边界 |
 | --- | --- | --- | --- |
-| 可启停的本地技能指令 | 已实现 | `src/ExtensionModels.cs` 的 `BuildSystemPrompt`、`src/ExtensionStore.cs` 和 `src/ExtensionsDialog.cs`；支持手工编辑及从剪贴板导入文本、`SKILL.md` 或 JSON。 | 技能只是发送给模型的本地指令；程序不执行技能中的脚本或命令。 |
-| 用户自备 MCP 服务 | 已实现 | `src/ExtensionsDialog.cs` 可手工配置或粘贴 `mcpServers` JSON、测试连接；导入项默认停用，工具调用默认逐次确认。 | MCP 服务权限来自服务自身及当前 Windows 用户；只应启用管理员审查过的服务。 |
+| 可启停的本地技能指令 | 已实现 | `src/ExtensionModels.cs` 的 `BuildSystemPrompt`、`src/ExtensionStore.cs` 和 `src/ExtensionsDialog.cs`；支持手工编辑、从剪贴板导入，或由用户显式选择单个不超过 2 MiB 的本地 UTF-8 `SKILL.md`、JSON 或文本文件。 | 技能只是发送给模型的本地指令；导入不扫描目录、不执行脚本或命令，也不会联网。 |
+| 用户自备 MCP 服务 | 已实现 | `src/ExtensionsDialog.cs` 可手工配置、粘贴 `mcpServers` JSON，或由用户显式选择单个不超过 2 MiB 的本地 UTF-8 JSON 文件，然后测试连接；导入项默认停用，工具调用默认逐次确认。 | 导入不扫描目录、不执行脚本或联网；MCP 服务权限来自服务自身及当前 Windows 用户，只应启用管理员审查过的服务。 |
 | 插件/技能市场与在线安装 | 有意排除 | 扩展页没有商店或下载器；`README.md` 明确其完全在本机工作且不访问扩展商店。 | 不浏览市场、不下载插件、不自动更新技能或 MCP 服务。 |
-| 自动扫描技能目录或执行技能脚本 | 有意排除 | 技能仅手工新建或从剪贴板安装；`ExtensionStore` 只保存结构化本地配置。 | 不发现外部技能目录，不运行其中脚本，不因技能内容发起网络请求。 |
+| 自动扫描技能目录或执行技能脚本 | 有意排除 | 技能仅手工新建、从剪贴板安装，或读取用户显式选择的单个本地文件；`ExtensionStore` 只保存结构化本地配置。 | 不发现或扫描外部目录，不运行其中脚本，不因技能内容或导入操作发起网络请求。 |
 | 通用进程内插件 API | 有意排除 | 没有加载任意第三方 DLL 的插件接口；MCP 是独立、显式配置的协议边界。 | 第三方能力应通过用户审查并启用的 MCP 服务提供，而不是注入客户端进程。 |
 
 ## 隐私、网络与发布
@@ -86,10 +86,11 @@
 1. 普通 system prompt、`temperature`、`top_p` 和最大输出 token 已从设置、模型配置接到请求载荷并通过专项回归；仍须随最终候选重建离线包及执行发布验证。
 2. API Key 可留空，匿名模型列表和聊天请求不发送 `Authorization`，同时保存和切换无 Key 模型配置。
 3. 模型、模型列表及 HTTP MCP 不使用 Windows 系统代理，并以拒绝型代理回归证明直连行为。
-4. 附件提取依赖按批准的 NPOI 文件名加载，避免通配加载应用目录中的同名前缀 DLL；见 `FileContentExtractor.LoadNpoiAssemblies`。
-5. 离线包加入独立 `Verify-FilePromptAI.exe`，锁定并校验已验证载荷后再启动或反射加载真实客户端，输出 schema 2 XML 报告及 SHA-256 sidecar；只有 PASS 报告记录有效包清单身份。
-6. 完整测试 receipt、真实 Win7 PASS 报告、固定发布摘要、annotated 标签及标签后复核流程以同一包清单身份串联，明确区分便利 sidecar、包内清单与 Git 标签中的外部身份锚点。
-7. 卸载及包验证继续按精确文件集合工作，保护发布目录中的额外文件和默认保留的用户数据。
+4. 离线技能和 MCP 支持从用户显式选择的单个本地 UTF-8 文件导入；技能接受 `SKILL.md`、JSON 或文本，MCP 接受 JSON，文件上限均为 2 MiB；导入不扫描目录、不执行脚本、不联网，MCP 导入项默认停用。
+5. 附件提取依赖按批准的 NPOI 文件名加载，避免通配加载应用目录中的同名前缀 DLL；见 `FileContentExtractor.LoadNpoiAssemblies`。
+6. 离线包加入独立 `Verify-FilePromptAI.exe`，锁定并校验已验证载荷后再启动或反射加载真实客户端，输出 schema 2 XML 报告及 SHA-256 sidecar；只有 PASS 报告记录有效包清单身份。
+7. 完整测试 receipt、真实 Win7 PASS 报告、固定发布摘要、annotated 标签及标签后复核流程以同一包清单身份串联，明确区分便利 sidecar、包内清单与 Git 标签中的外部身份锚点。
+8. 卸载及包验证继续按精确文件集合工作，保护发布目录中的额外文件和默认保留的用户数据。
 
 ## 显示支持口径
 

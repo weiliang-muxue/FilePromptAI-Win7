@@ -74,6 +74,7 @@ internal static class ConversationStoreSmokeTest
             TestMessageSuffixReplacement(path, reloaded);
             TestSessionLifecycle(path, reloaded);
             TestCreateRollback(path);
+            TestExclusiveLockWriteProtection(path);
             TestUnpreservedDamageBlocksWrites(path);
 
             File.WriteAllText(path, "<broken", new System.Text.UTF8Encoding(true));
@@ -1039,6 +1040,176 @@ internal static class ConversationStoreSmokeTest
         }
     }
 
+    private static void TestExclusiveLockWriteProtection(string path)
+    {
+        string lockedPath = path + ".locked-valid.xml";
+        string directory = Path.GetDirectoryName(lockedPath);
+        string damagedPattern =
+            Path.GetFileName(lockedPath) + ".damaged-*.bak";
+        try
+        {
+            if (File.Exists(lockedPath))
+            {
+                File.Delete(lockedPath);
+            }
+
+            foreach (string damagedPath in Directory.GetFiles(
+                directory,
+                damagedPattern))
+            {
+                File.Delete(damagedPath);
+            }
+
+            ConversationStore originalStore =
+                new ConversationStore(lockedPath);
+            ConversationSession originalSession =
+                originalStore.CreateSession("locked valid conversation");
+            if (!originalStore.AddMessage(
+                originalSession.Id,
+                "user",
+                "message before exclusive lock"))
+            {
+                throw new InvalidOperationException(
+                    "The exclusive-lock fixture was not created.");
+            }
+
+            XDocument.Load(lockedPath);
+            byte[] originalBytes = File.ReadAllBytes(lockedPath);
+            ConversationStore protectedStore;
+            using (FileStream locked = new FileStream(
+                lockedPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.None))
+            {
+                protectedStore = new ConversationStore(lockedPath);
+                if (!protectedStore.IsWriteBlocked ||
+                    protectedStore.Sessions.Count != 0 ||
+                    !string.IsNullOrEmpty(
+                        protectedStore.CurrentSessionId) ||
+                    protectedStore.LoadWarning.IndexOf(
+                        "当前无法安全读取",
+                        StringComparison.Ordinal) < 0 ||
+                    protectedStore.LoadWarning.IndexOf(
+                        "原文件保持不变",
+                        StringComparison.Ordinal) < 0 ||
+                    protectedStore.LoadWarning.IndexOf(
+                        "禁止会话写入",
+                        StringComparison.Ordinal) < 0 ||
+                    protectedStore.LoadWarning.IndexOf(
+                        "文件占用或权限",
+                        StringComparison.Ordinal) < 0)
+                {
+                    throw new InvalidDataException(
+                        "An exclusively locked valid store was not reported " +
+                        "as unavailable and write-protected.");
+                }
+
+                AssertStreamBytesEqual(
+                    locked,
+                    originalBytes,
+                    "Loading an exclusively locked store changed its bytes.");
+                if (Directory.GetFiles(directory, damagedPattern).Length != 0)
+                {
+                    throw new InvalidDataException(
+                        "An exclusively locked valid store created a damaged backup.");
+                }
+            }
+
+            ExpectWriteBlocked(
+                delegate { protectedStore.Save(); },
+                "save after valid store lock release");
+            ExpectWriteBlocked(
+                delegate
+                {
+                    protectedStore.CreateSession(
+                        "must remain blocked after lock release");
+                },
+                "session creation after valid store lock release");
+
+            string stickyWarning = protectedStore.LoadWarning;
+            protectedStore.Load();
+            if (!protectedStore.IsWriteBlocked ||
+                protectedStore.LoadWarning != stickyWarning)
+            {
+                throw new InvalidDataException(
+                    "Reloading a protected store cleared its recovery state.");
+            }
+
+            if (protectedStore.Sessions.Count != 0 ||
+                !string.IsNullOrEmpty(protectedStore.CurrentSessionId))
+            {
+                throw new InvalidDataException(
+                    "A write rejected after lock release changed memory state.");
+            }
+
+            AssertFileBytesEqual(
+                lockedPath,
+                originalBytes,
+                "Sticky write protection changed the unlocked valid store.");
+            if (Directory.GetFiles(directory, damagedPattern).Length != 0)
+            {
+                throw new InvalidDataException(
+                    "A released valid store lock left a damaged backup.");
+            }
+
+            ConversationStore recoveredStore =
+                new ConversationStore(lockedPath);
+            ConversationSession recoveredSession =
+                recoveredStore.GetSession(originalSession.Id);
+            if (recoveredStore.IsWriteBlocked ||
+                !string.IsNullOrEmpty(recoveredStore.LoadWarning) ||
+                recoveredStore.Sessions.Count != 1 ||
+                recoveredStore.CurrentSessionId != originalSession.Id ||
+                recoveredSession == null ||
+                recoveredSession.Messages.Count != 1 ||
+                recoveredSession.Messages[0].Content !=
+                    "message before exclusive lock")
+            {
+                throw new InvalidDataException(
+                    "A new store did not load after the exclusive lock ended.");
+            }
+
+            if (!recoveredStore.AddMessage(
+                recoveredSession.Id,
+                "assistant",
+                "message saved after lock release"))
+            {
+                throw new InvalidOperationException(
+                    "A new store could not save after the lock ended.");
+            }
+
+            recoveredStore.Save();
+            ConversationStore reloadedStore =
+                new ConversationStore(lockedPath);
+            ConversationSession reloadedSession =
+                reloadedStore.GetSession(originalSession.Id);
+            if (reloadedStore.IsWriteBlocked ||
+                reloadedSession == null ||
+                reloadedSession.Messages.Count != 2 ||
+                reloadedSession.Messages[1].Content !=
+                    "message saved after lock release")
+            {
+                throw new InvalidDataException(
+                    "A new store save did not survive reload.");
+            }
+        }
+        finally
+        {
+            if (File.Exists(lockedPath))
+            {
+                File.Delete(lockedPath);
+            }
+
+            foreach (string damagedPath in Directory.GetFiles(
+                directory,
+                damagedPattern))
+            {
+                File.Delete(damagedPath);
+            }
+        }
+    }
+
     private static void ExpectWriteBlocked(Action action, string operation)
     {
         try
@@ -1077,6 +1248,26 @@ internal static class ConversationStoreSmokeTest
         for (int index = 0; index < actual.Length; index++)
         {
             if (actual[index] != expected[index])
+            {
+                throw new InvalidDataException(message);
+            }
+        }
+    }
+
+    private static void AssertStreamBytesEqual(
+        FileStream stream,
+        byte[] expected,
+        string message)
+    {
+        if (stream.Length != expected.Length)
+        {
+            throw new InvalidDataException(message);
+        }
+
+        stream.Position = 0;
+        for (int index = 0; index < expected.Length; index++)
+        {
+            if (stream.ReadByte() != expected[index])
             {
                 throw new InvalidDataException(message);
             }
