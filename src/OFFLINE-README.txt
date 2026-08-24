@@ -13,7 +13,7 @@ FilePrompt AI for Windows 7 离线完整版
 使用方法
 --------
 
-1. 在解压或运行任何文件前，从可信的 v1.17 Git 标签取得仓库根目录中的
+1. 在解压或运行任何文件前，从可信的 v1.17 Git 标签取得 src 目录中的
    RELEASE-SHA256.txt，并用 certutil -hashfile FilePromptAI-Win7-Full-v1.17.zip
    SHA256 核对整个 ZIP。两个摘要必须完全相同。
 2. ZIP 旁的 .zip.sha256.txt 只是便利副本；若二者来自同一下载位置，它不能独立
