@@ -1,6 +1,9 @@
 param(
     [string]$Version = '1.17',
-    [string]$ProjectRoot = ''
+    [string]$ProjectRoot = '',
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$AcceptanceReportPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,6 +26,11 @@ $sidecarPath = "$archivePath.sha256.txt"
 $receiptPath = Join-Path $ProjectRoot (
     "tests\build-artifacts\release\ReleaseCandidate-v$Version.txt")
 $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+$releaseEvidenceScript = Join-Path $testRoot 'ReleaseAcceptanceEvidence.ps1'
+if (-not (Test-Path -LiteralPath $releaseEvidenceScript -PathType Leaf)) {
+    throw "The release evidence helper is missing: $releaseEvidenceScript"
+}
+. $releaseEvidenceScript
 
 function Read-ReleaseReceipt {
     param([string]$Path)
@@ -39,13 +47,16 @@ function Read-ReleaseReceipt {
     }
     $text = $strictUtf8.GetString($bytes)
     $pattern = '\A' +
-        'FilePromptAI-Release-Receipt: 1\r\n' +
+        'FilePromptAI-Release-Receipt: 2\r\n' +
         'Suite: tests/RunAllSmokeTests\.ps1\r\n' +
         'Result: PASS\r\n' +
         'Version: (?<Version>[0-9A-Za-z](?:[0-9A-Za-z._-]{0,30}[0-9A-Za-z])?)\r\n' +
         'Candidate-Commit: (?<Candidate>[0-9a-f]{40}(?:[0-9a-f]{24})?)\r\n' +
         'Archive-Name: (?<Archive>[0-9A-Za-z._-]+)\r\n' +
-        'Archive-SHA256: (?<Hash>[0-9A-F]{64})\r\n\z'
+        'Archive-SHA256: (?<Hash>[0-9A-F]{64})\r\n' +
+        'Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256\.txt\r\n' +
+        'Package-Manifest-SHA256: (?<ManifestHash>[0-9A-F]{64})\r\n' +
+        'Package-Manifest-Entry-Count: (?<ManifestEntryCount>[1-9][0-9]{0,8})\r\n\z'
     $match = [Text.RegularExpressions.Regex]::Match(
         $text,
         $pattern,
@@ -53,11 +64,21 @@ function Read-ReleaseReceipt {
     if (-not $match.Success) {
         throw 'The release-candidate receipt has an invalid or non-canonical format.'
     }
+    $manifestEntryCount = 0
+    if (-not [int]::TryParse(
+        $match.Groups['ManifestEntryCount'].Value,
+        [Globalization.NumberStyles]::None,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [ref]$manifestEntryCount)) {
+        throw 'The release-candidate receipt has an invalid package manifest entry count.'
+    }
     return [pscustomobject]@{
         Version = $match.Groups['Version'].Value
         Candidate = $match.Groups['Candidate'].Value
         Archive = $match.Groups['Archive'].Value
         Hash = $match.Groups['Hash'].Value
+        ManifestHash = $match.Groups['ManifestHash'].Value
+        ManifestEntryCount = $manifestEntryCount
     }
 }
 
@@ -74,6 +95,16 @@ $receipt = Read-ReleaseReceipt -Path $receiptPath
 if (-not [string]::Equals($receipt.Version, $Version, [StringComparison]::Ordinal) -or
     -not [string]::Equals($receipt.Archive, $archiveName, [StringComparison]::Ordinal)) {
     throw 'The release-candidate receipt is for a different release version or archive.'
+}
+$acceptance = Read-FilePromptAcceptanceEvidence `
+    -Path $AcceptanceReportPath `
+    -Version $Version
+if (-not [string]::Equals(
+        $acceptance.ManifestSha256,
+        $receipt.ManifestHash,
+        [StringComparison]::Ordinal) -or
+    $acceptance.ManifestEntryCount -ne $receipt.ManifestEntryCount) {
+    throw 'The Windows 7 acceptance report package identity does not match the successfully tested release receipt.'
 }
 
 $tagType = (& git -C $ProjectRoot cat-file -t "refs/tags/$tagName" 2>&1 | Out-String).Trim()
@@ -133,12 +164,21 @@ foreach ($required in @($archivePath, $sidecarPath)) {
         throw "Required release artifact is missing: $required"
     }
 }
-$archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+$archiveIdentity = Read-FilePromptReleaseArchiveIdentity `
+    -ArchivePath $archivePath
+$archiveHash = $archiveIdentity.ArchiveSha256
 if (-not [string]::Equals(
     $archiveHash,
     $receipt.Hash,
     [StringComparison]::Ordinal)) {
     throw 'The local release ZIP no longer matches the successfully tested candidate receipt.'
+}
+if (-not [string]::Equals(
+        $archiveIdentity.ManifestSha256,
+        $receipt.ManifestHash,
+        [StringComparison]::Ordinal) -or
+    $archiveIdentity.ManifestEntryCount -ne $receipt.ManifestEntryCount) {
+    throw 'The final release ZIP package manifest identity does not match the successful receipt.'
 }
 
 & powershell.exe `
@@ -152,4 +192,4 @@ if ($LASTEXITCODE -ne 0) {
     throw 'The tagged release digest does not verify the local release ZIP.'
 }
 
-Write-Host "PASS | annotated release tag | tag=$tagName | commit=$tagCommit | candidate=$candidateCommit | sha256=$archiveHash"
+Write-Host "PASS | annotated release tag | tag=$tagName | commit=$tagCommit | candidate=$candidateCommit | sha256=$archiveHash | manifestSha256=$($receipt.ManifestHash) | acceptanceSha256=$($acceptance.ReportSha256)"

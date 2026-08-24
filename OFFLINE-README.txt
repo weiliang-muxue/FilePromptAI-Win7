@@ -66,6 +66,9 @@ FilePrompt AI for Windows 7 离线完整版
   上下文摘要被截断时可悬停查看完整内容。
 - 文件可直接拖入；“+ 添加”菜单可选择文件、粘贴内容或打开路径窗口，路径只有
   在用户点击“添加”后才读取，不会后台扫描目录。
+- 可本地提取 PPTX 的自然页序、标题、正文、表格和备注，也可提取使用新版
+  content.json 或旧版 content.xml 的 XMind 多画布、主题层级和备注；无需安装
+  PowerPoint 或 XMind。
 - 当前运行期跨会话草稿合计最多保留 20 MB 二进制附件，超限时会要求先发送或移除。
 - 连接自检、流式输出、Markdown 排版、资料预览和长会话上下文控制。
 - 可在左侧“设置”→“模型连接”→“模型配置...”保存多个内网模型预设；
@@ -74,7 +77,7 @@ FilePrompt AI for Windows 7 离线完整版
   留空时不会发送 Authorization 请求头。
 - 文本资料正文会进入会话历史；图片和无文本内联文件只在当前轮发送，后续轮次
   需要再次主动添加，不会根据路径自动重读。
-- 最新回复或整个会话可导出 Word、PDF、PowerPoint 和 XMind，Markdown 表格可
+- 最新回复或整个会话可导出 Markdown、文本、Word、PDF、PowerPoint 和 XMind，Markdown 表格可
   导出 Excel/CSV；全部在本机生成，不依赖 Microsoft Office 或 XMind。
 - “快捷指令”可填入总结、提炼、翻译、PPT 大纲、XMind 结构和 Markdown 表格模板；
   对话记录菜单可载入上一条用户指令编辑重发，模板不会自动发送。
@@ -142,10 +145,15 @@ Verify-FilePromptAI.exe 自身未被替换。
 Chat Completions，并调用真实程序检查 TXT、PDF、DOCX、PNG 解析以及 DOCX、PDF、
 PPTX、XLSX、CSV、XMind 导出。整个过程不连接外部模型服务。
 
-XML 报告和同名 .sha256.txt 默认写到 %TEMP%；如果该目录位于发布包内，则写到
-%LocalAppData%\FilePromptAI-Acceptance\AcceptanceReports，绝不会向发布目录添加
-报告。只有 Windows 7 SP1、.NET Framework 4.8、1920×1080@96 DPI 和全部检查
-同时通过时，程序才输出总 PASS 并返回退出码 0。退出码按位表示失败：1=系统、
+XML schema 2 报告和同名 .sha256.txt 默认写到 %TEMP%；如果该目录位于发布包内，
+则写到 %LocalAppData%\FilePromptAI-Acceptance\AcceptanceReports，绝不会向发布目录
+添加报告。只有总 PASS 报告才会记录已锁定验证的 PACKAGE-CHECKSUMS-SHA256.txt
+原始字节 SHA-256 和条目数；失败报告只标记 unverified，不能用于正式发布封存。
+发布维护者必须同时保留 XML 和 sidecar，封存及标签复核会把该身份与最终测试 receipt
+及 ZIP 内同一清单进行严格比对。
+
+只有 Windows 7 SP1、.NET Framework 4.8、1920×1080@96 DPI 和全部检查同时通过时，
+程序才输出总 PASS 并返回退出码 0。退出码按位表示失败：1=系统、
 2=.NET、4=显示、8=包清单、16=启动、32=API、64=文件、128=验收程序内部错误。
 在 Windows 8/10/11 上运行会明确失败 os.win7-sp1，这是预期行为，不能作为
 Windows 7 通过报告。

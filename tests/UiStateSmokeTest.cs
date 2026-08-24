@@ -99,6 +99,8 @@ internal static class UiStateSmokeTest
             TestDragBusyGuard(formType, form, dataRoot);
             TestPathInput(formType, form, dataRoot);
             ThrowIfUiThreadException();
+            TestFailedFilePathRecovery(formType, form, dataRoot);
+            ThrowIfUiThreadException();
             TestPathResolutionBoundaries(formType, form, dataRoot);
             ThrowIfUiThreadException();
             TestWholeConversationExport(formType, form);
@@ -511,6 +513,10 @@ internal static class UiStateSmokeTest
             formType,
             form,
             "pathTextBox") as TextBox;
+        ListBox sessionList = GetField(
+            formType,
+            form,
+            "sessionListBox") as ListBox;
 
         AssertTrue(
             workspace != null && workspace.RowCount == 3 &&
@@ -537,7 +543,7 @@ internal static class UiStateSmokeTest
             contextSummary != null &&
                 contextSummary.AccessibleName == "当前会话上下文摘要" &&
                 contextSummary.Text.IndexOf(
-                    "条消息",
+                    "资料",
                     StringComparison.Ordinal) >= 0,
             "Context summary is visible in the workspace header");
         string fullContextSummary = contextToolTip == null
@@ -568,6 +574,29 @@ internal static class UiStateSmokeTest
             !settingsDialog.Visible && !pathDialog.Visible &&
                 settingsButton.Parent != null,
             "Secondary controls stay out of the main workspace");
+        Control sidebar = ((TableLayoutPanel)GetField(
+            formType,
+            form,
+            "rootLayout")).GetControlFromPosition(0, 0);
+        Button addFile = GetField(
+            formType,
+            form,
+            "addFileButton") as Button;
+        AssertTrue(
+            sidebar != null && sessionList.Parent != null &&
+                sidebar.Contains(sessionList) &&
+                sidebar.Contains(settingsButton) &&
+                !sidebar.Contains(addFile) &&
+                !sidebar.Contains(dropTarget) &&
+                !sidebar.Contains(pathInput),
+            "Sidebar contains conversation navigation, not file inputs");
+        AssertTrue(
+            addFile != null && composer.Contains(addFile) &&
+                composer.Contains(dropTarget) &&
+                composer.Contains(inputList) &&
+                !workspace.GetControlFromPosition(0, 0).Contains(addFile) &&
+                !workspace.GetControlFromPosition(0, 0).Contains(dropTarget),
+            "File actions stay in the bottom composer and out of the header");
         Size originalSize = window.Size;
         window.Size = window.MinimumSize;
         InvokePrivate(formType, form, "UpdateConversationAreaRows");
@@ -584,6 +613,19 @@ internal static class UiStateSmokeTest
             dropTarget.Visible && dropTarget.Width >= 120 &&
                 !readPathButton.Visible,
             "Narrow workspace keeps drag-and-drop visible and paths off-canvas");
+        Size compactSummarySize = TextRenderer.MeasureText(
+            contextSummary.Text,
+            contextSummary.Font,
+            Size.Empty,
+            TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+        AssertTrue(
+            contextSummary.Visible &&
+                compactSummarySize.Width <= contextSummary.ClientSize.Width &&
+                contextSummary.Height < contextSummary.Font.Height * 2,
+            "Narrow workspace keeps the context summary on one line (text=" +
+                compactSummarySize.Width + ", client=" +
+                contextSummary.ClientSize.Width + ", height=" +
+                contextSummary.Height + ")");
         AssertTrue(
             generateButton.Visible && generateButton.Width >= 64,
             "Narrow workspace keeps sending usable (visible=" +
@@ -1923,15 +1965,33 @@ internal static class UiStateSmokeTest
             new object[] { "assistant", "summary" }));
         try
         {
+            ContextMenuStrip exportMenu = GetField(
+                formType,
+                form,
+                "exportMenu") as ContextMenuStrip;
+            AssertTrue(
+                ContainsMenuText(exportMenu, "整个会话 · Markdown") &&
+                    ContainsMenuText(exportMenu, "整个会话 · 文本"),
+                "Export menu exposes whole-conversation Markdown and text");
             string markdown = (string)InvokePrivate(
                 formType,
                 form,
                 "BuildConversationMarkdown");
+            string plainText = (string)InvokePrivate(
+                formType,
+                form,
+                "BuildConversationPlainText");
             AssertTrue(
                 markdown.IndexOf(
                     "FULL ATTACHMENT BODY",
                     StringComparison.Ordinal) >= 0,
-                "Whole-conversation export keeps attachment text");
+                "Whole-conversation Markdown keeps attachment text");
+            AssertTrue(
+                plainText.IndexOf(
+                    "FULL ATTACHMENT BODY",
+                    StringComparison.Ordinal) >= 0 &&
+                    plainText.IndexOf("# ", StringComparison.Ordinal) < 0,
+                "Whole-conversation text keeps content without Markdown headings");
         }
         finally
         {
@@ -2071,6 +2131,53 @@ internal static class UiStateSmokeTest
             EventArgs.Empty);
     }
 
+    private static void TestFailedFilePathRecovery(
+        Type formType,
+        object form,
+        string dataRoot)
+    {
+        TextBox pathInput = (TextBox)GetField(
+            formType,
+            form,
+            "pathTextBox");
+        ToolStripStatusLabel status = (ToolStripStatusLabel)GetField(
+            formType,
+            form,
+            "statusLabel");
+        string existing = Path.Combine(dataRoot, "existing-retry.txt");
+        string missing = Path.Combine(dataRoot, "dropped-then-missing.txt");
+        pathInput.Text = existing;
+
+        Task addTask = (Task)InvokePrivate(
+            formType,
+            form,
+            "AddFilesAsync",
+            (object)new string[] { missing, missing });
+        PumpTask(addTask, 10000, "Missing dropped file recovery completes");
+
+        string[] retryPaths = (string[])formType.GetMethod(
+            "ParsePastedPaths",
+            BindingFlags.Static | BindingFlags.NonPublic |
+                BindingFlags.DeclaredOnly)
+            .Invoke(null, new object[] { pathInput.Text });
+        AssertTrue(
+            retryPaths.Length == 2 &&
+                string.Equals(
+                    retryPaths[0],
+                    existing,
+                    StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(
+                    retryPaths[1],
+                    missing,
+                    StringComparison.OrdinalIgnoreCase),
+            "Failed picker or drop paths merge into the retry editor");
+        AssertTrue(
+            status.Text.IndexOf("+ 添加", StringComparison.Ordinal) >= 0 &&
+                status.Text.IndexOf("从路径添加", StringComparison.Ordinal) >= 0,
+            "Failed file status gives a concrete retry route");
+        pathInput.Clear();
+    }
+
     private static void TestSearchCharacterBudget(
         Assembly application,
         Type formType,
@@ -2169,6 +2276,40 @@ internal static class UiStateSmokeTest
         finally
         {
             dialog.Dispose();
+        }
+
+
+        Form readOnlyDialog = Activator.CreateInstance(
+            dialogType,
+            new object[] { settings, "扩展配置文件被占用" }) as Form;
+        AssertTrue(readOnlyDialog != null, "Read-only extensions dialog can be created");
+        try
+        {
+            readOnlyDialog.CreateControl();
+            readOnlyDialog.PerformLayout();
+            Button save = FindControl<Button>(readOnlyDialog, "保存");
+            Button cancel = FindControl<Button>(readOnlyDialog, "取消");
+            Button paste = FindControl<Button>(
+                readOnlyDialog,
+                "从剪贴板安装");
+            TextBox skillName = FindControl<TextBox>(readOnlyDialog, null);
+            Label warning = FindControl<Label>(
+                readOnlyDialog,
+                "只读保护：扩展配置无法安全保存。请关闭程序并处理文件占用或权限后重新打开。");
+            AssertTrue(
+                save != null && !save.Enabled &&
+                cancel != null && cancel.Enabled &&
+                paste != null && !paste.Enabled &&
+                skillName != null && !skillName.Enabled,
+                "Read-only extensions UI disables every modification entry");
+            AssertTrue(
+                warning != null &&
+                warning.AccessibleDescription == "扩展配置文件被占用",
+                "Read-only extensions UI explains why saving is unavailable");
+        }
+        finally
+        {
+            readOnlyDialog.Dispose();
         }
     }
 
@@ -2436,6 +2577,40 @@ internal static class UiStateSmokeTest
                     "Settings focus routing selects " +
                         expectedTitles[index]);
             }
+
+
+            dialogType.GetMethod(
+                "SetSettingsWriteProtection",
+                BindingFlags.Instance | BindingFlags.Public).Invoke(
+                    dialog,
+                    new object[] { true, "settings.xml 被另一进程占用" });
+            Button saveButton = GetProperty(dialog, "SaveButton") as Button;
+            TextBox endpoint = GetProperty(
+                dialog,
+                "EndpointTextBox") as TextBox;
+            ComboBox shortcut = GetProperty(
+                dialog,
+                "SendShortcutComboBox") as ComboBox;
+            Label validation = GetField(
+                dialogType,
+                dialog,
+                "validationLabel") as Label;
+            AssertTrue(
+                saveButton != null && !saveButton.Enabled &&
+                endpoint != null && !endpoint.Enabled &&
+                shortcut != null && !shortcut.Enabled,
+                "Settings read-only state disables save and editing controls");
+            AssertTrue(
+                validation != null &&
+                validation.Text.IndexOf(
+                    "只读保护",
+                    StringComparison.Ordinal) >= 0 &&
+                validation.Text.IndexOf(
+                    "不能修改或保存",
+                    StringComparison.Ordinal) >= 0 &&
+                validation.AccessibleDescription ==
+                    "settings.xml 被另一进程占用",
+                "Settings read-only state clearly explains save protection");
         }
         finally
         {

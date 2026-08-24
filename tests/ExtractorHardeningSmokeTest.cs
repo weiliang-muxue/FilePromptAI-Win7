@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Reflection;
 using System.Text;
+using System.Xml;
 
 internal static class ExtractorHardeningSmokeTest
 {
@@ -38,6 +39,22 @@ internal static class ExtractorHardeningSmokeTest
             TestShortText(extractor, extractFile, temporaryRoot);
             TestSparseColumns(extractor, extractFile, temporaryRoot);
             TestUnicodeTruncation(extractor, createClipboardText);
+            TestStructuredArchiveXmlSecurity(
+                extractor,
+                extractFile,
+                temporaryRoot);
+            TestStructuredArchiveLimits(
+                extractor,
+                extractFile,
+                temporaryRoot);
+            TestStructuredArchivePaths(
+                extractor,
+                extractFile,
+                temporaryRoot);
+            TestModernXMindJsonSecurity(
+                extractor,
+                extractFile,
+                temporaryRoot);
             Console.WriteLine("PASS | extractor hardening");
             return 0;
         }
@@ -170,6 +187,381 @@ internal static class ExtractorHardeningSmokeTest
         }
 
         AssertTrue(true, "Truncation preserves surrogate pairs");
+    }
+
+    private static void TestStructuredArchiveXmlSecurity(
+        object extractor,
+        MethodInfo extractFile,
+        string root)
+    {
+        string dtdPath = Path.Combine(root, "dtd.xmind");
+        CreateArchive(
+            dtdPath,
+            delegate(ZipArchive archive)
+            {
+                AddEntry(
+                    archive,
+                    "content.xml",
+                    "<!DOCTYPE x [<!ENTITY payload 'blocked'>]>" +
+                    "<xmap-content><sheet><topic><title>&payload;</title>" +
+                    "</topic></sheet></xmap-content>");
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            dtdPath,
+            delegate(Exception failure)
+            {
+                return failure is XmlException || failure is InvalidDataException;
+            },
+            "XMind DTD is rejected");
+
+        string oversizedXmlPath = Path.Combine(root, "oversized-xml.xmind");
+        CreateArchive(
+            oversizedXmlPath,
+            delegate(ZipArchive archive)
+            {
+                ZipArchiveEntry entry = archive.CreateEntry(
+                    "content.xml",
+                    CompressionLevel.NoCompression);
+                using (Stream stream = entry.Open())
+                using (StreamWriter writer = new StreamWriter(
+                    stream,
+                    new UTF8Encoding(false)))
+                {
+                    writer.Write("<xmap-content><!--");
+                    WriteRepeated(writer, 'x', 32 * 1024 * 1024);
+                    writer.Write("--></xmap-content>");
+                }
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            oversizedXmlPath,
+            delegate(Exception failure) { return failure is InvalidDataException; },
+            "XMind XML over 32 MB is rejected");
+
+        string pptxDtdPath = Path.Combine(root, "dtd.pptx");
+        CreateArchive(
+            pptxDtdPath,
+            delegate(ZipArchive archive)
+            {
+                AddEntry(
+                    archive,
+                    "ppt/slides/slide1.xml",
+                    "<!DOCTYPE p:sld [<!ENTITY payload 'blocked'>]>" +
+                    "<p:sld xmlns:p=\"urn:p\" xmlns:a=\"urn:a\">" +
+                    "<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r>" +
+                    "<a:t>&payload;</a:t></a:r></a:p></p:txBody></p:sp>" +
+                    "</p:spTree></p:cSld></p:sld>");
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            pptxDtdPath,
+            delegate(Exception failure)
+            {
+                return failure is XmlException || failure is InvalidDataException;
+            },
+            "PPTX DTD is rejected");
+    }
+
+    private static void TestStructuredArchiveLimits(
+        object extractor,
+        MethodInfo extractFile,
+        string root)
+    {
+        string bombPath = Path.Combine(root, "compression-ratio.xmind");
+        CreateArchive(
+            bombPath,
+            delegate(ZipArchive archive)
+            {
+                AddEntry(archive, "content.xml", MinimalXMindXml());
+                ZipArchiveEntry bomb = archive.CreateEntry(
+                    "resources/bomb.bin",
+                    CompressionLevel.Fastest);
+                using (Stream stream = bomb.Open())
+                {
+                    byte[] zeros = new byte[8192];
+                    for (int index = 0; index < 256; index++)
+                    {
+                        stream.Write(zeros, 0, zeros.Length);
+                    }
+                }
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            bombPath,
+            delegate(Exception failure) { return failure is InvalidDataException; },
+            "XMind ZIP compression bomb is rejected");
+
+        string entryCountPath = Path.Combine(root, "too-many-entries.xmind");
+        CreateArchive(
+            entryCountPath,
+            delegate(ZipArchive archive)
+            {
+                for (int index = 0; index < 4097; index++)
+                {
+                    archive.CreateEntry(
+                        "items/item" + index.ToString("D4") + ".bin",
+                        CompressionLevel.NoCompression);
+                }
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            entryCountPath,
+            delegate(Exception failure) { return failure is InvalidDataException; },
+            "XMind entry count over 4,096 is rejected");
+
+        string totalSizePath = Path.Combine(root, "expanded-size.xmind");
+        CreateArchive(
+            totalSizePath,
+            delegate(ZipArchive archive)
+            {
+                AddEntry(archive, "content.xml", MinimalXMindXml());
+            });
+        PatchFirstCentralDirectoryUncompressedSize(
+            totalSizePath,
+            256U * 1024U * 1024U + 1U);
+        AssertRejected(
+            extractor,
+            extractFile,
+            totalSizePath,
+            delegate(Exception failure) { return failure is InvalidDataException; },
+            "XMind expanded size over 256 MB is rejected");
+
+        string sourceSizePath = Path.Combine(root, "source-over-100mb.pptx");
+        using (FileStream stream = new FileStream(
+            sourceSizePath,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None))
+        {
+            stream.SetLength(100L * 1024L * 1024L + 1L);
+        }
+        AssertRejected(
+            extractor,
+            extractFile,
+            sourceSizePath,
+            delegate(Exception failure) { return failure is InvalidOperationException; },
+            "PPTX source over 100 MB is rejected");
+    }
+
+    private static void TestStructuredArchivePaths(
+        object extractor,
+        MethodInfo extractFile,
+        string root)
+    {
+        string missingXMind = Path.Combine(root, "missing-content.xmind");
+        CreateArchive(
+            missingXMind,
+            delegate(ZipArchive archive)
+            {
+                AddEntry(archive, "manifest.xml", "<manifest/>");
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            missingXMind,
+            delegate(Exception failure) { return failure is InvalidDataException; },
+            "XMind missing content.xml is rejected");
+
+        string missingPptx = Path.Combine(root, "missing-slide.pptx");
+        CreateArchive(
+            missingPptx,
+            delegate(ZipArchive archive)
+            {
+                AddEntry(archive, "ppt/presentation.xml", "<p:presentation xmlns:p=\"urn:p\"/>");
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            missingPptx,
+            delegate(Exception failure) { return failure is InvalidDataException; },
+            "PPTX missing slide XML is rejected");
+
+        string duplicatePath = Path.Combine(root, "duplicate.xmind");
+        CreateArchive(
+            duplicatePath,
+            delegate(ZipArchive archive)
+            {
+                AddEntry(archive, "content.xml", MinimalXMindXml());
+                AddEntry(archive, "CONTENT.XML", MinimalXMindXml());
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            duplicatePath,
+            delegate(Exception failure) { return failure is InvalidDataException; },
+            "XMind duplicate canonical path is rejected");
+
+        string dangerousPath = Path.Combine(root, "dangerous-path.pptx");
+        CreateArchive(
+            dangerousPath,
+            delegate(ZipArchive archive)
+            {
+                AddEntry(
+                    archive,
+                    "ppt/slides/slide1.xml",
+                    MinimalSlideXml());
+                AddEntry(archive, "../escape.xml", "<escape/>");
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            dangerousPath,
+            delegate(Exception failure) { return failure is InvalidDataException; },
+            "PPTX traversal path is rejected");
+
+        string unnormalizedPath = Path.Combine(root, "unnormalized-path.pptx");
+        CreateArchive(
+            unnormalizedPath,
+            delegate(ZipArchive archive)
+            {
+                AddEntry(
+                    archive,
+                    "ppt/slides/slide1.xml",
+                    MinimalSlideXml());
+                AddEntry(archive, "ppt//hidden.xml", "<hidden/>");
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            unnormalizedPath,
+            delegate(Exception failure) { return failure is InvalidDataException; },
+            "PPTX unnormalized path is rejected");
+    }
+
+    private static void TestModernXMindJsonSecurity(
+        object extractor,
+        MethodInfo extractFile,
+        string root)
+    {
+        string malformedPath = Path.Combine(root, "malformed-json.xmind");
+        CreateArchive(
+            malformedPath,
+            delegate(ZipArchive archive)
+            {
+                AddEntry(archive, "content.json", "[{\"title\":]");
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            malformedPath,
+            delegate(Exception failure) { return failure is InvalidDataException; },
+            "Malformed modern XMind JSON is rejected");
+
+        string invalidUtf8Path = Path.Combine(root, "invalid-utf8.xmind");
+        CreateArchive(
+            invalidUtf8Path,
+            delegate(ZipArchive archive)
+            {
+                ZipArchiveEntry entry = archive.CreateEntry(
+                    "content.json",
+                    CompressionLevel.NoCompression);
+                using (Stream stream = entry.Open())
+                {
+                    stream.WriteByte(0xFF);
+                    stream.WriteByte(0xFE);
+                }
+            });
+        AssertRejected(
+            extractor,
+            extractFile,
+            invalidUtf8Path,
+            delegate(Exception failure) { return failure is InvalidDataException; },
+            "Non-UTF8 modern XMind JSON is rejected");
+    }
+
+    private static void AssertRejected(
+        object extractor,
+        MethodInfo extractFile,
+        string path,
+        Func<Exception, bool> expected,
+        string name)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        Exception failure = InvokeForFailure(
+            delegate
+            {
+                extractFile.Invoke(extractor, new object[] { path });
+            });
+        stopwatch.Stop();
+        AssertTrue(failure != null && expected(failure), name);
+        AssertTrue(stopwatch.Elapsed < TimeSpan.FromSeconds(5), name + " quickly");
+    }
+
+    private static void CreateArchive(string path, Action<ZipArchive> write)
+    {
+        using (FileStream stream = new FileStream(
+            path,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None))
+        using (ZipArchive archive = new ZipArchive(
+            stream,
+            ZipArchiveMode.Create,
+            false,
+            Encoding.UTF8))
+        {
+            write(archive);
+        }
+    }
+
+    private static string MinimalXMindXml()
+    {
+        return "<xmap-content><sheet><topic><title>root</title>" +
+            "</topic></sheet></xmap-content>";
+    }
+
+    private static string MinimalSlideXml()
+    {
+        return "<p:sld xmlns:p=\"urn:p\" xmlns:a=\"urn:a\"><p:cSld>" +
+            "<p:spTree><p:sp><p:txBody><a:p><a:r><a:t>safe</a:t>" +
+            "</a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>";
+    }
+
+    private static void WriteRepeated(
+        TextWriter writer,
+        char value,
+        int count)
+    {
+        char[] buffer = new char[8192];
+        for (int index = 0; index < buffer.Length; index++)
+        {
+            buffer[index] = value;
+        }
+
+        while (count > 0)
+        {
+            int current = Math.Min(count, buffer.Length);
+            writer.Write(buffer, 0, current);
+            count -= current;
+        }
+    }
+
+    private static void PatchFirstCentralDirectoryUncompressedSize(
+        string path,
+        uint value)
+    {
+        byte[] bytes = File.ReadAllBytes(path);
+        for (int index = 0; index <= bytes.Length - 28; index++)
+        {
+            if (bytes[index] == 0x50 && bytes[index + 1] == 0x4B &&
+                bytes[index + 2] == 0x01 && bytes[index + 3] == 0x02)
+            {
+                bytes[index + 24] = (byte)value;
+                bytes[index + 25] = (byte)(value >> 8);
+                bytes[index + 26] = (byte)(value >> 16);
+                bytes[index + 27] = (byte)(value >> 24);
+                File.WriteAllBytes(path, bytes);
+                return;
+            }
+        }
+
+        throw new InvalidDataException("ZIP central directory was not found.");
     }
 
     private static void CreateMinimalXlsx(

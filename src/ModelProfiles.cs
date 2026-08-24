@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Globalization;
 using System.Linq;
+using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using System.Xml;
@@ -56,10 +57,30 @@ namespace FilePromptAIWin7
         private const int MaximumSettingsBytes = 1024 * 1024;
         private static readonly byte[] Entropy = Encoding.UTF8.GetBytes(
             "FilePromptAIWin7.ModelProfiles.v1");
+        private static readonly object ProtectionSync = new object();
+        private static readonly Dictionary<string, string> WriteBlocks =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         private readonly string path;
+        private string loadWarning;
 
-        public string LoadWarning { get; private set; }
+        public string LoadWarning
+        {
+            get
+            {
+                if (!string.IsNullOrWhiteSpace(loadWarning))
+                {
+                    return loadWarning;
+                }
+
+                return GetWriteBlockReason(path);
+            }
+        }
+
+        public bool IsWriteProtected
+        {
+            get { return !string.IsNullOrEmpty(GetWriteBlockReason(path)); }
+        }
 
         public string SettingsPath
         {
@@ -78,44 +99,23 @@ namespace FilePromptAIWin7
                 throw new ArgumentException("Profile path is required.", "path");
             }
 
-            this.path = path;
+            this.path = Path.GetFullPath(path);
+            loadWarning = GetWriteBlockReason(this.path);
         }
 
         public IList<ModelProfile> Load()
         {
-            LoadWarning = string.Empty;
+            loadWarning = GetWriteBlockReason(path);
             List<ModelProfile> result = new List<ModelProfile>();
-            if (!File.Exists(path))
-            {
-                return result;
-            }
 
             try
             {
-                FileInfo info = new FileInfo(path);
-                if (info.Length > MaximumSettingsBytes)
+                XDocument document = ReadDocument();
+                if (document == null)
                 {
-                    throw new InvalidDataException(
-                        "模型配置文件超过 1 MB 安全限制。");
+                    return result;
                 }
 
-                XmlReaderSettings readerSettings = new XmlReaderSettings();
-                readerSettings.DtdProcessing = DtdProcessing.Prohibit;
-                readerSettings.XmlResolver = null;
-                readerSettings.MaxCharactersInDocument = MaximumSettingsBytes;
-                readerSettings.MaxCharactersFromEntities = 0;
-                XDocument document;
-                using (FileStream stream = new FileStream(
-                    path,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read))
-                using (XmlReader reader = XmlReader.Create(
-                    stream,
-                    readerSettings))
-                {
-                    document = XDocument.Load(reader, LoadOptions.None);
-                }
                 XElement root = document.Root;
                 if (root == null || root.Name != RootName ||
                     (string)root.Attribute("version") != CurrentVersion)
@@ -123,83 +123,139 @@ namespace FilePromptAIWin7
                     throw new InvalidDataException("模型配置文件版本不受支持。");
                 }
 
+                if (root.Elements().Any(element => element.Name != "Profile"))
+                {
+                    throw new InvalidDataException(
+                        "模型配置文件包含未知节点。");
+                }
+
                 foreach (XElement element in root.Elements("Profile"))
                 {
                     if (result.Count >= MaximumProfiles)
                     {
+                        MarkPartialLoad(
+                            "模型配置超过 " + MaximumProfiles +
+                            " 条，未加载的条目已原样保留。");
                         break;
                     }
 
-                    string protectedKey = GetValue(element, "ProtectedApiKey");
-                    string apiKey = string.Empty;
-                    bool keyDecryptionFailed = false;
-                    if (!string.IsNullOrWhiteSpace(protectedKey))
+                    try
                     {
-                        try
+                        ValidateProfileStructure(element);
+                        string protectedKey = GetValue(
+                            element,
+                            "ProtectedApiKey");
+                        string apiKey = string.Empty;
+                        if (!string.IsNullOrWhiteSpace(protectedKey))
                         {
                             apiKey = Unprotect(protectedKey);
                         }
-                        catch
+
+                        string temperatureText = GetValue(
+                            element,
+                            "Temperature");
+                        string topPText = GetValue(element, "TopP");
+                        string maxTokensText = GetValue(
+                            element,
+                            "MaxOutputTokens");
+                        bool invalidOptionalValue =
+                            IsInvalidOptionalDouble(
+                                temperatureText,
+                                0d,
+                                2d) ||
+                            IsInvalidOptionalDouble(topPText, 0d, 1d) ||
+                            IsInvalidOptionalInt32(
+                                maxTokensText,
+                                1,
+                                1048576);
+                        ModelProfile profile = new ModelProfile
                         {
-                            // DPAPI is scoped to the Windows user. Entries
-                            // copied from another account are skipped while
-                            // the original file remains untouched.
-                            keyDecryptionFailed = true;
+                            Name = GetValue(element, "Name"),
+                            EndpointUrl = GetValue(
+                                element,
+                                "EndpointUrl"),
+                            ApiKey = apiKey,
+                            ModelName = GetValue(element, "ModelName"),
+                            SystemPrompt = GetValue(element, "SystemPrompt"),
+                            Temperature = ParseOptionalDouble(
+                                temperatureText,
+                                0d,
+                                2d),
+                            TopP = ParseOptionalDouble(
+                                topPText,
+                                0d,
+                                1d),
+                            MaxOutputTokens = ParseOptionalInt32(
+                                maxTokensText,
+                                1,
+                                1048576)
+                        };
+                        Validate(profile);
+
+                        if (result.Any(existing => string.Equals(
+                            existing.Name,
+                            profile.Name,
+                            StringComparison.OrdinalIgnoreCase)))
+                        {
+                            throw new InvalidDataException(
+                                "模型配置名称重复：" + profile.Name);
+                        }
+
+                        result.Add(profile);
+                        if (invalidOptionalValue)
+                        {
+                            MarkPartialLoad(
+                                "模型配置包含无法解析的生成参数，已按默认值加载；" +
+                                "原文件已保留且本次运行禁止保存。");
                         }
                     }
-
-                    if (keyDecryptionFailed)
+                    catch (Exception exception)
                     {
+                        MarkPartialLoad(
+                            "部分模型配置无法安全读取，原文件已保留且本次运行禁止保存：" +
+                            exception.Message);
                         continue;
                     }
-
-                    ModelProfile profile = new ModelProfile
-                    {
-                        Name = Limit(GetValue(element, "Name")),
-                        EndpointUrl = Limit(GetValue(element, "EndpointUrl")),
-                        ApiKey = Limit(apiKey),
-                        ModelName = Limit(GetValue(element, "ModelName")),
-                        SystemPrompt = LimitSystemPrompt(
-                            GetValue(element, "SystemPrompt")),
-                        Temperature = ParseOptionalDouble(
-                            GetValue(element, "Temperature"),
-                            0d,
-                            2d),
-                        TopP = ParseOptionalDouble(
-                            GetValue(element, "TopP"),
-                            0d,
-                            1d),
-                        MaxOutputTokens = ParseOptionalInt32(
-                            GetValue(element, "MaxOutputTokens"),
-                            1,
-                            1048576)
-                    };
-                    try
-                    {
-                        Validate(profile);
-                    }
-                    catch
-                    {
-                        // A single incomplete or cross-user DPAPI entry must
-                        // not block the remaining saved profiles.
-                        continue;
-                    }
-
-                    if (result.Any(existing => string.Equals(
-                        existing.Name,
-                        profile.Name,
-                        StringComparison.OrdinalIgnoreCase)))
-                    {
-                        continue;
-                    }
-
-                    result.Add(profile);
                 }
+            }
+            catch (FileNotFoundException)
+            {
+                loadWarning = GetWriteBlockReason(path);
+            }
+            catch (DirectoryNotFoundException)
+            {
+                loadWarning = GetWriteBlockReason(path);
+            }
+            catch (InvalidDataException exception)
+            {
+                HandleCorruptFile(exception);
+                result.Clear();
+            }
+            catch (XmlException exception)
+            {
+                HandleCorruptFile(exception);
+                result.Clear();
+            }
+            catch (IOException exception)
+            {
+                HandleUnavailableFile(exception);
+                result.Clear();
+            }
+            catch (UnauthorizedAccessException exception)
+            {
+                HandleUnavailableFile(exception);
+                result.Clear();
+            }
+            catch (SecurityException exception)
+            {
+                HandleUnavailableFile(exception);
+                result.Clear();
             }
             catch (Exception exception)
             {
-                LoadWarning = "模型配置未能读取，已忽略损坏文件：" + exception.Message;
-                TryMoveCorruptFile();
+                // Unexpected runtime failures must not be treated as proof
+                // that the persisted bytes are corrupt.
+                HandleUnavailableFile(exception);
                 result.Clear();
             }
 
@@ -207,6 +263,37 @@ namespace FilePromptAIWin7
         }
 
         public void Save(IEnumerable<ModelProfile> profiles)
+        {
+            string blockedReason = GetWriteBlockReason(path);
+            if (!string.IsNullOrEmpty(blockedReason))
+            {
+                throw new InvalidOperationException(
+                    "模型配置文件在本次运行中处于只读保护状态。" +
+                    blockedReason);
+            }
+
+            try
+            {
+                SaveCore(profiles);
+            }
+            catch (IOException exception)
+            {
+                HandleUnavailableFile(exception);
+                throw;
+            }
+            catch (UnauthorizedAccessException exception)
+            {
+                HandleUnavailableFile(exception);
+                throw;
+            }
+            catch (SecurityException exception)
+            {
+                HandleUnavailableFile(exception);
+                throw;
+            }
+        }
+
+        private void SaveCore(IEnumerable<ModelProfile> profiles)
         {
             if (profiles == null)
             {
@@ -355,6 +442,101 @@ namespace FilePromptAIWin7
             }
         }
 
+        private XDocument ReadDocument()
+        {
+            FileStream stream;
+            try
+            {
+                stream = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read);
+            }
+            catch (FileNotFoundException)
+            {
+                return null;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return null;
+            }
+
+            using (stream)
+            {
+                if (stream.Length == 0 || stream.Length > MaximumSettingsBytes)
+                {
+                    throw new InvalidDataException(
+                        "模型配置文件大小无效或超过 1 MB 安全限制。");
+                }
+
+                XmlReaderSettings readerSettings = new XmlReaderSettings();
+                readerSettings.DtdProcessing = DtdProcessing.Prohibit;
+                readerSettings.XmlResolver = null;
+                readerSettings.MaxCharactersInDocument = MaximumSettingsBytes;
+                readerSettings.MaxCharactersFromEntities = 0;
+                using (XmlReader reader = XmlReader.Create(
+                    stream,
+                    readerSettings))
+                {
+                    return XDocument.Load(reader, LoadOptions.None);
+                }
+            }
+        }
+
+        private void MarkPartialLoad(string warning)
+        {
+            MarkWriteBlocked(path, warning);
+            loadWarning = GetWriteBlockReason(path);
+        }
+
+        private static void ValidateProfileStructure(XElement element)
+        {
+            if (element == null || element.HasAttributes)
+            {
+                throw new InvalidDataException("模型配置条目结构无效。");
+            }
+
+            string[] allowed =
+            {
+                "Name",
+                "EndpointUrl",
+                "ModelName",
+                "SystemPrompt",
+                "Temperature",
+                "TopP",
+                "MaxOutputTokens",
+                "ProtectedApiKey"
+            };
+            foreach (XElement child in element.Elements())
+            {
+                if (!allowed.Contains(
+                    child.Name.LocalName,
+                    StringComparer.Ordinal) ||
+                    child.HasElements || child.HasAttributes)
+                {
+                    throw new InvalidDataException(
+                        "模型配置条目包含未知或无效字段。");
+                }
+            }
+
+            foreach (string name in allowed)
+            {
+                if (element.Elements(name).Skip(1).Any())
+                {
+                    throw new InvalidDataException(
+                        "模型配置条目包含重复字段：" + name);
+                }
+            }
+
+            if (element.Nodes().OfType<XText>().Any(
+                text => !string.IsNullOrWhiteSpace(text.Value)))
+            {
+                throw new InvalidDataException(
+                    "模型配置条目包含无法识别的文本。");
+            }
+        }
+
 
         private static string GetValue(XElement parent, string name)
         {
@@ -409,6 +591,27 @@ namespace FilePromptAIWin7
                 : null;
         }
 
+        private static bool IsInvalidOptionalDouble(
+            string value,
+            double minimum,
+            double maximum)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            double parsed;
+            return !double.TryParse(
+                       value,
+                       NumberStyles.Float,
+                       CultureInfo.InvariantCulture,
+                       out parsed) ||
+                double.IsNaN(parsed) ||
+                double.IsInfinity(parsed) ||
+                parsed < minimum || parsed > maximum;
+        }
+
         private static int? ParseOptionalInt32(
             string value,
             int minimum,
@@ -428,6 +631,25 @@ namespace FilePromptAIWin7
                    parsed >= minimum && parsed <= maximum
                 ? (int?)parsed
                 : null;
+        }
+
+        private static bool IsInvalidOptionalInt32(
+            string value,
+            int minimum,
+            int maximum)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            int parsed;
+            return !int.TryParse(
+                       value,
+                       NumberStyles.None,
+                       CultureInfo.InvariantCulture,
+                       out parsed) ||
+                parsed < minimum || parsed > maximum;
         }
 
         private static string FormatOptionalDouble(double? value)
@@ -462,22 +684,78 @@ namespace FilePromptAIWin7
             return Encoding.UTF8.GetString(clear);
         }
 
-        private void TryMoveCorruptFile()
+        private void HandleCorruptFile(Exception exception)
+        {
+            string blockedReason = GetWriteBlockReason(path);
+            if (!string.IsNullOrEmpty(blockedReason))
+            {
+                loadWarning = blockedReason;
+                return;
+            }
+
+            bool moved = TryMoveCorruptFile();
+            if (moved)
+            {
+                loadWarning =
+                    "模型配置未能读取，已备份损坏文件：" + exception.Message;
+                return;
+            }
+
+            string warning = "模型配置内容损坏，但无法创建安全备份；" +
+                "原文件保持不变，本次运行已进入只读保护：" +
+                exception.Message;
+            MarkWriteBlocked(path, warning);
+            loadWarning = GetWriteBlockReason(path);
+        }
+
+        private void HandleUnavailableFile(Exception exception)
+        {
+            string warning = "模型配置文件当前无法访问，原文件保持不变；" +
+                "本次运行已进入只读保护：" + exception.Message;
+            MarkWriteBlocked(path, warning);
+            loadWarning = GetWriteBlockReason(path);
+        }
+
+        private bool TryMoveCorruptFile()
         {
             try
             {
                 if (!File.Exists(path))
                 {
-                    return;
+                    return false;
                 }
 
                 string backup = path + ".corrupt-" +
                     DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") + ".xml";
                 File.Move(path, backup);
+                return true;
             }
             catch
             {
                 // Keep startup resilient if the profile file is locked.
+                return false;
+            }
+        }
+
+        private static void MarkWriteBlocked(string path, string reason)
+        {
+            lock (ProtectionSync)
+            {
+                if (!WriteBlocks.ContainsKey(path))
+                {
+                    WriteBlocks.Add(path, reason ?? string.Empty);
+                }
+            }
+        }
+
+        private static string GetWriteBlockReason(string path)
+        {
+            lock (ProtectionSync)
+            {
+                string reason;
+                return WriteBlocks.TryGetValue(path, out reason)
+                    ? reason ?? string.Empty
+                    : string.Empty;
             }
         }
     }

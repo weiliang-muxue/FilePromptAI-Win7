@@ -150,6 +150,63 @@ if (-not (Test-Path -LiteralPath $checksumPath -PathType Leaf)) {
     throw "Acceptance report checksum was not created: $checksumPath"
 }
 [xml]$document = Get-Content -LiteralPath $report.FullName -Raw -Encoding UTF8
+$root = $document.filePromptAiAcceptance
+if ($root.schemaVersion -ne '2' -or
+    $root.verifierVersion -ne '1.17.0.0') {
+    throw 'The acceptance report does not use the v1.17 schemaVersion=2 contract.'
+}
+
+function Assert-FailedReportHasNoVerifiedIdentity {
+    param(
+        [string]$Output,
+        [string]$Context
+    )
+
+    $match = [Text.RegularExpressions.Regex]::Match(
+        $Output,
+        '(?m)^REPORT \| (?<Path>.+?)\r?$')
+    if (-not $match.Success) {
+        throw "$Context did not print an acceptance report path."
+    }
+    $path = $match.Groups['Path'].Value.Trim()
+    $sidecar = "$path.sha256.txt"
+    try {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $sidecar -PathType Leaf)) {
+            throw "$Context did not create its report and sidecar."
+        }
+        [xml]$failedDocument = Get-Content `
+            -LiteralPath $path `
+            -Raw `
+            -Encoding UTF8
+        $failedRoot = $failedDocument.filePromptAiAcceptance
+        $failedIdentity = $failedRoot.packageIdentity
+        if ($failedRoot.schemaVersion -ne '2' -or
+            $failedRoot.result -ne 'fail' -or
+            $failedIdentity.status -ne 'unverified' -or
+            $failedIdentity.Attributes.Count -ne 1 -or
+            $failedIdentity.HasAttribute('manifestSha256') -or
+            $failedIdentity.HasAttribute('manifestEntryCount') -or
+            $failedIdentity.HasAttribute('manifestName')) {
+            throw "$Context produced failure evidence that could be mistaken for a verified package identity."
+        }
+        $recorded = (
+            Get-Content -LiteralPath $sidecar -Raw -Encoding UTF8
+        ).Split(' ', [StringSplitOptions]::RemoveEmptyEntries)[0]
+        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        if ($recorded -cne $actual) {
+            throw "$Context report sidecar does not match its failure XML."
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Remove-Item -LiteralPath $path -Force
+        }
+        if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
+            Remove-Item -LiteralPath $sidecar -Force
+        }
+    }
+}
 if ($document.filePromptAiAcceptance.result -ne $(
     if ($isWindows7Sp1) { 'pass' } else { 'fail' }
 )) {
@@ -180,6 +237,32 @@ foreach ($identifier in $requiredIds) {
     if (@($document.filePromptAiAcceptance.checks.check |
         Where-Object { $_.id -eq $identifier }).Count -ne 1) {
         throw "The XML report is missing check: $identifier"
+    }
+}
+
+$identity = $root.packageIdentity
+if ($isWindows7Sp1) {
+    $manifestPath = Join-Path $stagingRoot 'PACKAGE-CHECKSUMS-SHA256.txt'
+    $expectedManifestHash = (
+        Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256
+    ).Hash
+    $expectedManifestEntryCount = @(
+        Get-Content -LiteralPath $manifestPath -Encoding UTF8
+    ).Count
+    if ($identity.status -ne 'verified' -or
+        $identity.manifestName -ne 'PACKAGE-CHECKSUMS-SHA256.txt' -or
+        $identity.manifestSha256 -cne $expectedManifestHash -or
+        [int]$identity.manifestEntryCount -ne $expectedManifestEntryCount) {
+        throw 'A passing acceptance report does not identify the exact locked package manifest.'
+    }
+}
+else {
+    if ($identity.status -ne 'unverified' -or
+        $identity.Attributes.Count -ne 1 -or
+        $identity.HasAttribute('manifestSha256') -or
+        $identity.HasAttribute('manifestEntryCount') -or
+        $identity.HasAttribute('manifestName')) {
+        throw 'A failed acceptance report exposes a package identity that could be mistaken for PASS evidence.'
     }
 }
 
@@ -358,6 +441,9 @@ try {
         $tamperOutput -match '(?m)^(PASS|FAIL|ERROR) \| application\.launch \|') {
         throw "A tampered package was not safely gated. exitCode=$tamperExitCode`n$tamperOutput"
     }
+    Assert-FailedReportHasNoVerifiedIdentity `
+        -Output $tamperOutput `
+        -Context 'The tampered-package verifier run'
 
     # Recalculate the package-owned manifest after the same change. The
     # verifier's embedded trusted set must still reject the modified payload.
@@ -392,6 +478,9 @@ try {
         $recalculatedOutput -match '(?m)^(PASS|FAIL|ERROR) \| application\.launch \|') {
         throw "A modified payload with a recalculated manifest bypassed the trusted set. exitCode=$recalculatedExitCode`n$recalculatedOutput"
     }
+    Assert-FailedReportHasNoVerifiedIdentity `
+        -Output $recalculatedOutput `
+        -Context 'The recalculated-manifest verifier run'
 }
 finally {
     $resolvedTamperRoot = [IO.Path]::GetFullPath($tamperRoot)

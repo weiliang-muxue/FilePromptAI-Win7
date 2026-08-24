@@ -33,14 +33,16 @@
 - Windows 7 只注册一个始终可见的专用拖放区，避免子控件句柄变化导致
   `DragDrop 注册失败`；拖放不可用时仍可用文件选择器或路径读取。
 - 从剪贴板粘贴文字、图片或资源管理器中复制的文件。
-- 本地提取文本/代码、PDF、DOC/DOCX、RTF、XLS/XLSX。
+- 本地提取文本/代码、PDF、DOC/DOCX、RTF、XLS/XLSX、PPTX 和 XMind；
+  PPTX 保留自然页序、标题、正文、表格和备注，新版 XMind `content.json` 与
+  旧版 `content.xml` 保留多画布、主题层级及备注。
 - PNG、JPEG、BMP、GIF、TIFF 图片压缩后以内联 Base64 提交。
 - 当前运行期跨会话草稿合计最多保留 20 MB 二进制附件，避免 Win7 32 位进程内存耗尽；
   超限时需先发送或移除已有附件。
 - 模型只收到文件名、提取出的内容和内联数据，不会收到本地路径。
 - 文本资料正文会随会话历史保留；图片和无文本内联文件只发送当前轮，后续轮次
   若需再次查看请主动重新添加，程序不会偷偷从本地路径重读。
-- 支持流式输出、停止、复制结果和保存为 Markdown/文本文件。
+- 支持流式输出、停止、复制结果，并可将最新回复或整个会话保存为 Markdown/文本文件。
 - 可对最新模型回复原位重新生成，用新结果替换原回复，避免在会话中堆叠重复问答；
   请求失败后可从失败位置快速重试。
 - 可在主工作区快速切换已保存的模型配置，无需先打开设置窗口。
@@ -60,8 +62,8 @@
 - 模型回复按标题、列表、代码块和 Markdown 表格排版显示。
 - 双击或按 Enter 可预览已主动添加的文字/图片，不会重新读取本地文件。
 - 全部会话可备份为 `.fpc` 并合并恢复；备份不包含 URL、API Key 或模型配置。
-- 可把最新回复或整个会话导出为 Word（`.docx`）、PDF、PowerPoint（`.pptx`）
-  和 XMind（`.xmind`）；回答包含 Markdown 表格时可导出为 Excel 工作簿
+- 可把最新回复或整个会话导出为 Markdown、文本、Word（`.docx`）、PDF、
+  PowerPoint（`.pptx`）和 XMind（`.xmind`）；回答包含 Markdown 表格时可导出为 Excel 工作簿
   （`.xlsx`）或 CSV。全部导出均在本机完成。
 - 底部“快捷指令”可填入总结、提炼、翻译、PPT 大纲、XMind 结构和 Markdown
   表格模板；右键对话记录可载入上一条用户指令进行编辑重发，模板不会自动发送。
@@ -232,8 +234,11 @@ Verify-FilePromptAI.exe
 它会校验精确包清单，使用独立临时数据目录启动真实客户端，并通过 127.0.0.1
 回环服务验证无 API Key 的主动 `/models` 发现及流式 Chat Completions；TXT、PDF、
 DOCX、PNG 解析和 DOCX、PDF、PPTX、XLSX、CSV、XMind 导出也直接调用包内真实程序。
-XML 报告和同名 `.sha256.txt` 写到 `%TEMP%`；如果该目录位于发布包内，则改写到
-`%LocalAppData%\FilePromptAI-Acceptance\AcceptanceReports`，不会改变包内文件集合。
+XML schema 2 报告和同名 `.sha256.txt` 写到 `%TEMP%`；如果该目录位于发布包内，则
+改写到 `%LocalAppData%\FilePromptAI-Acceptance\AcceptanceReports`，不会改变包内文件
+集合。只有总结果为 `PASS` 的报告才会以 `packageIdentity status="verified"` 记录已经锁定
+并验证的 `PACKAGE-CHECKSUMS-SHA256.txt` 原始字节 SHA-256 和条目数；失败报告只写
+`status="unverified"`，不能作为发布封存证据。
 
 只有 Windows 7 SP1、.NET Framework 4.8、1920×1080@96 DPI 和全部功能检查同时
 通过时才返回退出码 0 并输出总 `PASS`。退出码按位表示失败：1=系统、2=.NET、
@@ -270,37 +275,47 @@ Microsoft Authenticode 签名，并生成 `PACKAGE-CHECKSUMS-SHA256.txt`。仅�
 
 发布维护者先提交待发布源码，确认工作树和索引均为空，再以发布候选模式运行完整
 测试。只有全部测试和离线包验证成功后，脚本才会在被 Git 忽略的
-`tests\build-artifacts\release` 中写入 receipt，把测试通过的 candidate HEAD 与
-最终 ZIP 的名称和 SHA-256 绑定：
+`tests\build-artifacts\release` 中写入 schema 2 receipt，把测试通过的 candidate HEAD、
+最终 ZIP 的名称和 SHA-256，以及 staging/ZIP 中同一份包清单的 SHA-256 和条目数绑定：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1 `
     -Version 1.17 -WriteReleaseReceipt
 ```
 
-receipt 生成后不得重建 ZIP 或移动 HEAD。随后显式封存固定摘要：
+receipt 生成后不得重建 ZIP 或移动 HEAD。将最终 ZIP 原样带到规定环境，在真实
+Windows 7 SP1、.NET Framework 4.8、1920×1080@96 DPI 机器上运行包内验收器并保留
+总 `PASS` XML 及其同名 sidecar。随后把该报告路径作为必填参数显式封存固定摘要：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\seal-release.ps1 -Version 1.17
+powershell -ExecutionPolicy Bypass -File .\seal-release.ps1 `
+    -Version 1.17 `
+    -AcceptanceReportPath 'D:\Acceptance\FilePromptAI-Acceptance-....xml'
 ```
 
 封存要求 HEAD 仍是 receipt 中的已测试 candidate、索引完全为空，并且除未暂存的
 `RELEASE-SHA256.txt` 外源码工作树干净；实际 ZIP 和 sidecar 也必须与 receipt 完全
-一致。摘要文件固定使用 UTF-8 无 BOM 和 CRLF，且 `.gitattributes` 禁止 Git 对它
-做换行转换。随后只提交 `RELEASE-SHA256.txt`，创建指向该提交的 annotated 标签。
+一致。封存脚本以禁止 DTD 和外部实体的 XML 读取器验证报告 sidecar、schema、总
+`PASS`/退出码 0、v1.17 verifier、全部必需检查唯一且为 `pass`，并要求报告、receipt
+及 ZIP 内清单的内容身份完全一致。摘要文件固定使用 UTF-8 无 BOM 和 CRLF，且
+`.gitattributes` 禁止 Git 对它做换行转换。随后只提交 `RELEASE-SHA256.txt`，创建
+指向该提交的 annotated 标签。
 封存后不得再次运行会重建 ZIP 的命令。
 
 标签建立后运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass `
-    -File .\tests\VerifyTaggedRelease.ps1 -Version 1.17
+    -File .\tests\VerifyTaggedRelease.ps1 `
+    -Version 1.17 `
+    -AcceptanceReportPath 'D:\Acceptance\FilePromptAI-Acceptance-....xml'
 ```
 
 验证脚本要求标签指向 HEAD；seal commit 必须只有一个父提交，该父提交必须是 receipt
 记录的 candidate，并且两者之间只能修改 `RELEASE-SHA256.txt`。它还会按原始字节
-复核标签中的 CRLF 摘要，并确认本地 ZIP、sidecar 和 receipt 一致。全部通过后，再将
-同一 ZIP 与摘要上传为 GitHub Release 资产并做一次下载后复核。
+复核标签中的 CRLF 摘要，并再次确认本地 ZIP、sidecar、receipt 与同一真实 Win7
+验收报告的包清单身份一致。全部通过后，再将同一 ZIP 与摘要上传为 GitHub Release
+资产并做一次下载后复核。
 
 ## 测试
 

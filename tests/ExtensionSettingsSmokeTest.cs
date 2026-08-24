@@ -1,15 +1,29 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
 namespace FilePromptAIWin7
 {
     internal static class ExtensionSettingsSmokeTest
     {
-        private static int Main()
+        private static int Main(string[] args)
         {
+            if (args != null && args.Length == 4 &&
+                args[0] == "--hold-exclusive-lock")
+            {
+                return HoldFileLock(args[1], args[2], args[3], true);
+            }
+
+            if (args != null && args.Length == 4 &&
+                args[0] == "--hold-readable-lock")
+            {
+                return HoldFileLock(args[1], args[2], args[3], false);
+            }
+
             string root = Path.Combine(
                 Path.GetTempPath(),
                 "FilePromptAIExtensions-" + Guid.NewGuid().ToString("N"));
@@ -22,6 +36,8 @@ namespace FilePromptAIWin7
                 TestEncryptedRoundTrip(root);
                 TestUtf8SizeBoundary(root);
                 TestDamagedSettings(root);
+                TestExclusiveLock(root);
+                TestDamageBackupFailure(root);
                 Console.WriteLine("PASS | extension settings");
                 return 0;
             }
@@ -327,6 +343,230 @@ namespace FilePromptAIWin7
             Assert(
                 Directory.GetFiles(root, "damaged.xml.corrupt-*.xml").Length == 1,
                 "damaged backup exists");
+            Assert(!store.IsWriteProtected, "successful damage backup permits rebuild");
+        }
+
+        private static void TestExclusiveLock(string root)
+        {
+            string path = Path.Combine(root, "locked-extensions.xml");
+            ExtensionSettings expected = CreateLockSettings();
+            new ExtensionStore(path).Save(expected);
+            byte[] original = File.ReadAllBytes(path);
+            string ready = path + ".ready";
+            string release = path + ".release";
+            ExtensionStore protectedStore = new ExtensionStore(path);
+            Process holder = StartLockHolder(
+                "--hold-exclusive-lock",
+                path,
+                ready,
+                release);
+            try
+            {
+                WaitForLockHolder(holder, ready);
+                ExtensionSettings unavailable = protectedStore.Load();
+                Assert(unavailable.Skills.Count == 0, "locked extensions return empty settings");
+                Assert(protectedStore.IsWriteProtected, "locked extensions enable sticky protection");
+                Assert(
+                    protectedStore.LoadWarning.IndexOf(
+                        "无法安全读取",
+                        StringComparison.Ordinal) >= 0 &&
+                    protectedStore.LoadWarning.IndexOf(
+                        "损坏",
+                        StringComparison.Ordinal) < 0,
+                    "locked extensions report access warning");
+                Assert(
+                    File.Exists(path) &&
+                    Directory.GetFiles(
+                        root,
+                        "locked-extensions.xml.corrupt-*.xml").Length == 0,
+                    "locked extensions create no corrupt backup");
+            }
+            finally
+            {
+                ReleaseLockHolder(holder, release);
+            }
+
+            ExtensionSettings loaded = new ExtensionStore(path).Load();
+            Assert(
+                loaded.Skills.Count == 1 &&
+                loaded.Skills[0].Name == expected.Skills[0].Name &&
+                original.SequenceEqual(File.ReadAllBytes(path)),
+                "extensions load after exclusive lock release");
+            Exception saveFailure = CaptureFailure(delegate
+            {
+                protectedStore.Save(new ExtensionSettings());
+            });
+            Assert(
+                saveFailure is InvalidOperationException &&
+                original.SequenceEqual(File.ReadAllBytes(path)),
+                "extension write protection remains sticky after release");
+        }
+
+        private static void TestDamageBackupFailure(string root)
+        {
+            string path = Path.Combine(root, "unmovable-damaged.xml");
+            byte[] original = Encoding.UTF8.GetBytes("<FilePromptAIExtensions");
+            File.WriteAllBytes(path, original);
+            string ready = path + ".ready";
+            string release = path + ".release";
+            ExtensionStore store = new ExtensionStore(path);
+            Process holder = StartLockHolder(
+                "--hold-readable-lock",
+                path,
+                ready,
+                release);
+            try
+            {
+                WaitForLockHolder(holder, ready);
+                store.Load();
+                Assert(
+                    store.IsWriteProtected &&
+                    store.LoadWarning.IndexOf(
+                        "无法创建安全备份",
+                        StringComparison.Ordinal) >= 0,
+                    "failed extension damage backup enables protection");
+                Assert(
+                    original.SequenceEqual(File.ReadAllBytes(path)) &&
+                    Directory.GetFiles(
+                        root,
+                        "unmovable-damaged.xml.corrupt-*.xml").Length == 0,
+                    "failed extension damage backup preserves original bytes");
+            }
+            finally
+            {
+                ReleaseLockHolder(holder, release);
+            }
+
+            Exception saveFailure = CaptureFailure(delegate
+            {
+                store.Save(CreateLockSettings());
+            });
+            Assert(
+                saveFailure is InvalidOperationException &&
+                original.SequenceEqual(File.ReadAllBytes(path)),
+                "damaged extension store rejects save after lock release");
+        }
+
+        private static ExtensionSettings CreateLockSettings()
+        {
+            ExtensionSettings settings = new ExtensionSettings();
+            settings.Skills.Add(new SkillDefinition
+            {
+                Name = "锁定测试技能",
+                Instructions = "保留原始配置。",
+                Enabled = true
+            });
+            return settings;
+        }
+
+        private static Exception CaptureFailure(Action action)
+        {
+            try
+            {
+                action();
+                return null;
+            }
+            catch (Exception exception)
+            {
+                return exception;
+            }
+        }
+
+        private static Process StartLockHolder(
+            string mode,
+            string path,
+            string ready,
+            string release)
+        {
+            ProcessStartInfo startInfo = new ProcessStartInfo();
+            startInfo.FileName = System.Reflection.Assembly
+                .GetExecutingAssembly().Location;
+            startInfo.Arguments = mode + " " + QuoteArgument(path) + " " +
+                QuoteArgument(ready) + " " + QuoteArgument(release);
+            startInfo.UseShellExecute = false;
+            startInfo.CreateNoWindow = true;
+            return Process.Start(startInfo);
+        }
+
+        private static void WaitForLockHolder(Process holder, string ready)
+        {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+            while (!File.Exists(ready))
+            {
+                if (holder == null || holder.HasExited)
+                {
+                    throw new InvalidOperationException(
+                        "Extension lock holder exited before acquiring the lock.");
+                }
+
+                if (DateTime.UtcNow >= deadline)
+                {
+                    throw new TimeoutException(
+                        "Timed out waiting for extension file lock.");
+                }
+
+                Thread.Sleep(25);
+            }
+        }
+
+        private static void ReleaseLockHolder(Process holder, string release)
+        {
+            File.WriteAllText(release, "release", Encoding.ASCII);
+            if (holder == null)
+            {
+                return;
+            }
+
+            if (!holder.WaitForExit(5000))
+            {
+                holder.Kill();
+                holder.WaitForExit();
+            }
+
+            int exitCode = holder.ExitCode;
+            holder.Dispose();
+            Assert(exitCode == 0, "extension lock holder exits");
+        }
+
+        private static int HoldFileLock(
+            string path,
+            string ready,
+            string release,
+            bool exclusive)
+        {
+            try
+            {
+                using (FileStream stream = new FileStream(
+                    path,
+                    FileMode.Open,
+                    exclusive ? FileAccess.ReadWrite : FileAccess.Read,
+                    exclusive ? FileShare.None : FileShare.Read))
+                {
+                    File.WriteAllText(ready, "ready", Encoding.ASCII);
+                    DateTime deadline = DateTime.UtcNow.AddSeconds(15);
+                    while (!File.Exists(release))
+                    {
+                        if (DateTime.UtcNow >= deadline)
+                        {
+                            return 2;
+                        }
+
+                        Thread.Sleep(25);
+                    }
+                }
+
+                return 0;
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine(exception);
+                return 3;
+            }
+        }
+
+        private static string QuoteArgument(string value)
+        {
+            return "\"" + value.Replace("\"", "\\\"") + "\"";
         }
 
         private static void Assert(bool condition, string name)

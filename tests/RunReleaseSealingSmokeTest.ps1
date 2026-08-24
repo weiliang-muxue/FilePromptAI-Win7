@@ -11,6 +11,7 @@ $sourceSealScript = Join-Path $projectRoot 'seal-release.ps1'
 $sourceHashVerifier = Join-Path $testRoot 'VerifyReleaseSha256.ps1'
 $sourceTagVerifier = Join-Path $testRoot 'VerifyTaggedRelease.ps1'
 $sourceAllSmokeTests = Join-Path $testRoot 'RunAllSmokeTests.ps1'
+$sourceReleaseEvidence = Join-Path $testRoot 'ReleaseAcceptanceEvidence.ps1'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'FilePromptAI-ReleaseSeal-' + [Guid]::NewGuid().ToString('N'))
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
@@ -40,7 +41,8 @@ function Invoke-GitChecked {
 function Invoke-Script {
     param(
         [string]$ScriptPath,
-        [string]$Root
+        [string]$Root,
+        [switch]$OmitAcceptanceReport
     )
 
     $savedErrorActionPreference = $ErrorActionPreference
@@ -49,6 +51,7 @@ function Invoke-Script {
         $arguments = @(
             '-NoLogo',
             '-NoProfile',
+            '-NonInteractive',
             '-ExecutionPolicy',
             'Bypass',
             '-File',
@@ -58,6 +61,15 @@ function Invoke-Script {
         )
         if ((Split-Path -Leaf $ScriptPath) -eq 'VerifyTaggedRelease.ps1') {
             $arguments += @('-ProjectRoot', $Root)
+        }
+        if (-not $OmitAcceptanceReport -and
+            (Split-Path -Leaf $ScriptPath) -in @(
+                'seal-release.ps1',
+                'VerifyTaggedRelease.ps1')) {
+            $arguments += @(
+                '-AcceptanceReportPath',
+                (Join-Path $temporaryRoot (
+                    'acceptance-' + (Split-Path -Leaf $Root) + '.xml')))
         }
         if ((Split-Path -Leaf $ScriptPath) -eq 'RunAllSmokeTests.ps1') {
             $arguments += '-WriteReleaseReceipt'
@@ -72,6 +84,114 @@ function Invoke-Script {
         ExitCode = $exitCode
         Output = $output
     }
+}
+
+function Write-AcceptanceFixtureReport {
+    param(
+        [string]$Path,
+        [string]$ManifestHash,
+        [int]$ManifestEntryCount
+    )
+
+    $requiredChecks = @(
+        'os.win7-sp1',
+        'runtime.dotnet-4.8',
+        'display.fullhd-100-percent',
+        'package.checksums',
+        'files.extract',
+        'files.export',
+        'api.models',
+        'api.chat-completions',
+        'application.launch',
+        'application.cleanup'
+    )
+    $settings = New-Object Xml.XmlWriterSettings
+    $settings.Encoding = $utf8NoBom
+    $settings.Indent = $true
+    $settings.NewLineChars = "`r`n"
+    $writer = [Xml.XmlWriter]::Create($Path, $settings)
+    try {
+        $writer.WriteStartDocument()
+        $writer.WriteStartElement('filePromptAiAcceptance')
+        $writer.WriteAttributeString('schemaVersion', '2')
+        $writer.WriteAttributeString('result', 'pass')
+        $writer.WriteAttributeString('exitCode', '0')
+        $writer.WriteAttributeString(
+            'createdUtc',
+            [DateTime]::UtcNow.ToString(
+                'o',
+                [Globalization.CultureInfo]::InvariantCulture))
+        $writer.WriteAttributeString('verifierVersion', '1.17.0.0')
+        foreach ($name in @(
+            'packageRoot',
+            'reportPath',
+            'isolatedDataRoot',
+            'is64BitOperatingSystem',
+            'clrVersion')) {
+            $writer.WriteElementString($name, 'fixture')
+        }
+        $writer.WriteStartElement('packageIdentity')
+        $writer.WriteAttributeString('status', 'verified')
+        $writer.WriteAttributeString(
+            'manifestName',
+            'PACKAGE-CHECKSUMS-SHA256.txt')
+        $writer.WriteAttributeString('manifestSha256', $ManifestHash)
+        $writer.WriteAttributeString(
+            'manifestEntryCount',
+            $ManifestEntryCount.ToString(
+                [Globalization.CultureInfo]::InvariantCulture))
+        $writer.WriteEndElement()
+        $writer.WriteStartElement('checks')
+        foreach ($identifier in $requiredChecks) {
+            $writer.WriteStartElement('check')
+            $writer.WriteAttributeString('id', $identifier)
+            $writer.WriteAttributeString('status', 'pass')
+            $writer.WriteAttributeString('durationMs', '1')
+            $writer.WriteElementString('message', 'fixture pass')
+            $writer.WriteElementString('evidence', 'fixture evidence')
+            $writer.WriteEndElement()
+        }
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+        $writer.WriteEndDocument()
+    }
+    finally {
+        $writer.Dispose()
+    }
+    $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    [IO.File]::WriteAllText(
+        "$Path.sha256.txt",
+        "$hash *$(Split-Path -Leaf $Path)`r`n",
+        $utf8NoBom)
+}
+
+function Update-AcceptanceFixtureSidecar {
+    param([string]$Path)
+
+    $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    [IO.File]::WriteAllText(
+        "$Path.sha256.txt",
+        "$hash *$(Split-Path -Leaf $Path)`r`n",
+        $utf8NoBom)
+}
+
+function Set-AcceptanceFixtureText {
+    param(
+        [string]$Path,
+        [string]$OriginalText,
+        [string]$OldValue,
+        [string]$NewValue
+    )
+
+    $changed = $OriginalText.Replace($OldValue, $NewValue)
+    if ([string]::Equals(
+        $changed,
+        $OriginalText,
+        [StringComparison]::Ordinal)) {
+        throw "The acceptance fixture mutation did not find: $OldValue"
+    }
+    [IO.File]::WriteAllText($Path, $changed, $utf8NoBom)
+    Update-AcceptanceFixtureSidecar -Path $Path
 }
 
 function Assert-Accepted {
@@ -117,6 +237,7 @@ function New-ReleaseFixture {
     Copy-Item -LiteralPath $sourceHashVerifier -Destination $fixtureTestRoot
     Copy-Item -LiteralPath $sourceTagVerifier -Destination $fixtureTestRoot
     Copy-Item -LiteralPath $sourceAllSmokeTests -Destination $fixtureTestRoot
+    Copy-Item -LiteralPath $sourceReleaseEvidence -Destination $fixtureTestRoot
 
     $stubScript =
         "param([string]`$Version = '')`r`n" +
@@ -167,10 +288,20 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $name = "FilePromptAI-Win7-Full-v$Version.zip"
 $path = Join-Path $root $name
+$staging = Join-Path $root "FilePromptAI-offline-release-v$Version"
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
-[IO.File]::WriteAllBytes(
-    $path,
-    [Text.Encoding]::ASCII.GetBytes("suite-generated archive $Version"))
+if (Test-Path -LiteralPath $staging) {
+    Remove-Item -LiteralPath $staging -Recurse -Force
+}
+New-Item -ItemType Directory -Path $staging | Out-Null
+$payloadPath = Join-Path $staging 'payload.txt'
+[IO.File]::WriteAllText($payloadPath, "fixture payload $Version`r`n", $utf8NoBom)
+$payloadHash = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash
+[IO.File]::WriteAllText(
+    (Join-Path $staging 'PACKAGE-CHECKSUMS-SHA256.txt'),
+    "$payloadHash *payload.txt`r`n",
+    $utf8NoBom)
+Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $path -Force
 $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
 [IO.File]::WriteAllText(
     "$path.sha256.txt",
@@ -191,7 +322,8 @@ Write-Host 'PASS | fixture package build'
         (Join-Path $root '.gitignore'),
         "FilePromptAI-Win7-Full-v*.zip`r`n" +
         "FilePromptAI-Win7-Full-v*.zip.sha256.txt`r`n" +
-        "tests/build-artifacts/`r`n",
+        "tests/build-artifacts/`r`n" +
+        "FilePromptAI-offline-release-v*/`r`n",
         $utf8NoBom)
     [IO.File]::WriteAllText(
         (Join-Path $root 'candidate.txt'),
@@ -200,12 +332,39 @@ Write-Host 'PASS | fixture package build'
 
     $archivePath = Join-Path $root $archiveName
     $sidecarPath = "$archivePath.sha256.txt"
-    [IO.File]::WriteAllBytes(
-        $archivePath,
-        [Text.Encoding]::ASCII.GetBytes("release fixture $Name"))
+    $fixtureStaging = Join-Path $root "FilePromptAI-offline-release-v$Version"
+    New-Item -ItemType Directory -Path $fixtureStaging | Out-Null
+    $fixturePayload = Join-Path $fixtureStaging 'payload.txt'
+    [IO.File]::WriteAllText(
+        $fixturePayload,
+        "fixture payload $Version`r`n",
+        $utf8NoBom)
+    $fixturePayloadHash = (
+        Get-FileHash -LiteralPath $fixturePayload -Algorithm SHA256
+    ).Hash
+    $fixtureManifestPath = Join-Path `
+        $fixtureStaging `
+        'PACKAGE-CHECKSUMS-SHA256.txt'
+    [IO.File]::WriteAllText(
+        $fixtureManifestPath,
+        "$fixturePayloadHash *payload.txt`r`n",
+        $utf8NoBom)
+    Compress-Archive `
+        -Path (Join-Path $fixtureStaging '*') `
+        -DestinationPath $archivePath `
+        -Force
     $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+    $manifestHash = (
+        Get-FileHash -LiteralPath $fixtureManifestPath -Algorithm SHA256
+    ).Hash
+    $manifestEntryCount = 1
     $checksumLine = "$archiveHash *$archiveName`r`n"
     [IO.File]::WriteAllText($sidecarPath, $checksumLine, $utf8NoBom)
+    $acceptanceReportPath = Join-Path $temporaryRoot "acceptance-$Name.xml"
+    Write-AcceptanceFixtureReport `
+        -Path $acceptanceReportPath `
+        -ManifestHash $manifestHash `
+        -ManifestEntryCount $manifestEntryCount
     if ($IncludeTrackedManifest) {
         [IO.File]::WriteAllText(
             (Join-Path $root 'RELEASE-SHA256.txt'),
@@ -231,6 +390,9 @@ Write-Host 'PASS | fixture package build'
         ReceiptPath = Join-Path $receiptRoot "ReleaseCandidate-v$Version.txt"
         Candidate = $candidateCommit
         ArchiveHash = $archiveHash
+        ManifestHash = $manifestHash
+        ManifestEntryCount = $manifestEntryCount
+        AcceptanceReportPath = $acceptanceReportPath
     }
 }
 
@@ -238,13 +400,16 @@ function Write-ReleaseFixtureReceipt {
     param([object]$Fixture)
 
     $receiptText =
-        "FilePromptAI-Release-Receipt: 1`r`n" +
+        "FilePromptAI-Release-Receipt: 2`r`n" +
         "Suite: tests/RunAllSmokeTests.ps1`r`n" +
         "Result: PASS`r`n" +
         "Version: $Version`r`n" +
         "Candidate-Commit: $($Fixture.Candidate)`r`n" +
         "Archive-Name: $archiveName`r`n" +
-        "Archive-SHA256: $($Fixture.ArchiveHash)`r`n"
+        "Archive-SHA256: $($Fixture.ArchiveHash)`r`n" +
+        "Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256.txt`r`n" +
+        "Package-Manifest-SHA256: $($Fixture.ManifestHash)`r`n" +
+        "Package-Manifest-Entry-Count: $($Fixture.ManifestEntryCount)`r`n"
     [IO.File]::WriteAllText(
         $Fixture.ReceiptPath,
         $receiptText,
@@ -294,6 +459,26 @@ try {
         -Result $tagResult `
         -OutputPattern '(?m)^PASS \| annotated release tag \|'
 
+    $successAcceptanceText = [IO.File]::ReadAllText(
+        $success.AcceptanceReportPath,
+        (New-Object Text.UTF8Encoding($false, $true)))
+    Set-AcceptanceFixtureText `
+        -Path $success.AcceptanceReportPath `
+        -OriginalText $successAcceptanceText `
+        -OldValue 'id="application.cleanup" status="pass"' `
+        -NewValue 'id="application.cleanup" status="fail"'
+    Assert-Rejected `
+        -Description 'A tagged release with a subsequently failed acceptance report' `
+        -Result (Invoke-Script `
+            -ScriptPath $success.TagVerifier `
+            -Root $success.Root) `
+        -OutputPattern 'check.*failed'
+    [IO.File]::WriteAllText(
+        $success.AcceptanceReportPath,
+        $successAcceptanceText,
+        $utf8NoBom)
+    Update-AcceptanceFixtureSidecar -Path $success.AcceptanceReportPath
+
     $manifestPath = Join-Path $success.Root 'RELEASE-SHA256.txt'
     $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
     if ($manifestBytes.Length -lt 2 -or
@@ -310,6 +495,126 @@ try {
     if ($rawWorkingBlob -ne $tagBlob) {
         throw 'core.autocrlf=true changed the tagged release manifest bytes.'
     }
+
+    $invalidEvidence = New-ReleaseFixture -Name 'invalid-acceptance'
+    Write-ReleaseFixtureReceipt -Fixture $invalidEvidence
+    $acceptanceText = [IO.File]::ReadAllText(
+        $invalidEvidence.AcceptanceReportPath,
+        (New-Object Text.UTF8Encoding($false, $true)))
+
+    Assert-Rejected `
+        -Description 'A seal invocation without the mandatory acceptance report' `
+        -Result (Invoke-Script `
+            -ScriptPath $invalidEvidence.SealScript `
+            -Root $invalidEvidence.Root `
+            -OmitAcceptanceReport) `
+        -OutputPattern 'AcceptanceReportPath|mandatory parameter'
+
+    Move-Item `
+        -LiteralPath $invalidEvidence.AcceptanceReportPath `
+        -Destination "$($invalidEvidence.AcceptanceReportPath).missing"
+    try {
+        Assert-Rejected `
+            -Description 'A missing Windows 7 acceptance report' `
+            -Result (Invoke-Script `
+                -ScriptPath $invalidEvidence.SealScript `
+                -Root $invalidEvidence.Root) `
+            -OutputPattern 'acceptance XML report.*missing'
+    }
+    finally {
+        Move-Item `
+            -LiteralPath "$($invalidEvidence.AcceptanceReportPath).missing" `
+            -Destination $invalidEvidence.AcceptanceReportPath
+    }
+
+    [IO.File]::WriteAllText(
+        "$($invalidEvidence.AcceptanceReportPath).sha256.txt",
+        (('0' * 64) + " *$(Split-Path -Leaf $invalidEvidence.AcceptanceReportPath)`r`n"),
+        $utf8NoBom)
+    Assert-Rejected `
+        -Description 'A tampered Windows 7 acceptance sidecar' `
+        -Result (Invoke-Script `
+            -ScriptPath $invalidEvidence.SealScript `
+            -Root $invalidEvidence.Root) `
+        -OutputPattern 'sidecar.*does not match'
+    Update-AcceptanceFixtureSidecar `
+        -Path $invalidEvidence.AcceptanceReportPath
+
+    Set-AcceptanceFixtureText `
+        -Path $invalidEvidence.AcceptanceReportPath `
+        -OriginalText $acceptanceText `
+        -OldValue 'result="pass" exitCode="0"' `
+        -NewValue 'result="fail" exitCode="1"'
+    Assert-Rejected `
+        -Description 'A failed acceptance result with a fresh sidecar' `
+        -Result (Invoke-Script `
+            -ScriptPath $invalidEvidence.SealScript `
+            -Root $invalidEvidence.Root) `
+        -OutputPattern 'not a passing v1\.17'
+
+    Set-AcceptanceFixtureText `
+        -Path $invalidEvidence.AcceptanceReportPath `
+        -OriginalText $acceptanceText `
+        -OldValue 'verifierVersion="1.17.0.0"' `
+        -NewValue 'verifierVersion="1.16.0.0"'
+    Assert-Rejected `
+        -Description 'An acceptance report from an older verifier' `
+        -Result (Invoke-Script `
+            -ScriptPath $invalidEvidence.SealScript `
+            -Root $invalidEvidence.Root) `
+        -OutputPattern 'not a passing v1\.17'
+
+    Set-AcceptanceFixtureText `
+        -Path $invalidEvidence.AcceptanceReportPath `
+        -OriginalText $acceptanceText `
+        -OldValue 'id="application.cleanup" status="pass"' `
+        -NewValue 'id="application.launch" status="pass"'
+    Assert-Rejected `
+        -Description 'A duplicated required acceptance check' `
+        -Result (Invoke-Script `
+            -ScriptPath $invalidEvidence.SealScript `
+            -Root $invalidEvidence.Root) `
+        -OutputPattern 'duplicated|missing required'
+
+    Set-AcceptanceFixtureText `
+        -Path $invalidEvidence.AcceptanceReportPath `
+        -OriginalText $acceptanceText `
+        -OldValue 'id="application.cleanup" status="pass"' `
+        -NewValue 'id="application.cleanup" status="fail"'
+    Assert-Rejected `
+        -Description 'A failed required acceptance check' `
+        -Result (Invoke-Script `
+            -ScriptPath $invalidEvidence.SealScript `
+            -Root $invalidEvidence.Root) `
+        -OutputPattern 'check.*failed'
+
+    Set-AcceptanceFixtureText `
+        -Path $invalidEvidence.AcceptanceReportPath `
+        -OriginalText $acceptanceText `
+        -OldValue $invalidEvidence.ManifestHash `
+        -NewValue ('A' * 64)
+    Assert-Rejected `
+        -Description 'A passing report for a different package manifest' `
+        -Result (Invoke-Script `
+            -ScriptPath $invalidEvidence.SealScript `
+            -Root $invalidEvidence.Root) `
+        -OutputPattern 'package identity does not match'
+
+    $dtdText = $acceptanceText.Replace(
+        '<filePromptAiAcceptance ',
+        "<!DOCTYPE filePromptAiAcceptance [<!ENTITY xxe SYSTEM 'file:///C:/Windows/win.ini'>]>`r`n<filePromptAiAcceptance ")
+    [IO.File]::WriteAllText(
+        $invalidEvidence.AcceptanceReportPath,
+        $dtdText,
+        $utf8NoBom)
+    Update-AcceptanceFixtureSidecar `
+        -Path $invalidEvidence.AcceptanceReportPath
+    Assert-Rejected `
+        -Description 'An acceptance XML report with an external entity DTD' `
+        -Result (Invoke-Script `
+            -ScriptPath $invalidEvidence.SealScript `
+            -Root $invalidEvidence.Root) `
+        -OutputPattern 'unsafe or invalid|DTD'
 
     $staged = New-ReleaseFixture -Name 'staged-old-digest'
     Write-ReleaseFixtureReceipt -Fixture $staged

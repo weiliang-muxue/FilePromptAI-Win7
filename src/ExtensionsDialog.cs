@@ -29,6 +29,7 @@ namespace FilePromptAIWin7
         private readonly Button testServerButton;
         private readonly Button okButton;
         private readonly Label dialogStatus;
+        private readonly string readOnlyReason;
         private CancellationTokenSource testCancellation;
         private int selectedSkillIndex;
         private int selectedServerIndex;
@@ -37,8 +38,16 @@ namespace FilePromptAIWin7
         public ExtensionSettings Settings { get; private set; }
 
         public ExtensionsDialog(ExtensionSettings settings)
+            : this(settings, string.Empty)
+        {
+        }
+
+        public ExtensionsDialog(
+            ExtensionSettings settings,
+            string readOnlyReason)
         {
             working = (settings ?? new ExtensionSettings()).Clone();
+            this.readOnlyReason = readOnlyReason ?? string.Empty;
             Settings = null;
             selectedSkillIndex = -1;
             selectedServerIndex = -1;
@@ -141,7 +150,52 @@ namespace FilePromptAIWin7
             HookSelectionEvents();
             ReloadSkills(working.Skills.Count > 0 ? 0 : -1);
             ReloadServers(working.McpServers.Count > 0 ? 0 : -1);
-            UpdateSummary();
+            if (IsReadOnly)
+            {
+                ApplyReadOnlyState(tabs);
+            }
+            else
+            {
+                UpdateSummary();
+            }
+        }
+
+        private bool IsReadOnly
+        {
+            get { return !string.IsNullOrWhiteSpace(readOnlyReason); }
+        }
+
+        private void ApplyReadOnlyState(Control editorHost)
+        {
+            SetEditingDescendantsEnabled(editorHost, false);
+            okButton.Enabled = false;
+            AcceptButton = null;
+            SetDialogStatus(
+                "只读保护：扩展配置无法安全保存。请关闭程序并处理文件占用或权限后重新打开。",
+                true);
+            dialogStatus.AccessibleDescription = readOnlyReason;
+        }
+
+        private static void SetEditingDescendantsEnabled(
+            Control parent,
+            bool enabled)
+        {
+            if (parent == null)
+            {
+                return;
+            }
+
+            foreach (Control child in parent.Controls)
+            {
+                if (child is TextBox || child is ComboBox ||
+                    child is CheckedListBox || child is CheckBox ||
+                    child is Button)
+                {
+                    child.Enabled = enabled;
+                }
+
+                SetEditingDescendantsEnabled(child, enabled);
+            }
         }
 
         private TabPage CreateSkillsPage()
@@ -637,6 +691,14 @@ namespace FilePromptAIWin7
 
         private void OnSaveAndClose(object sender, EventArgs args)
         {
+            if (IsReadOnly)
+            {
+                SetDialogStatus(
+                    "扩展配置处于只读保护，本次运行不能保存。",
+                    true);
+                return;
+            }
+
             try
             {
                 CaptureSkill(selectedSkillIndex);

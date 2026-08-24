@@ -38,6 +38,8 @@ $compilerArguments = @(
     '/warn:4',
     "/out:$testExecutable",
     "/reference:$(Join-Path $frameworkRoot 'System.dll')",
+    "/reference:$(Join-Path $frameworkRoot 'System.IO.Compression.dll')",
+    "/reference:$(Join-Path $frameworkRoot 'System.IO.Compression.FileSystem.dll')",
     (Join-Path $testRoot 'ExtractorSmokeTest.cs')
 )
 

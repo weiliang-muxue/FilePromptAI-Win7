@@ -9,6 +9,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using System.Xml;
 using System.Xml.Linq;
@@ -21,6 +22,13 @@ namespace FilePromptAIWin7
         private const long MaxSourceBytes = 100L * 1024L * 1024L;
         private const long MaxInlineFileBytes = 20L * 1024L * 1024L;
         private const long MaxOfficeXmlBytes = 32L * 1024L * 1024L;
+        private const long MaxArchiveExpandedBytes = 256L * 1024L * 1024L;
+        private const int MaxArchiveEntries = 4096;
+        private const int MaxArchiveEntryNameCharacters = 512;
+        private const long MinCompressionRatioCheckBytes = 1024L * 1024L;
+        private const long MaxCompressionRatio = 200L;
+        private const int MaxXMindTopics = 100000;
+        private const int MaxXMindDepth = 128;
         private const int MaxImageSide = 2048;
         private const int MaxWorksheetColumns = 16384;
 
@@ -75,6 +83,24 @@ namespace FilePromptAIWin7
             if (extension == ".xlsx")
             {
                 return CreateTextItem(info.Name, ExtractXlsx(path), info.Length, "Excel 工作簿");
+            }
+
+            if (extension == ".pptx")
+            {
+                return CreateTextItem(
+                    info.Name,
+                    ExtractPptx(path),
+                    info.Length,
+                    "PowerPoint 演示文稿");
+            }
+
+            if (extension == ".xmind")
+            {
+                return CreateTextItem(
+                    info.Name,
+                    ExtractXMind(path),
+                    info.Length,
+                    "XMind 思维导图");
             }
 
             if (extension == ".doc")
@@ -503,6 +529,952 @@ namespace FilePromptAIWin7
             }
         }
 
+        private static string ExtractPptx(string path)
+        {
+            LimitedTextBuilder output = new LimitedTextBuilder(MaxTextCharacters);
+            using (ZipArchive archive = ZipFile.OpenRead(path))
+            {
+                IDictionary<string, ZipArchiveEntry> entries =
+                    ValidateStructuredArchive(archive, "PPTX");
+                List<NumberedArchiveEntry> slides = GetNumberedEntries(
+                    entries,
+                    "ppt/slides/slide",
+                    ".xml",
+                    "PPTX 幻灯片");
+                if (slides.Count == 0)
+                {
+                    throw new InvalidDataException(
+                        "PPTX 中缺少 ppt/slides/slideN.xml。");
+                }
+
+                foreach (NumberedArchiveEntry slide in slides)
+                {
+                    output.AppendLine();
+                    output.AppendLine(
+                        "===== 第 " +
+                        slide.Number.ToString(CultureInfo.InvariantCulture) +
+                        " 页 =====");
+                    XDocument slideDocument = LoadOfficeXml(
+                        slide.Entry,
+                        "PowerPoint 幻灯片 XML",
+                        LoadOptions.PreserveWhitespace);
+                    AppendPowerPointSlide(output, slideDocument);
+
+                    ZipArchiveEntry notesEntry = GetPowerPointNotesEntry(
+                        entries,
+                        slide);
+                    if (notesEntry != null)
+                    {
+                        XDocument notesDocument = LoadOfficeXml(
+                            notesEntry,
+                            "PowerPoint 备注 XML",
+                            LoadOptions.PreserveWhitespace);
+                        AppendPowerPointNotes(output, notesDocument);
+                    }
+
+                    if (output.IsFull)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            return output.ToString();
+        }
+
+        private static void AppendPowerPointSlide(
+            LimitedTextBuilder output,
+            XDocument document)
+        {
+            List<string> titles = new List<string>();
+            List<string> body = new List<string>();
+            foreach (XElement shape in document.Descendants().Where(
+                element => element.Name.LocalName == "sp"))
+            {
+                List<string> paragraphs = ReadDrawingParagraphs(shape);
+                if (paragraphs.Count == 0)
+                {
+                    continue;
+                }
+
+                string placeholderType = GetPowerPointPlaceholderType(shape);
+                if (string.Equals(
+                        placeholderType,
+                        "title",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(
+                        placeholderType,
+                        "ctrTitle",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    titles.AddRange(paragraphs);
+                }
+                else
+                {
+                    body.AddRange(paragraphs);
+                }
+            }
+
+            AppendTextSection(output, "标题", titles);
+            AppendTextSection(output, "正文", body);
+
+            int tableIndex = 0;
+            foreach (XElement table in document.Descendants().Where(
+                element => element.Name.LocalName == "tbl"))
+            {
+                tableIndex++;
+                output.AppendLine(
+                    "[表格 " +
+                    tableIndex.ToString(CultureInfo.InvariantCulture) +
+                    "]");
+                foreach (XElement row in table.Elements().Where(
+                    element => element.Name.LocalName == "tr"))
+                {
+                    List<string> cells = new List<string>();
+                    foreach (XElement cell in row.Elements().Where(
+                        element => element.Name.LocalName == "tc"))
+                    {
+                        cells.Add(EscapeSpreadsheetValue(
+                            string.Join(" / ", ReadDrawingParagraphs(cell).ToArray())));
+                    }
+
+                    output.AppendLine(string.Join("\t", cells.ToArray()));
+                    if (output.IsFull)
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+
+        private static void AppendPowerPointNotes(
+            LimitedTextBuilder output,
+            XDocument document)
+        {
+            List<string> notes = new List<string>();
+            foreach (XElement shape in document.Descendants().Where(
+                element => element.Name.LocalName == "sp"))
+            {
+                string placeholderType = GetPowerPointPlaceholderType(shape);
+                if (string.Equals(placeholderType, "sldImg", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(placeholderType, "sldNum", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(placeholderType, "dt", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(placeholderType, "hdr", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(placeholderType, "ftr", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                notes.AddRange(ReadDrawingParagraphs(shape));
+            }
+
+            AppendTextSection(output, "备注", notes);
+        }
+
+        private static string GetPowerPointPlaceholderType(XElement shape)
+        {
+            XElement placeholder = shape.Descendants().FirstOrDefault(
+                element => element.Name.LocalName == "ph");
+            return placeholder == null
+                ? string.Empty
+                : GetAttributeValue(placeholder, "type");
+        }
+
+        private static List<string> ReadDrawingParagraphs(XElement container)
+        {
+            List<string> result = new List<string>();
+            foreach (XElement paragraph in container.Descendants().Where(
+                element => element.Name.LocalName == "p"))
+            {
+                StringBuilder value = new StringBuilder();
+                foreach (XElement node in paragraph.Descendants())
+                {
+                    string localName = node.Name.LocalName;
+                    if (localName == "t")
+                    {
+                        value.Append(node.Value);
+                    }
+                    else if (localName == "tab")
+                    {
+                        value.Append('\t');
+                    }
+                    else if (localName == "br")
+                    {
+                        value.AppendLine();
+                    }
+                }
+
+                string text = value.ToString().Trim();
+                if (text.Length > 0)
+                {
+                    result.Add(text);
+                }
+            }
+
+            return result;
+        }
+
+        private static void AppendTextSection(
+            LimitedTextBuilder output,
+            string name,
+            IList<string> values)
+        {
+            if (values == null || values.Count == 0)
+            {
+                return;
+            }
+
+            output.AppendLine("[" + name + "]");
+            foreach (string value in values)
+            {
+                output.AppendLine(value);
+                if (output.IsFull)
+                {
+                    break;
+                }
+            }
+        }
+
+        private static ZipArchiveEntry GetPowerPointNotesEntry(
+            IDictionary<string, ZipArchiveEntry> entries,
+            NumberedArchiveEntry slide)
+        {
+            string relationshipPath = "ppt/slides/_rels/slide" +
+                slide.Number.ToString(CultureInfo.InvariantCulture) +
+                ".xml.rels";
+            ZipArchiveEntry relationshipEntry;
+            if (entries.TryGetValue(relationshipPath, out relationshipEntry))
+            {
+                XDocument relationships = LoadOfficeXml(
+                    relationshipEntry,
+                    "PowerPoint 幻灯片关系 XML",
+                    LoadOptions.None);
+                foreach (XElement relationship in relationships.Descendants().Where(
+                    element => element.Name.LocalName == "Relationship"))
+                {
+                    string type = GetAttributeValue(relationship, "Type");
+                    if (!type.EndsWith(
+                        "/notesSlide",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (string.Equals(
+                        GetAttributeValue(relationship, "TargetMode"),
+                        "External",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException(
+                            "PPTX 备注关系不能指向外部地址。");
+                    }
+
+                    string resolved = ResolveArchiveRelationshipTarget(
+                        slide.Path,
+                        GetAttributeValue(relationship, "Target"));
+                    ZipArchiveEntry notesEntry;
+                    if (!entries.TryGetValue(resolved, out notesEntry))
+                    {
+                        throw new InvalidDataException(
+                            "PPTX 备注关系指向的文件不存在。");
+                    }
+
+                    return notesEntry;
+                }
+            }
+
+            string fallback = "ppt/notesSlides/notesSlide" +
+                slide.Number.ToString(CultureInfo.InvariantCulture) + ".xml";
+            ZipArchiveEntry fallbackEntry;
+            return entries.TryGetValue(fallback, out fallbackEntry)
+                ? fallbackEntry
+                : null;
+        }
+
+        private static string ExtractXMind(string path)
+        {
+            LimitedTextBuilder output = new LimitedTextBuilder(MaxTextCharacters);
+            using (ZipArchive archive = ZipFile.OpenRead(path))
+            {
+                IDictionary<string, ZipArchiveEntry> entries =
+                    ValidateStructuredArchive(archive, "XMind");
+                ZipArchiveEntry contentEntry;
+                if (entries.TryGetValue("content.json", out contentEntry))
+                {
+                    ExtractModernXMind(output, contentEntry);
+                }
+                else if (entries.TryGetValue("content.xml", out contentEntry))
+                {
+                    ExtractLegacyXMind(output, contentEntry);
+                }
+                else
+                {
+                    throw new InvalidDataException(
+                        "XMind 中缺少内容入口 content.json 或 content.xml。");
+                }
+            }
+
+            return output.ToString();
+        }
+
+        private static void ExtractLegacyXMind(
+            LimitedTextBuilder output,
+            ZipArchiveEntry contentEntry)
+        {
+            XDocument document = LoadOfficeXml(
+                contentEntry,
+                "XMind content.xml",
+                LoadOptions.PreserveWhitespace);
+            XElement root = document.Root;
+            if (root == null || root.Name.LocalName != "xmap-content")
+            {
+                throw new InvalidDataException(
+                    "XMind content.xml 根元素无效。");
+            }
+
+            List<XElement> sheets = root.Elements().Where(
+                element => element.Name.LocalName == "sheet").ToList();
+            if (sheets.Count == 0)
+            {
+                throw new InvalidDataException(
+                    "XMind content.xml 中缺少画布。");
+            }
+
+            int sheetIndex = 0;
+            foreach (XElement sheet in sheets)
+            {
+                sheetIndex++;
+                AppendXMindSheetHeader(
+                    output,
+                    GetDirectChildText(sheet, "title"),
+                    sheetIndex);
+                XElement topic = sheet.Elements().FirstOrDefault(
+                    element => element.Name.LocalName == "topic");
+                if (topic == null)
+                {
+                    throw new InvalidDataException(
+                        "XMind 画布中缺少根主题。");
+                }
+
+                AppendXMindTopicTree(output, topic);
+                if (output.IsFull)
+                {
+                    break;
+                }
+            }
+        }
+
+        private static void ExtractModernXMind(
+            LimitedTextBuilder output,
+            ZipArchiveEntry contentEntry)
+        {
+            string jsonText = ReadArchiveEntryUtf8(
+                contentEntry,
+                "XMind content.json");
+            object root;
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                serializer.MaxJsonLength = (int)MaxOfficeXmlBytes;
+                serializer.RecursionLimit = MaxXMindDepth + 32;
+                root = serializer.DeserializeObject(jsonText);
+            }
+            catch (Exception exception)
+            {
+                throw new InvalidDataException(
+                    "XMind content.json 不是有效的 JSON。",
+                    exception);
+            }
+
+            IList<object> sheets = root as object[];
+            IDictionary<string, object> rootObject =
+                root as IDictionary<string, object>;
+            if (sheets == null && rootObject != null)
+            {
+                object sheetValue;
+                if (rootObject.TryGetValue("sheets", out sheetValue))
+                {
+                    sheets = sheetValue as object[];
+                }
+                else if (GetJsonString(rootObject, "class") == "sheet" ||
+                    rootObject.ContainsKey("rootTopic"))
+                {
+                    sheets = new List<object> { rootObject };
+                }
+            }
+
+            if (sheets == null || sheets.Count == 0)
+            {
+                throw new InvalidDataException(
+                    "XMind content.json 中缺少画布。");
+            }
+
+            for (int index = 0; index < sheets.Count; index++)
+            {
+                IDictionary<string, object> sheet =
+                    sheets[index] as IDictionary<string, object>;
+                if (sheet == null)
+                {
+                    throw new InvalidDataException(
+                        "XMind content.json 包含无效画布。");
+                }
+
+                AppendXMindSheetHeader(
+                    output,
+                    GetJsonString(sheet, "title"),
+                    index + 1);
+                object topicValue;
+                IDictionary<string, object> topic =
+                    sheet.TryGetValue("rootTopic", out topicValue)
+                        ? topicValue as IDictionary<string, object>
+                        : null;
+                if (topic == null)
+                {
+                    throw new InvalidDataException(
+                        "XMind 画布中缺少根主题。");
+                }
+
+                AppendModernXMindTopicTree(output, topic);
+                if (output.IsFull)
+                {
+                    break;
+                }
+            }
+        }
+
+        private static void AppendXMindSheetHeader(
+            LimitedTextBuilder output,
+            string title,
+            int index)
+        {
+            output.AppendLine();
+            output.AppendLine(
+                "===== 画布：" +
+                (string.IsNullOrWhiteSpace(title)
+                    ? index.ToString(CultureInfo.InvariantCulture)
+                    : NormalizeExtractedText(title)) +
+                " =====");
+        }
+
+        private static void AppendModernXMindTopicTree(
+            LimitedTextBuilder output,
+            IDictionary<string, object> rootTopic)
+        {
+            Stack<XMindJsonTopicFrame> pending =
+                new Stack<XMindJsonTopicFrame>();
+            pending.Push(new XMindJsonTopicFrame(rootTopic, 0));
+            int topicCount = 0;
+            while (pending.Count > 0)
+            {
+                XMindJsonTopicFrame frame = pending.Pop();
+                if (frame.Depth > MaxXMindDepth)
+                {
+                    throw new InvalidDataException(
+                        "XMind 主题层级超过 128 层安全限制。");
+                }
+
+                topicCount++;
+                if (topicCount > MaxXMindTopics)
+                {
+                    throw new InvalidDataException(
+                        "XMind 主题数量超过 100,000 个安全限制。");
+                }
+
+                string indent = new string(' ', frame.Depth * 2);
+                string title = GetJsonString(frame.Topic, "title");
+                output.AppendLine(
+                    indent + "- " +
+                    (title.Length == 0 ? "(未命名主题)" : title));
+                string notes = GetModernXMindNotes(frame.Topic);
+                if (notes.Length > 0)
+                {
+                    output.AppendLine(indent + "  [备注] " + notes);
+                }
+
+                if (output.IsFull)
+                {
+                    return;
+                }
+
+                List<IDictionary<string, object>> children =
+                    GetModernXMindChildren(frame.Topic);
+                for (int index = children.Count - 1; index >= 0; index--)
+                {
+                    pending.Push(new XMindJsonTopicFrame(
+                        children[index],
+                        frame.Depth + 1));
+                }
+            }
+        }
+
+        private static List<IDictionary<string, object>> GetModernXMindChildren(
+            IDictionary<string, object> topic)
+        {
+            List<IDictionary<string, object>> result =
+                new List<IDictionary<string, object>>();
+            object childrenValue;
+            IDictionary<string, object> children =
+                topic.TryGetValue("children", out childrenValue)
+                    ? childrenValue as IDictionary<string, object>
+                    : null;
+            if (children == null)
+            {
+                return result;
+            }
+
+            List<string> groups = new List<string>();
+            if (children.ContainsKey("attached"))
+            {
+                groups.Add("attached");
+            }
+            if (children.ContainsKey("detached"))
+            {
+                groups.Add("detached");
+            }
+            groups.AddRange(children.Keys.Where(
+                key => key != "attached" && key != "detached")
+                .OrderBy(key => key, StringComparer.Ordinal));
+
+            foreach (string group in groups)
+            {
+                object[] topics = children[group] as object[];
+                if (topics == null)
+                {
+                    continue;
+                }
+
+                foreach (object value in topics)
+                {
+                    IDictionary<string, object> child =
+                        value as IDictionary<string, object>;
+                    if (child != null)
+                    {
+                        result.Add(child);
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        private static string GetModernXMindNotes(
+            IDictionary<string, object> topic)
+        {
+            object notesValue;
+            IDictionary<string, object> notes =
+                topic.TryGetValue("notes", out notesValue)
+                    ? notesValue as IDictionary<string, object>
+                    : null;
+            if (notes == null)
+            {
+                return string.Empty;
+            }
+
+            string plain = GetModernXMindNoteValue(notes, "plain");
+            return plain.Length > 0
+                ? plain
+                : GetModernXMindNoteValue(notes, "html");
+        }
+
+        private static string GetModernXMindNoteValue(
+            IDictionary<string, object> notes,
+            string name)
+        {
+            object value;
+            if (!notes.TryGetValue(name, out value) || value == null)
+            {
+                return string.Empty;
+            }
+
+            IDictionary<string, object> container =
+                value as IDictionary<string, object>;
+            if (container != null)
+            {
+                return GetJsonString(container, "content");
+            }
+
+            return NormalizeExtractedText(Convert.ToString(
+                value,
+                CultureInfo.InvariantCulture));
+        }
+
+        private static string GetJsonString(
+            IDictionary<string, object> value,
+            string name)
+        {
+            object item;
+            return value != null && value.TryGetValue(name, out item) &&
+                item != null
+                ? NormalizeExtractedText(Convert.ToString(
+                    item,
+                    CultureInfo.InvariantCulture))
+                : string.Empty;
+        }
+
+        private static string ReadArchiveEntryUtf8(
+            ZipArchiveEntry entry,
+            string description)
+        {
+            if (entry == null || entry.Length > MaxOfficeXmlBytes)
+            {
+                throw new InvalidDataException(
+                    description + " 超过 32 MB 安全限制。");
+            }
+
+            using (Stream stream = entry.Open())
+            using (MemoryStream buffer = new MemoryStream(
+                (int)Math.Min(entry.Length, MaxOfficeXmlBytes)))
+            {
+                byte[] block = new byte[8192];
+                int total = 0;
+                while (true)
+                {
+                    int read = stream.Read(block, 0, block.Length);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+
+                    total += read;
+                    if (total > MaxOfficeXmlBytes)
+                    {
+                        throw new InvalidDataException(
+                            description + " 超过 32 MB 安全限制。");
+                    }
+
+                    buffer.Write(block, 0, read);
+                }
+
+                try
+                {
+                    byte[] bytes = buffer.ToArray();
+                    int offset = bytes.Length >= 3 &&
+                        bytes[0] == 0xEF && bytes[1] == 0xBB &&
+                        bytes[2] == 0xBF
+                            ? 3
+                            : 0;
+                    return new UTF8Encoding(false, true).GetString(
+                        bytes,
+                        offset,
+                        bytes.Length - offset);
+                }
+                catch (DecoderFallbackException exception)
+                {
+                    throw new InvalidDataException(
+                        description + " 不是有效的 UTF-8 文本。",
+                        exception);
+                }
+            }
+        }
+
+        private static void AppendXMindTopicTree(
+            LimitedTextBuilder output,
+            XElement rootTopic)
+        {
+            Stack<XMindTopicFrame> pending = new Stack<XMindTopicFrame>();
+            pending.Push(new XMindTopicFrame(rootTopic, 0));
+            int topicCount = 0;
+            while (pending.Count > 0)
+            {
+                XMindTopicFrame frame = pending.Pop();
+                if (frame.Depth > MaxXMindDepth)
+                {
+                    throw new InvalidDataException(
+                        "XMind 主题层级超过 128 层安全限制。");
+                }
+
+                topicCount++;
+                if (topicCount > MaxXMindTopics)
+                {
+                    throw new InvalidDataException(
+                        "XMind 主题数量超过 100,000 个安全限制。");
+                }
+
+                string indent = new string(' ', frame.Depth * 2);
+                string title = GetDirectChildText(frame.Topic, "title");
+                output.AppendLine(
+                    indent + "- " +
+                    (title.Length == 0 ? "(未命名主题)" : title));
+                string notes = GetXMindNotes(frame.Topic);
+                if (notes.Length > 0)
+                {
+                    output.AppendLine(indent + "  [备注] " + notes);
+                }
+
+                if (output.IsFull)
+                {
+                    return;
+                }
+
+                List<XElement> children = GetXMindChildTopics(frame.Topic);
+                for (int index = children.Count - 1; index >= 0; index--)
+                {
+                    pending.Push(new XMindTopicFrame(
+                        children[index],
+                        frame.Depth + 1));
+                }
+            }
+        }
+
+        private static List<XElement> GetXMindChildTopics(XElement topic)
+        {
+            List<XElement> result = new List<XElement>();
+            foreach (XElement children in topic.Elements().Where(
+                element => element.Name.LocalName == "children"))
+            {
+                foreach (XElement topics in children.Elements().Where(
+                    element => element.Name.LocalName == "topics"))
+                {
+                    result.AddRange(topics.Elements().Where(
+                        element => element.Name.LocalName == "topic"));
+                }
+            }
+
+            return result;
+        }
+
+        private static string GetXMindNotes(XElement topic)
+        {
+            XElement notes = topic.Elements().FirstOrDefault(
+                element => element.Name.LocalName == "notes");
+            if (notes == null)
+            {
+                return string.Empty;
+            }
+
+            XElement plain = notes.Elements().FirstOrDefault(
+                element => element.Name.LocalName == "plain");
+            if (plain != null && !string.IsNullOrWhiteSpace(plain.Value))
+            {
+                return NormalizeExtractedText(plain.Value);
+            }
+
+            XElement html = notes.Elements().FirstOrDefault(
+                element => element.Name.LocalName == "html");
+            return html == null
+                ? NormalizeExtractedText(notes.Value)
+                : NormalizeExtractedText(html.Value);
+        }
+
+        private static string GetDirectChildText(XElement parent, string name)
+        {
+            XElement child = parent.Elements().FirstOrDefault(
+                element => element.Name.LocalName == name);
+            return child == null
+                ? string.Empty
+                : NormalizeExtractedText(child.Value);
+        }
+
+        private static string NormalizeExtractedText(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            StringBuilder result = new StringBuilder(value.Length);
+            bool pendingSpace = false;
+            foreach (char character in value)
+            {
+                if (char.IsWhiteSpace(character))
+                {
+                    pendingSpace = result.Length > 0;
+                }
+                else
+                {
+                    if (pendingSpace)
+                    {
+                        result.Append(' ');
+                        pendingSpace = false;
+                    }
+
+                    result.Append(character);
+                }
+            }
+
+            return result.ToString();
+        }
+
+        private static IDictionary<string, ZipArchiveEntry> ValidateStructuredArchive(
+            ZipArchive archive,
+            string description)
+        {
+            if (archive.Entries.Count > MaxArchiveEntries)
+            {
+                throw new InvalidDataException(
+                    description + " 条目数超过 4,096 个安全限制。");
+            }
+
+            Dictionary<string, ZipArchiveEntry> result =
+                new Dictionary<string, ZipArchiveEntry>(
+                    StringComparer.OrdinalIgnoreCase);
+            long expandedBytes = 0;
+            foreach (ZipArchiveEntry entry in archive.Entries)
+            {
+                string entryName = ValidateArchiveEntryName(entry.FullName);
+                if (result.ContainsKey(entryName))
+                {
+                    throw new InvalidDataException(
+                        description + " 包含重复路径：" + entryName);
+                }
+
+                long length = entry.Length;
+                long compressedLength = entry.CompressedLength;
+                if (length < 0 || compressedLength < 0 ||
+                    expandedBytes > MaxArchiveExpandedBytes - length)
+                {
+                    throw new InvalidDataException(
+                        description + " 总解压大小超过 256 MB 安全限制。");
+                }
+
+                expandedBytes += length;
+                if (length >= MinCompressionRatioCheckBytes &&
+                    (compressedLength == 0 ||
+                     length > compressedLength * MaxCompressionRatio))
+                {
+                    throw new InvalidDataException(
+                        description + " 条目压缩比超过 200:1 安全限制：" +
+                        entryName);
+                }
+
+                result.Add(entryName, entry);
+            }
+
+            return result;
+        }
+
+        private static string ValidateArchiveEntryName(string value)
+        {
+            if (string.IsNullOrEmpty(value) ||
+                value.Length > MaxArchiveEntryNameCharacters ||
+                value[0] == '/' ||
+                value.IndexOf('\\') >= 0 ||
+                value.IndexOf(':') >= 0)
+            {
+                throw new InvalidDataException("压缩包包含不安全或过长的条目路径。");
+            }
+
+            string candidate = value.EndsWith("/", StringComparison.Ordinal)
+                ? value.Substring(0, value.Length - 1)
+                : value;
+            if (candidate.Length == 0)
+            {
+                throw new InvalidDataException("压缩包包含空条目路径。");
+            }
+
+            string[] segments = candidate.Split('/');
+            foreach (string segment in segments)
+            {
+                if (segment.Length == 0 || segment == "." || segment == "..")
+                {
+                    throw new InvalidDataException(
+                        "压缩包包含未规范化或危险的条目路径：" + value);
+                }
+            }
+
+            return candidate;
+        }
+
+        private static List<NumberedArchiveEntry> GetNumberedEntries(
+            IDictionary<string, ZipArchiveEntry> entries,
+            string prefix,
+            string suffix,
+            string description)
+        {
+            List<NumberedArchiveEntry> result = new List<NumberedArchiveEntry>();
+            HashSet<int> numbers = new HashSet<int>();
+            foreach (KeyValuePair<string, ZipArchiveEntry> pair in entries)
+            {
+                string name = pair.Key;
+                if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                    !name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                string numeric = name.Substring(
+                    prefix.Length,
+                    name.Length - prefix.Length - suffix.Length);
+                int number;
+                if (numeric.Length == 0 ||
+                    numeric.Any(character => character < '0' || character > '9') ||
+                    !int.TryParse(
+                        numeric,
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out number) ||
+                    number <= 0)
+                {
+                    throw new InvalidDataException(
+                        description + "编号无效：" + name);
+                }
+
+                if (!numbers.Add(number))
+                {
+                    throw new InvalidDataException(
+                        description + "编号重复：" +
+                        number.ToString(CultureInfo.InvariantCulture));
+                }
+
+                result.Add(new NumberedArchiveEntry(number, name, pair.Value));
+            }
+
+            result.Sort(delegate(NumberedArchiveEntry left, NumberedArchiveEntry right)
+            {
+                return left.Number.CompareTo(right.Number);
+            });
+            return result;
+        }
+
+        private static string ResolveArchiveRelationshipTarget(
+            string sourcePath,
+            string target)
+        {
+            if (string.IsNullOrWhiteSpace(target) ||
+                target.IndexOf('\\') >= 0 ||
+                target.IndexOf(':') >= 0)
+            {
+                throw new InvalidDataException(
+                    "压缩包关系包含不安全的目标路径。");
+            }
+
+            List<string> segments = new List<string>();
+            if (!target.StartsWith("/", StringComparison.Ordinal))
+            {
+                int slash = sourcePath.LastIndexOf('/');
+                if (slash >= 0)
+                {
+                    segments.AddRange(sourcePath.Substring(0, slash).Split('/'));
+                }
+            }
+
+            foreach (string segment in target.TrimStart('/').Split('/'))
+            {
+                if (segment.Length == 0 || segment == ".")
+                {
+                    continue;
+                }
+
+                if (segment == "..")
+                {
+                    if (segments.Count == 0)
+                    {
+                        throw new InvalidDataException(
+                            "压缩包关系目标越出包根目录。");
+                    }
+
+                    segments.RemoveAt(segments.Count - 1);
+                }
+                else
+                {
+                    segments.Add(segment);
+                }
+            }
+
+            string resolved = string.Join("/", segments.ToArray());
+            return ValidateArchiveEntryName(resolved);
+        }
+
         private static string GetCellValue(XElement cell, IList<string> sharedStrings)
         {
             string type = GetAttributeValue(cell, "t");
@@ -655,6 +1627,49 @@ namespace FilePromptAIWin7
                     entry.FullName,
                     name,
                     StringComparison.OrdinalIgnoreCase));
+        }
+
+        private sealed class NumberedArchiveEntry
+        {
+            public NumberedArchiveEntry(
+                int number,
+                string path,
+                ZipArchiveEntry entry)
+            {
+                Number = number;
+                Path = path;
+                Entry = entry;
+            }
+
+            public int Number { get; private set; }
+            public string Path { get; private set; }
+            public ZipArchiveEntry Entry { get; private set; }
+        }
+
+        private sealed class XMindTopicFrame
+        {
+            public XMindTopicFrame(XElement topic, int depth)
+            {
+                Topic = topic;
+                Depth = depth;
+            }
+
+            public XElement Topic { get; private set; }
+            public int Depth { get; private set; }
+        }
+
+        private sealed class XMindJsonTopicFrame
+        {
+            public XMindJsonTopicFrame(
+                IDictionary<string, object> topic,
+                int depth)
+            {
+                Topic = topic;
+                Depth = depth;
+            }
+
+            public IDictionary<string, object> Topic { get; private set; }
+            public int Depth { get; private set; }
         }
 
         private static InputItem ExtractPdf(string path, string name, long originalBytes)

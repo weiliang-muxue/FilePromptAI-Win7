@@ -1,5 +1,8 @@
 param(
-    [string]$Version = '1.17'
+    [string]$Version = '1.17',
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$AcceptanceReportPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,10 +20,16 @@ $archiveName = "FilePromptAI-Win7-Full-v$Version.zip"
 $archivePath = Join-Path $projectRoot $archiveName
 $sidecarPath = "$archivePath.sha256.txt"
 $verifyScript = Join-Path $projectRoot 'tests\VerifyReleaseSha256.ps1'
+$releaseEvidenceScript = Join-Path $projectRoot 'tests\ReleaseAcceptanceEvidence.ps1'
 $receiptRelativePath = "tests/build-artifacts/release/ReleaseCandidate-v$Version.txt"
 $receiptPath = Join-Path $projectRoot ($receiptRelativePath.Replace('/', '\'))
 $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
+
+if (-not (Test-Path -LiteralPath $releaseEvidenceScript -PathType Leaf)) {
+    throw "The release evidence helper is missing: $releaseEvidenceScript"
+}
+. $releaseEvidenceScript
 
 function Read-ReleaseReceipt {
     param([string]$Path)
@@ -38,13 +47,16 @@ function Read-ReleaseReceipt {
     }
     $text = $strictUtf8.GetString($bytes)
     $pattern = '\A' +
-        'FilePromptAI-Release-Receipt: 1\r\n' +
+        'FilePromptAI-Release-Receipt: 2\r\n' +
         'Suite: tests/RunAllSmokeTests\.ps1\r\n' +
         'Result: PASS\r\n' +
         'Version: (?<Version>[0-9A-Za-z](?:[0-9A-Za-z._-]{0,30}[0-9A-Za-z])?)\r\n' +
         'Candidate-Commit: (?<Candidate>[0-9a-f]{40}(?:[0-9a-f]{24})?)\r\n' +
         'Archive-Name: (?<Archive>[0-9A-Za-z._-]+)\r\n' +
-        'Archive-SHA256: (?<Hash>[0-9A-F]{64})\r\n\z'
+        'Archive-SHA256: (?<Hash>[0-9A-F]{64})\r\n' +
+        'Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256\.txt\r\n' +
+        'Package-Manifest-SHA256: (?<ManifestHash>[0-9A-F]{64})\r\n' +
+        'Package-Manifest-Entry-Count: (?<ManifestEntryCount>[1-9][0-9]{0,8})\r\n\z'
     $match = [Text.RegularExpressions.Regex]::Match(
         $text,
         $pattern,
@@ -53,11 +65,21 @@ function Read-ReleaseReceipt {
         throw 'The release-candidate receipt has an invalid or non-canonical format.'
     }
 
+    $manifestEntryCount = 0
+    if (-not [int]::TryParse(
+        $match.Groups['ManifestEntryCount'].Value,
+        [Globalization.NumberStyles]::None,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [ref]$manifestEntryCount)) {
+        throw 'The release-candidate receipt has an invalid package manifest entry count.'
+    }
     return [pscustomobject]@{
         Version = $match.Groups['Version'].Value
         Candidate = $match.Groups['Candidate'].Value
         Archive = $match.Groups['Archive'].Value
         Hash = $match.Groups['Hash'].Value
+        ManifestHash = $match.Groups['ManifestHash'].Value
+        ManifestEntryCount = $manifestEntryCount
     }
 }
 
@@ -86,6 +108,16 @@ $receipt = Read-ReleaseReceipt -Path $receiptPath
 if (-not [string]::Equals($receipt.Version, $Version, [StringComparison]::Ordinal) -or
     -not [string]::Equals($receipt.Archive, $archiveName, [StringComparison]::Ordinal)) {
     throw 'The release-candidate receipt is for a different release version or archive.'
+}
+$acceptance = Read-FilePromptAcceptanceEvidence `
+    -Path $AcceptanceReportPath `
+    -Version $Version
+if (-not [string]::Equals(
+        $acceptance.ManifestSha256,
+        $receipt.ManifestHash,
+        [StringComparison]::Ordinal) -or
+    $acceptance.ManifestEntryCount -ne $receipt.ManifestEntryCount) {
+    throw 'The Windows 7 acceptance report package identity does not match the successfully tested release receipt.'
 }
 
 $headCommit = (& git -C $projectRoot rev-parse --verify HEAD 2>&1 | Out-String).Trim()
@@ -134,12 +166,21 @@ if ($LASTEXITCODE -ne 0 -or
     throw 'RELEASE-SHA256.txt must be marked -text in .gitattributes before sealing.'
 }
 
-$archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+$archiveIdentity = Read-FilePromptReleaseArchiveIdentity `
+    -ArchivePath $archivePath
+$archiveHash = $archiveIdentity.ArchiveSha256
 if (-not [string]::Equals(
     $archiveHash,
     $receipt.Hash,
     [StringComparison]::Ordinal)) {
     throw 'The release ZIP no longer matches the successfully tested candidate receipt.'
+}
+if (-not [string]::Equals(
+        $archiveIdentity.ManifestSha256,
+        $receipt.ManifestHash,
+        [StringComparison]::Ordinal) -or
+    $archiveIdentity.ManifestEntryCount -ne $receipt.ManifestEntryCount) {
+    throw 'The final release ZIP package manifest identity does not match the successful receipt.'
 }
 $expectedText = "$archiveHash *$archiveName`r`n"
 $sidecarBytes = [IO.File]::ReadAllBytes($sidecarPath)
@@ -180,5 +221,5 @@ if ($LASTEXITCODE -ne 0) {
     throw 'The sealed release SHA-256 record failed verification.'
 }
 
-Write-Host "SEALED | $manifestPath | candidate=$headCommit | sha256=$archiveHash"
+Write-Host "SEALED | $manifestPath | candidate=$headCommit | sha256=$archiveHash | manifestSha256=$($receipt.ManifestHash) | acceptanceSha256=$($acceptance.ReportSha256)"
 Write-Host 'Commit only RELEASE-SHA256.txt, then create the annotated release tag.'

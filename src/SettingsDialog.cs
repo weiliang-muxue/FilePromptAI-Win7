@@ -15,6 +15,7 @@ namespace FilePromptAIWin7
         private Label extensionSummaryLabel;
         private CheckBox showApiKeyCheckBox;
         private Control pendingFocusControl;
+        private string settingsWriteProtectionMessage;
 
         public TextBox EndpointTextBox { get; private set; }
 
@@ -49,6 +50,8 @@ namespace FilePromptAIWin7
         public Button RestoreSessionsButton { get; private set; }
 
         public Button UninstallButton { get; private set; }
+
+        public Button SaveButton { get; private set; }
 
         public ComboBox SendShortcutComboBox { get; private set; }
 
@@ -113,14 +116,14 @@ namespace FilePromptAIWin7
             actions.WrapContents = false;
             actions.Padding = new Padding(0, 6, 0, 0);
 
-            Button saveButton = CreateButton("保存并关闭", 108);
-            saveButton.DialogResult = DialogResult.OK;
-            saveButton.BackColor = UiTheme.Accent;
-            saveButton.ForeColor = Color.White;
-            saveButton.FlatAppearance.BorderSize = 0;
+            SaveButton = CreateButton("保存并关闭", 108);
+            SaveButton.DialogResult = DialogResult.OK;
+            SaveButton.BackColor = UiTheme.Accent;
+            SaveButton.ForeColor = Color.White;
+            SaveButton.FlatAppearance.BorderSize = 0;
             Button cancelButton = CreateButton("取消", 82);
             cancelButton.DialogResult = DialogResult.Cancel;
-            actions.Controls.Add(saveButton);
+            actions.Controls.Add(SaveButton);
             actions.Controls.Add(cancelButton);
 
             root.Controls.Add(body, 0, 0);
@@ -128,7 +131,7 @@ namespace FilePromptAIWin7
             root.Controls.Add(actions, 0, 2);
             Controls.Add(root);
 
-            AcceptButton = saveButton;
+            AcceptButton = SaveButton;
             CancelButton = cancelButton;
             Shown += delegate { FocusPreparedControl(); };
             SetSendShortcutMode("Both");
@@ -174,7 +177,7 @@ namespace FilePromptAIWin7
             string validationMessage)
         {
             ResetApiKeyVisibility();
-            validationLabel.Text = validationMessage ?? string.Empty;
+            SetValidationMessage(validationMessage);
             Control focusControl = ResolveFocusControl(focusField);
             SelectPage(PageIndexForControl(focusControl));
             pendingFocusControl = focusControl;
@@ -186,10 +189,58 @@ namespace FilePromptAIWin7
             string validationMessage)
         {
             ResetApiKeyVisibility();
-            validationLabel.Text = validationMessage ?? string.Empty;
+            SetValidationMessage(validationMessage);
             SelectPage(PageIndexForControl(focusControl));
             pendingFocusControl = focusControl;
             FocusPreparedControlWhenVisible();
+        }
+
+        public void SetSettingsWriteProtection(
+            bool writeProtected,
+            string reason)
+        {
+            settingsWriteProtectionMessage = writeProtected
+                ? "只读保护：设置文件无法安全读取或备份，本次运行不能修改或保存。"
+                : string.Empty;
+            if (writeProtected)
+            {
+                SetEnabled(
+                    new Control[]
+                    {
+                        EndpointTextBox,
+                        ApiKeyTextBox,
+                        ModelTextBox,
+                        SystemPromptTextBox,
+                        TemperatureEnabledCheckBox,
+                        TemperatureNumericUpDown,
+                        TopPEnabledCheckBox,
+                        TopPNumericUpDown,
+                        MaxOutputTokensEnabledCheckBox,
+                        MaxOutputTokensNumericUpDown,
+                        FetchModelsButton,
+                        TestConnectionButton,
+                        ModelProfilesButton,
+                        SendShortcutComboBox,
+                        SaveButton
+                    },
+                    false);
+            }
+            else if (SaveButton != null)
+            {
+                SaveButton.Enabled = true;
+            }
+            validationLabel.AccessibleDescription = writeProtected
+                ? reason ?? string.Empty
+                : string.Empty;
+            SetValidationMessage(string.Empty);
+        }
+
+        private void SetValidationMessage(string value)
+        {
+            validationLabel.Text = !string.IsNullOrWhiteSpace(
+                settingsWriteProtectionMessage)
+                ? settingsWriteProtectionMessage
+                : value ?? string.Empty;
         }
 
         private void ResetApiKeyVisibility()
@@ -856,6 +907,19 @@ namespace FilePromptAIWin7
             actions.Padding = new Padding(0, 4, 0, 0);
             actions.Margin = new Padding(0);
             return actions;
+        }
+
+        private static void SetEnabled(
+            IEnumerable<Control> controls,
+            bool enabled)
+        {
+            foreach (Control control in controls)
+            {
+                if (control != null)
+                {
+                    control.Enabled = enabled;
+                }
+            }
         }
 
         private static Button CreateButton(string text, int width)

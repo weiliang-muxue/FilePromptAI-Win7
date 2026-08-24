@@ -18,9 +18,16 @@ $packageBuildScript = Join-Path $projectRoot 'build-offline-package.ps1'
 $archiveName = "FilePromptAI-Win7-Full-v$Version.zip"
 $archivePath = Join-Path $projectRoot $archiveName
 $sidecarPath = "$archivePath.sha256.txt"
+$stagingRoot = Join-Path $projectRoot "FilePromptAI-offline-release-v$Version"
+$releaseEvidenceScript = Join-Path $testRoot 'ReleaseAcceptanceEvidence.ps1'
 $receiptRelativePath = "tests/build-artifacts/release/ReleaseCandidate-v$Version.txt"
 $receiptPath = Join-Path $projectRoot ($receiptRelativePath.Replace('/', '\'))
 $candidateCommit = ''
+
+if (-not (Test-Path -LiteralPath $releaseEvidenceScript -PathType Leaf)) {
+    throw "The release evidence helper is missing: $releaseEvidenceScript"
+}
+. $releaseEvidenceScript
 
 function Assert-CleanCandidate {
     param([string]$ExpectedCommit)
@@ -133,13 +140,16 @@ foreach ($name in $packageScripts) {
 
 if ($WriteReleaseReceipt) {
     Assert-CleanCandidate -ExpectedCommit $candidateCommit | Out-Null
-    foreach ($required in @($archivePath, $sidecarPath)) {
+    $stagingManifestPath = Join-Path $stagingRoot 'PACKAGE-CHECKSUMS-SHA256.txt'
+    foreach ($required in @($archivePath, $sidecarPath, $stagingManifestPath)) {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
             throw "The tested release artifact is missing: $required"
         }
     }
 
-    $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+    $archiveIdentity = Read-FilePromptReleaseArchiveIdentity `
+        -ArchivePath $archivePath
+    $archiveHash = $archiveIdentity.ArchiveSha256
     $expectedSidecar = "$archiveHash *$archiveName`r`n"
     $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
     $sidecarBytes = [IO.File]::ReadAllBytes($sidecarPath)
@@ -157,14 +167,27 @@ if ($WriteReleaseReceipt) {
         throw 'The tested release ZIP sidecar is not canonical.'
     }
 
+    $stagingManifestIdentity = Read-FilePromptPackageManifestIdentity `
+        -Path $stagingManifestPath
+    if (-not [string]::Equals(
+            $stagingManifestIdentity.Sha256,
+            $archiveIdentity.ManifestSha256,
+            [StringComparison]::Ordinal) -or
+        $stagingManifestIdentity.EntryCount -ne $archiveIdentity.ManifestEntryCount) {
+        throw 'The final staging directory and ZIP contain different package checksum manifests.'
+    }
+
     $receiptText =
-        "FilePromptAI-Release-Receipt: 1`r`n" +
+        "FilePromptAI-Release-Receipt: 2`r`n" +
         "Suite: tests/RunAllSmokeTests.ps1`r`n" +
         "Result: PASS`r`n" +
         "Version: $Version`r`n" +
         "Candidate-Commit: $candidateCommit`r`n" +
         "Archive-Name: $archiveName`r`n" +
-        "Archive-SHA256: $archiveHash`r`n"
+        "Archive-SHA256: $archiveHash`r`n" +
+        "Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256.txt`r`n" +
+        "Package-Manifest-SHA256: $($archiveIdentity.ManifestSha256)`r`n" +
+        "Package-Manifest-Entry-Count: $($archiveIdentity.ManifestEntryCount)`r`n"
     $receiptDirectory = Split-Path -Parent $receiptPath
     New-Item -ItemType Directory -Path $receiptDirectory -Force | Out-Null
     $temporaryReceipt = "$receiptPath.$([Guid]::NewGuid().ToString('N')).tmp"
@@ -185,7 +208,7 @@ if ($WriteReleaseReceipt) {
             Remove-Item -LiteralPath $temporaryReceipt -Force
         }
     }
-    Write-Host "RECEIPT | $receiptPath | candidate=$candidateCommit | sha256=$archiveHash"
+    Write-Host "RECEIPT | $receiptPath | candidate=$candidateCommit | sha256=$archiveHash | manifestSha256=$($archiveIdentity.ManifestSha256) | manifestEntries=$($archiveIdentity.ManifestEntryCount)"
 }
 
 $suiteCount = $scripts.Count + $packageScripts.Count

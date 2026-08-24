@@ -1,8 +1,11 @@
 using System;
 using System.Collections;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 internal static class GenerationSettingsSmokeTest
@@ -10,6 +13,18 @@ internal static class GenerationSettingsSmokeTest
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args != null && args.Length == 4 &&
+            args[0] == "--hold-exclusive-lock")
+        {
+            return HoldFileLock(args[1], args[2], args[3], true);
+        }
+
+        if (args != null && args.Length == 4 &&
+            args[0] == "--hold-readable-lock")
+        {
+            return HoldFileLock(args[1], args[2], args[3], false);
+        }
+
         string dataRoot = Path.Combine(
             Path.GetTempPath(),
             "FilePromptAIGenerationSettings-" + Guid.NewGuid().ToString("N"));
@@ -162,6 +177,176 @@ internal static class GenerationSettingsSmokeTest
             settingsPath,
             new[] { "0", "1048577", "1.5", "invalid" });
         Assert(Directory.Exists(dataRoot), "AppSettings uses isolated data root");
+        TestAppSettingsCorruption(settingsType, dataRoot);
+        TestAppSettingsExclusiveLock(settingsType, dataRoot);
+    }
+
+    private static void TestAppSettingsCorruption(
+        Type settingsType,
+        string dataRoot)
+    {
+        string previousRoot = Environment.GetEnvironmentVariable(
+            "FILEPROMPTAI_DATA_ROOT");
+        string root = Path.Combine(dataRoot, "damaged-settings");
+        Directory.CreateDirectory(root);
+        Environment.SetEnvironmentVariable("FILEPROMPTAI_DATA_ROOT", root);
+        try
+        {
+            string path = (string)settingsType.GetProperty(
+                "SettingsPath",
+                BindingFlags.Static | BindingFlags.Public).GetValue(null, null);
+            byte[] damaged = Encoding.UTF8.GetBytes("<FilePromptAISettings");
+            File.WriteAllBytes(path, damaged);
+            object loaded = InvokeStaticPublic(settingsType, "Load");
+            Assert(
+                !Convert.ToBoolean(GetProperty(loaded, "IsWriteBlocked")) &&
+                !File.Exists(path) &&
+                Directory.GetFiles(
+                    root,
+                    "settings.xml.corrupt-*.xml").Length == 1,
+                "damaged AppSettings safely preserved before rebuild");
+
+            string blockedRoot = Path.Combine(dataRoot, "blocked-damage");
+            Directory.CreateDirectory(blockedRoot);
+            Environment.SetEnvironmentVariable(
+                "FILEPROMPTAI_DATA_ROOT",
+                blockedRoot);
+            path = (string)settingsType.GetProperty(
+                "SettingsPath",
+                BindingFlags.Static | BindingFlags.Public).GetValue(null, null);
+            File.WriteAllBytes(path, damaged);
+            string ready = path + ".ready";
+            string release = path + ".release";
+            Process holder = StartLockHolder(
+                "--hold-readable-lock",
+                path,
+                ready,
+                release);
+            object protectedSettings;
+            try
+            {
+                WaitForLockHolder(holder, ready);
+                protectedSettings = InvokeStaticPublic(settingsType, "Load");
+                Assert(
+                    Convert.ToBoolean(GetProperty(
+                        protectedSettings,
+                        "IsWriteBlocked")) &&
+                    ((string)GetProperty(
+                        protectedSettings,
+                        "LoadWarning")).IndexOf(
+                            "无法创建安全备份",
+                            StringComparison.Ordinal) >= 0,
+                    "failed AppSettings damage backup enables protection");
+                Assert(
+                    damaged.SequenceEqual(File.ReadAllBytes(path)) &&
+                    Directory.GetFiles(
+                        blockedRoot,
+                        "settings.xml.corrupt-*.xml").Length == 0,
+                    "failed AppSettings damage backup preserves bytes");
+            }
+            finally
+            {
+                ReleaseLockHolder(holder, release);
+            }
+
+            Exception saveFailure = CaptureFailure(delegate
+            {
+                InvokePublic(protectedSettings, "Save");
+            });
+            Assert(
+                saveFailure is InvalidOperationException &&
+                damaged.SequenceEqual(File.ReadAllBytes(path)),
+                "protected damaged AppSettings rejects later save");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(
+                "FILEPROMPTAI_DATA_ROOT",
+                previousRoot);
+        }
+    }
+
+    private static void TestAppSettingsExclusiveLock(
+        Type settingsType,
+        string dataRoot)
+    {
+        string previousRoot = Environment.GetEnvironmentVariable(
+            "FILEPROMPTAI_DATA_ROOT");
+        string root = Path.Combine(dataRoot, "locked-settings");
+        Directory.CreateDirectory(root);
+        Environment.SetEnvironmentVariable("FILEPROMPTAI_DATA_ROOT", root);
+        try
+        {
+            object expected = Activator.CreateInstance(settingsType, true);
+            SetProperty(expected, "EndpointUrl", "http://127.0.0.1/locked");
+            SetProperty(expected, "ApiKey", "locked-key");
+            SetProperty(expected, "ModelName", "locked-model");
+            InvokePublic(expected, "Save");
+            string path = (string)settingsType.GetProperty(
+                "SettingsPath",
+                BindingFlags.Static | BindingFlags.Public).GetValue(null, null);
+            byte[] original = File.ReadAllBytes(path);
+            string ready = path + ".ready";
+            string release = path + ".release";
+            Process holder = StartLockHolder(
+                "--hold-exclusive-lock",
+                path,
+                ready,
+                release);
+            object protectedSettings;
+            try
+            {
+                WaitForLockHolder(holder, ready);
+                protectedSettings = InvokeStaticPublic(settingsType, "Load");
+                Assert(
+                    Convert.ToBoolean(GetProperty(
+                        protectedSettings,
+                        "IsWriteBlocked")),
+                    "exclusive AppSettings lock enables sticky protection");
+                Assert(
+                    ((string)GetProperty(
+                        protectedSettings,
+                        "LoadWarning")).IndexOf(
+                            "无法安全读取",
+                            StringComparison.Ordinal) >= 0,
+                    "exclusive AppSettings lock reports access warning");
+                Assert(
+                    File.Exists(path) &&
+                    Directory.GetFiles(
+                        root,
+                        "settings.xml.corrupt-*.xml").Length == 0,
+                    "exclusive AppSettings lock creates no corrupt backup");
+            }
+            finally
+            {
+                ReleaseLockHolder(holder, release);
+            }
+
+            Assert(
+                original.SequenceEqual(File.ReadAllBytes(path)),
+                "exclusive AppSettings lock preserves original bytes");
+            object loaded = InvokeStaticPublic(settingsType, "Load");
+            Assert(
+                (string)GetProperty(loaded, "EndpointUrl") ==
+                    "http://127.0.0.1/locked" &&
+                (string)GetProperty(loaded, "ApiKey") == "locked-key" &&
+                (string)GetProperty(loaded, "ModelName") == "locked-model",
+                "AppSettings loads after exclusive lock release");
+            Exception saveFailure = CaptureFailure(delegate
+            {
+                InvokePublic(protectedSettings, "Save");
+            });
+            Assert(
+                saveFailure is InvalidOperationException &&
+                original.SequenceEqual(File.ReadAllBytes(path)),
+                "AppSettings write protection remains sticky after release");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(
+                "FILEPROMPTAI_DATA_ROOT",
+                previousRoot);
+        }
     }
 
     private static void AssertInvalidDoubleSettings(
@@ -566,6 +751,115 @@ internal static class GenerationSettingsSmokeTest
             string candidate = Path.Combine(applicationDirectory, fileName);
             return File.Exists(candidate) ? Assembly.LoadFrom(candidate) : null;
         };
+    }
+
+    private static Exception CaptureFailure(Action action)
+    {
+        try
+        {
+            action();
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return Unwrap(exception);
+        }
+    }
+
+    private static Process StartLockHolder(
+        string mode,
+        string path,
+        string ready,
+        string release)
+    {
+        ProcessStartInfo startInfo = new ProcessStartInfo();
+        startInfo.FileName = Assembly.GetExecutingAssembly().Location;
+        startInfo.Arguments = mode + " " + QuoteArgument(path) + " " +
+            QuoteArgument(ready) + " " + QuoteArgument(release);
+        startInfo.UseShellExecute = false;
+        startInfo.CreateNoWindow = true;
+        return Process.Start(startInfo);
+    }
+
+    private static void WaitForLockHolder(Process holder, string ready)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!File.Exists(ready))
+        {
+            if (holder == null || holder.HasExited)
+            {
+                throw new InvalidOperationException(
+                    "AppSettings lock holder exited before acquiring the lock.");
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TimeoutException(
+                    "Timed out waiting for AppSettings file lock.");
+            }
+
+            Thread.Sleep(25);
+        }
+    }
+
+    private static void ReleaseLockHolder(Process holder, string release)
+    {
+        File.WriteAllText(release, "release", Encoding.ASCII);
+        if (holder == null)
+        {
+            return;
+        }
+
+        if (!holder.WaitForExit(5000))
+        {
+            holder.Kill();
+            holder.WaitForExit();
+        }
+
+        int exitCode = holder.ExitCode;
+        holder.Dispose();
+        Assert(exitCode == 0, "AppSettings lock holder exits");
+    }
+
+    private static int HoldFileLock(
+        string path,
+        string ready,
+        string release,
+        bool exclusive)
+    {
+        try
+        {
+            using (FileStream stream = new FileStream(
+                path,
+                FileMode.Open,
+                exclusive ? FileAccess.ReadWrite : FileAccess.Read,
+                exclusive ? FileShare.None : FileShare.Read))
+            {
+                File.WriteAllText(ready, "ready", Encoding.ASCII);
+                DateTime deadline = DateTime.UtcNow.AddSeconds(15);
+                while (!File.Exists(release))
+                {
+                    if (DateTime.UtcNow >= deadline)
+                    {
+                        return 2;
+                    }
+
+                    Thread.Sleep(25);
+                }
+            }
+
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(exception);
+            return 3;
+        }
+    }
+
+    private static string QuoteArgument(string value)
+    {
+        return "\"" + value.Replace("\"", "\\\"") + "\"";
     }
 
     private static object GetField(Type type, object instance, string name)

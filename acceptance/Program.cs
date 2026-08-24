@@ -236,6 +236,7 @@ internal static class AcceptanceProgram
                 reportPath,
                 packageRoot,
                 isolatedDataRoot,
+                verifiedPackage,
                 passed,
                 exitCode);
             WriteReportChecksum(reportPath, packageRoot);
@@ -254,6 +255,7 @@ internal static class AcceptanceProgram
                     reportPath,
                     packageRoot,
                     isolatedDataRoot,
+                    verifiedPackage,
                     false,
                     exitCode);
             }
@@ -798,6 +800,7 @@ internal static class AcceptanceProgram
                 new Dictionary<string, string>(StringComparer.Ordinal);
             FileStream manifestStream = lease.LockFile(
                 manifestRelativePath);
+            string manifestSha256 = ComputeSha256(manifestStream);
             string[] lines = ReadLockedUtf8Lines(manifestStream);
             for (int lineIndex = 0; lineIndex < lines.Length; lineIndex++)
             {
@@ -981,6 +984,9 @@ internal static class AcceptanceProgram
 
             lease.Seal(entries.Keys);
             lease.AssertIntact();
+            lease.SetVerifiedManifestIdentity(
+                manifestSha256,
+                entries.Count);
             lease.Evidence = "manifestEntries=" + entries.Count.ToString(
                 CultureInfo.InvariantCulture) +
                 "; embeddedTrustedEntries=" + trustedEntries.Count.ToString(
@@ -1960,6 +1966,7 @@ internal static class AcceptanceProgram
         string reportPath,
         string packageRoot,
         string isolatedDataRoot,
+        VerifiedPackageLease verifiedPackage,
         bool passed,
         int exitCode)
     {
@@ -1972,7 +1979,7 @@ internal static class AcceptanceProgram
         {
             writer.WriteStartDocument();
             writer.WriteStartElement("filePromptAiAcceptance");
-            writer.WriteAttributeString("schemaVersion", "1");
+            writer.WriteAttributeString("schemaVersion", "2");
             writer.WriteAttributeString("result", passed ? "pass" : "fail");
             writer.WriteAttributeString(
                 "exitCode",
@@ -1989,6 +1996,35 @@ internal static class AcceptanceProgram
             WriteElement(writer, "isolatedDataRoot", isolatedDataRoot);
             WriteElement(writer, "is64BitOperatingSystem", Is64BitOperatingSystem().ToString());
             WriteElement(writer, "clrVersion", Environment.Version.ToString());
+
+            writer.WriteStartElement("packageIdentity");
+            if (passed)
+            {
+                if (verifiedPackage == null ||
+                    !verifiedPackage.HasVerifiedManifestIdentity)
+                {
+                    throw new InvalidOperationException(
+                        "A passing report requires a verified package manifest identity.");
+                }
+                writer.WriteAttributeString("status", "verified");
+                writer.WriteAttributeString(
+                    "manifestName",
+                    "PACKAGE-CHECKSUMS-SHA256.txt");
+                writer.WriteAttributeString(
+                    "manifestSha256",
+                    verifiedPackage.ManifestSha256);
+                writer.WriteAttributeString(
+                    "manifestEntryCount",
+                    verifiedPackage.ManifestEntryCount.ToString(
+                        CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                // A failed run must not expose an identity that a release gate
+                // could mistake for proof of an accepted package.
+                writer.WriteAttributeString("status", "unverified");
+            }
+            writer.WriteEndElement();
 
             writer.WriteStartElement("checks");
             for (int index = 0; index < Results.Count; index++)
@@ -2102,6 +2138,12 @@ internal static class AcceptanceProgram
 
         public string Evidence { get; set; }
 
+        public bool HasVerifiedManifestIdentity { get; private set; }
+
+        public string ManifestSha256 { get; private set; }
+
+        public int ManifestEntryCount { get; private set; }
+
         public int LockedFileCount
         {
             get { return files.Count; }
@@ -2117,6 +2159,24 @@ internal static class AcceptanceProgram
             directories = new Dictionary<string, LockedDirectory>(
                 StringComparer.Ordinal);
             Evidence = string.Empty;
+            ManifestSha256 = string.Empty;
+        }
+
+        public void SetVerifiedManifestIdentity(
+            string manifestSha256,
+            int manifestEntryCount)
+        {
+            ThrowIfDisposed();
+            if (!sealedSet ||
+                !IsUpperHexSha256(manifestSha256) ||
+                manifestEntryCount <= 0)
+            {
+                throw new InvalidOperationException(
+                    "The package manifest identity is not verified and canonical.");
+            }
+            ManifestSha256 = manifestSha256;
+            ManifestEntryCount = manifestEntryCount;
+            HasVerifiedManifestIdentity = true;
         }
 
         public void LockDirectories()

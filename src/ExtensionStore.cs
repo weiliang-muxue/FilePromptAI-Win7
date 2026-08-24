@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -21,11 +22,28 @@ namespace FilePromptAIWin7
             new UTF8Encoding(true);
         private static readonly byte[] Entropy = Encoding.UTF8.GetBytes(
             "FilePromptAIWin7.ExtensionSettings.v1");
+        private static readonly object ProtectionSync = new object();
+        private static readonly Dictionary<string, string> WriteBlocks =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         private readonly JavaScriptSerializer json;
 
         public string SettingsPath { get; private set; }
         public string LoadWarning { get; private set; }
+
+        public bool IsWriteProtected
+        {
+            get
+            {
+                return !string.IsNullOrEmpty(
+                    GetWriteBlockReason(SettingsPath));
+            }
+        }
+
+        public string WriteProtectionReason
+        {
+            get { return GetWriteBlockReason(SettingsPath); }
+        }
 
         public ExtensionStore()
             : this(Path.Combine(AppDataPath.Root, "extensions.xml"))
@@ -42,54 +60,102 @@ namespace FilePromptAIWin7
 
         public ExtensionSettings Load()
         {
-            LoadWarning = string.Empty;
-            if (!File.Exists(SettingsPath))
-            {
-                return new ExtensionSettings();
-            }
+            LoadWarning = GetWriteBlockReason(SettingsPath);
 
             try
             {
-                FileInfo info = new FileInfo(SettingsPath);
-                if (info.Length > MaximumSettingsBytes)
+                XDocument document = ReadDocument();
+                if (document == null)
                 {
-                    throw new InvalidDataException("扩展配置超过 8 MB 安全限制。");
-                }
-
-                XDocument document;
-                XmlReaderSettings readerSettings = new XmlReaderSettings();
-                readerSettings.DtdProcessing = DtdProcessing.Prohibit;
-                readerSettings.XmlResolver = null;
-                readerSettings.MaxCharactersInDocument =
-                    MaximumSettingsCharacters;
-                readerSettings.MaxCharactersFromEntities = 0;
-                using (FileStream stream = new FileStream(
-                    SettingsPath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read))
-                using (XmlReader reader = XmlReader.Create(
-                    stream,
-                    readerSettings))
-                {
-                    document = XDocument.Load(reader, LoadOptions.None);
+                    return new ExtensionSettings();
                 }
 
                 return ReadSettings(document);
             }
+            catch (InvalidDataException exception)
+            {
+                HandleCorruptFile(exception);
+            }
+            catch (XmlException exception)
+            {
+                HandleCorruptFile(exception);
+            }
+            catch (FormatException exception)
+            {
+                HandleCorruptFile(exception);
+            }
+            catch (CryptographicException exception)
+            {
+                HandleCorruptFile(exception);
+            }
+            catch (ArgumentException exception)
+            {
+                HandleCorruptFile(exception);
+            }
+            catch (InvalidOperationException exception)
+            {
+                HandleCorruptFile(exception);
+            }
+            catch (FileNotFoundException)
+            {
+                LoadWarning = GetWriteBlockReason(SettingsPath);
+            }
+            catch (DirectoryNotFoundException)
+            {
+                LoadWarning = GetWriteBlockReason(SettingsPath);
+            }
+            catch (IOException exception)
+            {
+                HandleUnavailableFile(exception);
+            }
+            catch (UnauthorizedAccessException exception)
+            {
+                HandleUnavailableFile(exception);
+            }
+            catch (SecurityException exception)
+            {
+                HandleUnavailableFile(exception);
+            }
             catch (Exception exception)
             {
-                string backup = PreserveDamagedSettings();
-                LoadWarning = "扩展配置损坏，已停用全部技能和 MCP。" +
-                    (string.IsNullOrEmpty(backup)
-                        ? string.Empty
-                        : " 原文件已保留为 " + Path.GetFileName(backup) + "。") +
-                    "（" + exception.Message + "）";
-                return new ExtensionSettings();
+                HandleUnavailableFile(exception);
             }
+
+            return new ExtensionSettings();
         }
 
         public void Save(ExtensionSettings settings)
+        {
+            string blockedReason = GetWriteBlockReason(SettingsPath);
+            if (!string.IsNullOrEmpty(blockedReason))
+            {
+                throw new InvalidOperationException(
+                    "扩展配置处于只读保护，本次运行不能保存。" +
+                    blockedReason);
+            }
+
+            try
+            {
+                SaveCore(settings);
+            }
+            catch (IOException exception)
+            {
+                HandleUnavailableFile(exception);
+                throw;
+            }
+            catch (UnauthorizedAccessException exception)
+            {
+                HandleUnavailableFile(exception);
+                throw;
+            }
+            catch (SecurityException exception)
+            {
+                HandleUnavailableFile(exception);
+                throw;
+            }
+        }
+
+        private void SaveCore(ExtensionSettings settings)
         {
             Validate(settings);
             string directory = Path.GetDirectoryName(SettingsPath);
@@ -149,6 +215,50 @@ namespace FilePromptAIWin7
                 SettingsPath,
                 content,
                 SettingsEncoding);
+        }
+
+        private XDocument ReadDocument()
+        {
+            FileStream stream;
+            try
+            {
+                stream = new FileStream(
+                    SettingsPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read);
+            }
+            catch (FileNotFoundException)
+            {
+                return null;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return null;
+            }
+
+            using (stream)
+            {
+                if (stream.Length == 0 ||
+                    stream.Length > MaximumSettingsBytes)
+                {
+                    throw new InvalidDataException(
+                        "扩展配置大小无效或超过 8 MB 安全限制。");
+                }
+
+                XmlReaderSettings readerSettings = new XmlReaderSettings();
+                readerSettings.DtdProcessing = DtdProcessing.Prohibit;
+                readerSettings.XmlResolver = null;
+                readerSettings.MaxCharactersInDocument =
+                    MaximumSettingsCharacters;
+                readerSettings.MaxCharactersFromEntities = 0;
+                using (XmlReader reader = XmlReader.Create(
+                    stream,
+                    readerSettings))
+                {
+                    return XDocument.Load(reader, LoadOptions.None);
+                }
+            }
         }
 
         public static void Validate(ExtensionSettings settings)
@@ -460,6 +570,64 @@ namespace FilePromptAIWin7
                     throw new InvalidOperationException(
                         "扩展配置包含 XML 无法保存的控制字符。");
                 }
+            }
+        }
+
+        private void HandleCorruptFile(Exception exception)
+        {
+            string blockedReason = GetWriteBlockReason(SettingsPath);
+            if (!string.IsNullOrEmpty(blockedReason))
+            {
+                LoadWarning = blockedReason;
+                return;
+            }
+
+            string backup = PreserveDamagedSettings();
+            if (!string.IsNullOrEmpty(backup))
+            {
+                LoadWarning = "扩展配置损坏，已停用全部技能和 MCP。" +
+                    " 原文件已安全保留为 " + Path.GetFileName(backup) +
+                    "。（" + exception.Message + "）";
+                return;
+            }
+
+            string warning = "扩展配置内容损坏，但无法创建安全备份；" +
+                "原文件保持不变，本次运行已进入只读保护，全部技能和 MCP 已停用。" +
+                "请先手工备份并解除占用：" + SettingsPath +
+                "（" + exception.Message + "）";
+            MarkWriteBlocked(SettingsPath, warning);
+            LoadWarning = GetWriteBlockReason(SettingsPath);
+        }
+
+        private void HandleUnavailableFile(Exception exception)
+        {
+            string warning = "扩展配置当前无法安全读取，原文件保持不变；" +
+                "本次运行已进入只读保护，无法修改技能或 MCP。" +
+                "请检查文件占用或权限：" + SettingsPath +
+                "（" + exception.Message + "）";
+            MarkWriteBlocked(SettingsPath, warning);
+            LoadWarning = GetWriteBlockReason(SettingsPath);
+        }
+
+        private static void MarkWriteBlocked(string path, string reason)
+        {
+            lock (ProtectionSync)
+            {
+                if (!WriteBlocks.ContainsKey(path))
+                {
+                    WriteBlocks.Add(path, reason ?? string.Empty);
+                }
+            }
+        }
+
+        private static string GetWriteBlockReason(string path)
+        {
+            lock (ProtectionSync)
+            {
+                string reason;
+                return WriteBlocks.TryGetValue(path, out reason)
+                    ? reason ?? string.Empty
+                    : string.Empty;
             }
         }
 

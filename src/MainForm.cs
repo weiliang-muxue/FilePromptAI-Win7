@@ -46,6 +46,7 @@ namespace FilePromptAIWin7
         private readonly object streamOutputSync;
         private IList<ModelProfile> modelProfiles;
         private ExtensionSettings extensionSettings;
+        private AppSettings loadedAppSettings;
 
         private TableLayoutPanel rootLayout;
         private TableLayoutPanel workspaceLayout;
@@ -219,6 +220,11 @@ namespace FilePromptAIWin7
             if (!string.IsNullOrEmpty(conversationStore.LoadWarning))
             {
                 SetStatus(conversationStore.LoadWarning);
+            }
+            else if (loadedAppSettings != null &&
+                !string.IsNullOrEmpty(loadedAppSettings.LoadWarning))
+            {
+                SetStatus(loadedAppSettings.LoadWarning);
             }
             else if (!string.IsNullOrEmpty(extensionStore.LoadWarning))
             {
@@ -979,14 +985,17 @@ namespace FilePromptAIWin7
             contextSummaryLabel = new Label();
             contextSummaryLabel.Text =
                 "0 条消息 · 资料 0 项 · 历史 0 · 本轮 0 / 48,000";
-            contextSummaryLabel.Dock = DockStyle.Fill;
+            contextSummaryLabel.Dock = DockStyle.None;
+            contextSummaryLabel.Anchor =
+                AnchorStyles.Left | AnchorStyles.Right;
+            contextSummaryLabel.Height = 18;
             contextSummaryLabel.TextAlign = ContentAlignment.MiddleLeft;
             contextSummaryLabel.ForeColor = UiTheme.TextMuted;
             contextSummaryLabel.Font = new Font(Font.FontFamily, 8.5F);
             contextSummaryLabel.AutoSize = false;
             contextSummaryLabel.AutoEllipsis = true;
             contextSummaryLabel.UseCompatibleTextRendering = false;
-            contextSummaryLabel.Padding = new Padding(4, 0, 4, 0);
+            contextSummaryLabel.Margin = new Padding(4, 0, 4, 0);
             contextSummaryLabel.AccessibleName = "当前会话上下文摘要";
             contextSummaryToolTip = new ToolTip();
             contextSummaryToolTip.InitialDelay = 300;
@@ -1220,6 +1229,7 @@ namespace FilePromptAIWin7
             decimal previousMaxOutputTokens =
                 maxOutputTokensNumericUpDown.Value;
             string previousShortcut = sendShortcutMode ?? "Both";
+            UpdateConfigurationProtectionUi();
             settingsDialog.SendShortcutMode = previousShortcut;
             settingsDialog.SetContextSummary(BuildContextSummary());
             settingsDialog.SetExtensionSummary(BuildExtensionSummary());
@@ -1229,6 +1239,26 @@ namespace FilePromptAIWin7
             DialogResult result = settingsDialog.ShowDialog(this);
             if (result == DialogResult.OK)
             {
+                if (loadedAppSettings != null &&
+                    loadedAppSettings.IsWriteBlocked)
+                {
+                    RestoreSettingsControls(
+                        previousEndpoint,
+                        previousKey,
+                        previousModel,
+                        previousSystemPrompt,
+                        previousTemperatureEnabled,
+                        previousTemperature,
+                        previousTopPEnabled,
+                        previousTopP,
+                        previousMaxOutputTokensEnabled,
+                        previousMaxOutputTokens,
+                        previousShortcut);
+                    SetStatus(
+                        "设置处于只读保护，本次运行不能修改或保存配置。");
+                    return;
+                }
+
                 sendShortcutMode = settingsDialog.SendShortcutMode;
                 UpdatePromptHint();
                 UpdateSendShortcutMenuChecks();
@@ -1241,24 +1271,49 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            endpointTextBox.Text = previousEndpoint;
-            apiKeyTextBox.Text = previousKey;
-            modelTextBox.Text = previousModel;
-            systemPromptTextBox.Text = previousSystemPrompt;
-            temperatureEnabledCheckBox.Checked = previousTemperatureEnabled;
-            temperatureNumericUpDown.Value = previousTemperature;
-            topPEnabledCheckBox.Checked = previousTopPEnabled;
-            topPNumericUpDown.Value = previousTopP;
-            maxOutputTokensEnabledCheckBox.Checked =
-                previousMaxOutputTokensEnabled;
-            maxOutputTokensNumericUpDown.Value = previousMaxOutputTokens;
-            sendShortcutMode = previousShortcut;
-            settingsDialog.SendShortcutMode = previousShortcut;
-            UpdatePromptHint();
-            UpdateSendShortcutMenuChecks();
-            SaveSettings();
+            RestoreSettingsControls(
+                previousEndpoint,
+                previousKey,
+                previousModel,
+                previousSystemPrompt,
+                previousTemperatureEnabled,
+                previousTemperature,
+                previousTopPEnabled,
+                previousTopP,
+                previousMaxOutputTokensEnabled,
+                previousMaxOutputTokens,
+                previousShortcut);
             connectionStatusLabel.Text = BuildConnectionStatus();
             UpdateContextSummary();
+        }
+
+        private void RestoreSettingsControls(
+            string endpoint,
+            string apiKey,
+            string model,
+            string systemPrompt,
+            bool temperatureEnabled,
+            decimal temperature,
+            bool topPEnabled,
+            decimal topP,
+            bool maxTokensEnabled,
+            decimal maxTokens,
+            string shortcut)
+        {
+            endpointTextBox.Text = endpoint;
+            apiKeyTextBox.Text = apiKey;
+            modelTextBox.Text = model;
+            systemPromptTextBox.Text = systemPrompt;
+            temperatureEnabledCheckBox.Checked = temperatureEnabled;
+            temperatureNumericUpDown.Value = temperature;
+            topPEnabledCheckBox.Checked = topPEnabled;
+            topPNumericUpDown.Value = topP;
+            maxOutputTokensEnabledCheckBox.Checked = maxTokensEnabled;
+            maxOutputTokensNumericUpDown.Value = maxTokens;
+            sendShortcutMode = shortcut;
+            settingsDialog.SendShortcutMode = shortcut;
+            UpdatePromptHint();
+            UpdateSendShortcutMenuChecks();
         }
 
         private void ShowPathInputDialog()
@@ -2340,10 +2395,10 @@ namespace FilePromptAIWin7
             long totalCharacters = AddSaturated(
                 historyCharacters,
                 currentTurnCharacters);
-            return messageCount + " 条消息" +
-                "  ·  资料 " + inputItems.Count +
-                "  ·  上下文 " + totalCharacters.ToString("N0") +
-                " / " + MaximumConversationContextCharacters.ToString("N0");
+            return messageCount + "条" +
+                " · " + inputItems.Count + "资料" +
+                " · " + totalCharacters.ToString("N0") +
+                "/48k";
         }
 
         private void UpdateContextSummary()
@@ -2526,6 +2581,7 @@ namespace FilePromptAIWin7
         private void LoadSavedSettings()
         {
             AppSettings settings = AppSettings.Load();
+            loadedAppSettings = settings;
             endpointTextBox.Text = settings.EndpointUrl;
             apiKeyTextBox.Text = settings.ApiKey;
             modelTextBox.Text = settings.ModelName;
@@ -2552,10 +2608,20 @@ namespace FilePromptAIWin7
             testConnectionButton.Enabled = HasCompleteConnectionSettings();
             UpdateQuickModelButton();
             UpdateContextSummary();
+            UpdateConfigurationProtectionUi();
         }
 
         private bool SaveSettings()
         {
+            if (loadedAppSettings != null && loadedAppSettings.IsWriteBlocked)
+            {
+                SetStatus(
+                    "设置文件处于只读保护，本次运行无法保存。" +
+                    loadedAppSettings.LoadWarning);
+                UpdateConfigurationProtectionUi();
+                return false;
+            }
+
             try
             {
                 AppSettings settings = new AppSettings();
@@ -2576,13 +2642,34 @@ namespace FilePromptAIWin7
                             maxOutputTokensNumericUpDown.Value)
                         : null;
                 settings.Save();
+                loadedAppSettings = settings;
                 return true;
             }
             catch (Exception exception)
             {
                 SetStatus("配置未能保存：" + exception.Message);
+                AppSettings state = AppSettings.Load();
+                if (state.IsWriteBlocked)
+                {
+                    loadedAppSettings = state;
+                    UpdateConfigurationProtectionUi();
+                }
                 return false;
             }
+        }
+
+        private void UpdateConfigurationProtectionUi()
+        {
+            if (settingsDialog == null || settingsDialog.IsDisposed)
+            {
+                return;
+            }
+
+            bool settingsProtected = loadedAppSettings != null &&
+                loadedAppSettings.IsWriteBlocked;
+            settingsDialog.SetSettingsWriteProtection(
+                settingsProtected,
+                settingsProtected ? loadedAppSettings.LoadWarning : string.Empty);
         }
 
         private static bool IsValidSendShortcutMode(string mode)
@@ -2657,6 +2744,13 @@ namespace FilePromptAIWin7
 
         private void SetSendShortcutMode(string mode)
         {
+            if (loadedAppSettings != null && loadedAppSettings.IsWriteBlocked)
+            {
+                SetStatus(
+                    "设置文件处于只读保护，本次运行不能修改发送快捷键。");
+                return;
+            }
+
             if (!IsValidSendShortcutMode(mode))
             {
                 mode = "Both";
@@ -2872,6 +2966,20 @@ namespace FilePromptAIWin7
             ExtensionSettings candidate = (extensionSettings ??
                 new ExtensionSettings()).Clone();
             IWin32Window owner = GetSettingsActionOwner();
+            if (extensionStore.IsWriteProtected)
+            {
+                using (ExtensionsDialog dialog = new ExtensionsDialog(
+                    candidate,
+                    extensionStore.WriteProtectionReason))
+                {
+                    dialog.ShowDialog(owner);
+                }
+
+                SetStatus(
+                    "扩展配置处于只读保护，本次运行不能修改技能或 MCP。");
+                return;
+            }
+
             while (true)
             {
                 using (ExtensionsDialog dialog = new ExtensionsDialog(
@@ -2907,6 +3015,11 @@ namespace FilePromptAIWin7
                             "技能 / MCP",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Error);
+                        if (extensionStore.IsWriteProtected)
+                        {
+                            SetStatus(extensionStore.WriteProtectionReason);
+                            return;
+                        }
                     }
                 }
             }
@@ -3218,6 +3331,14 @@ namespace FilePromptAIWin7
                 return false;
             }
 
+            if (loadedAppSettings != null && loadedAppSettings.IsWriteBlocked)
+            {
+                SetStatus(
+                    "设置文件处于只读保护，本次运行不能切换模型配置。");
+                UpdateConfigurationProtectionUi();
+                return false;
+            }
+
             endpointTextBox.Text = profile.EndpointUrl ?? string.Empty;
             apiKeyTextBox.Text = profile.ApiKey ?? string.Empty;
             modelTextBox.Text = profile.ModelName ?? string.Empty;
@@ -3480,20 +3601,25 @@ namespace FilePromptAIWin7
 
         private void SetConnectionTestingState(bool testing)
         {
+            bool settingsEditable = !testing &&
+                (loadedAppSettings == null ||
+                    !loadedAppSettings.IsWriteBlocked);
             testConnectionButton.Enabled = !testing &&
                 !isAddingFiles &&
                 generationCancellation == null &&
+                settingsEditable &&
                 HasCompleteConnectionSettings();
-            endpointTextBox.Enabled = !testing;
-            apiKeyTextBox.Enabled = !testing;
-            modelTextBox.Enabled = !testing;
-            SetGenerationControlsEnabled(!testing);
+            endpointTextBox.Enabled = settingsEditable;
+            apiKeyTextBox.Enabled = settingsEditable;
+            modelTextBox.Enabled = settingsEditable;
+            SetGenerationControlsEnabled(settingsEditable);
             settingsDialog.FetchModelsButton.Enabled = !testing &&
                 !isAddingFiles && generationCancellation == null &&
+                settingsEditable &&
                 HasModelListConnectionSettings();
-            settingsDialog.ModelProfilesButton.Enabled = !testing;
+            settingsDialog.ModelProfilesButton.Enabled = settingsEditable;
             settingsDialog.UninstallButton.Enabled = !testing;
-            settingsDialog.SendShortcutComboBox.Enabled = !testing;
+            settingsDialog.SendShortcutComboBox.Enabled = settingsEditable;
             if (extensionsButton != null)
             {
                 extensionsButton.Enabled = !testing &&
@@ -4160,7 +4286,7 @@ namespace FilePromptAIWin7
                 dialog.Multiselect = true;
                 dialog.CheckFileExists = true;
                 dialog.Filter =
-                    "支持的文件|*.txt;*.md;*.csv;*.json;*.xml;*.yaml;*.yml;*.log;*.sql;*.java;*.cs;*.cpp;*.h;*.py;*.js;*.ts;*.html;*.css;*.pdf;*.doc;*.docx;*.rtf;*.xls;*.xlsx;*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff|" +
+                    "支持的文件|*.txt;*.md;*.csv;*.json;*.xml;*.yaml;*.yml;*.log;*.sql;*.java;*.cs;*.cpp;*.h;*.py;*.js;*.ts;*.html;*.css;*.pdf;*.doc;*.docx;*.rtf;*.xls;*.xlsx;*.pptx;*.xmind;*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff|" +
                     "所有文件|*.*";
                 if (dialog.ShowDialog(this) == DialogResult.OK)
                 {
@@ -4267,6 +4393,7 @@ namespace FilePromptAIWin7
                 {
                     AddFailedPath(outcome, candidate);
                 }
+                PreserveFailedPathsForRetry(outcome);
                 return outcome;
             }
 
@@ -4414,19 +4541,25 @@ namespace FilePromptAIWin7
                     UpdateRetryButton();
                     UpdateOutputButtons(generationCancellation != null);
                     UpdateInputStatus();
+                    PreserveFailedPathsForRetry(outcome);
                 }
             }
 
             if (!isClosing && !IsDisposed && errors.Count > 0)
             {
                 MessageBox.Show(
+                    this,
                     "以下内容未能添加：\r\n\r\n" +
-                    string.Join("\r\n", errors.ToArray()),
+                    FormatFileAddErrors(errors) +
+                    "\r\n\r\n失败路径已保留。请点击“+ 添加”→" +
+                    "“从路径添加...”修正后重试。",
                     "部分文件处理失败",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
             }
-            else if (!isClosing && !IsDisposed && outcome.SkippedCount > 0)
+            else if (!isClosing && !IsDisposed &&
+                outcome.SkippedCount > 0 &&
+                outcome.FailedPaths.Count == 0)
             {
                 SetStatus(
                     "已添加 " + outcome.AddedCount +
@@ -4434,21 +4567,75 @@ namespace FilePromptAIWin7
                     " 个重复文件。");
             }
 
-            // A drag/drop or file-picker batch has no dedicated source field
-            // to restore failed entries into. Keep them in the path editor
-            // when it is idle so the user can correct and retry them.
-            if (!isClosing && !IsDisposed &&
-                outcome.FailedPaths.Count > 0 &&
-                pathTextBox != null &&
-                string.IsNullOrWhiteSpace(pathTextBox.Text))
+            return outcome;
+        }
+
+        private void PreserveFailedPathsForRetry(FileAddResult outcome)
+        {
+            if (isClosing || IsDisposed || outcome == null ||
+                outcome.FailedPaths.Count == 0 || pathTextBox == null)
             {
-                pathTextBox.Text = string.Join(
-                    Environment.NewLine,
-                    outcome.FailedPaths.ToArray());
-                SetStatus("部分路径未读取，失败项已保留在路径窗口中。");
+                return;
             }
 
-            return outcome;
+            List<string> retryPaths = ParsePastedPaths(pathTextBox.Text)
+                .ToList();
+            HashSet<string> seen = new HashSet<string>(
+                retryPaths,
+                StringComparer.OrdinalIgnoreCase);
+            foreach (string failedPath in outcome.FailedPaths)
+            {
+                string candidate = (failedPath ?? string.Empty).Trim();
+                if (candidate.Length > 0 && seen.Add(candidate))
+                {
+                    retryPaths.Add(candidate);
+                }
+            }
+
+            pathTextBox.Text = string.Join(
+                Environment.NewLine,
+                retryPaths.ToArray());
+            SetStatus(
+                (outcome.TimedOut ? "文件路径检查超时；" : string.Empty) +
+                "未读取 " + outcome.FailedPaths.Count +
+                " 个路径，已保留在“+ 添加”→“从路径添加...”中。");
+        }
+
+        private static string FormatFileAddErrors(IList<string> errors)
+        {
+            const int maximumDisplayedErrors = 12;
+            const int maximumErrorCharacters = 320;
+            if (errors == null || errors.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            List<string> displayed = new List<string>();
+            for (int index = 0;
+                index < errors.Count && index < maximumDisplayedErrors;
+                index++)
+            {
+                string value = (errors[index] ?? string.Empty)
+                    .Replace("\r\n", " ")
+                    .Replace('\r', ' ')
+                    .Replace('\n', ' ')
+                    .Trim();
+                if (value.Length > maximumErrorCharacters)
+                {
+                    value = value.Substring(0, maximumErrorCharacters) + "...";
+                }
+
+                displayed.Add("- " + value);
+            }
+
+            if (errors.Count > displayed.Count)
+            {
+                displayed.Add(
+                    "- 另有 " + (errors.Count - displayed.Count) +
+                    " 个失败项未展开。");
+            }
+
+            return string.Join(Environment.NewLine, displayed.ToArray());
         }
 
         private static FileResolutionResult ResolveExistingFiles(
@@ -6139,6 +6326,9 @@ namespace FilePromptAIWin7
 
         private void SetGeneratingState(bool generating)
         {
+            bool settingsEditable = !generating &&
+                (loadedAppSettings == null ||
+                    !loadedAppSettings.IsWriteBlocked);
             generateButton.Enabled = !generating;
             stopButton.Enabled = generating;
             UpdateRetryButton();
@@ -6153,17 +6343,19 @@ namespace FilePromptAIWin7
                 conversationStore.Sessions.Count > 0;
             restoreSessionsButton.Enabled = !generating;
             testConnectionButton.Enabled = !generating &&
+                settingsEditable &&
                 HasCompleteConnectionSettings();
-            endpointTextBox.Enabled = !generating;
-            apiKeyTextBox.Enabled = !generating;
-            modelTextBox.Enabled = !generating;
-            SetGenerationControlsEnabled(!generating);
+            endpointTextBox.Enabled = settingsEditable;
+            apiKeyTextBox.Enabled = settingsEditable;
+            modelTextBox.Enabled = settingsEditable;
+            SetGenerationControlsEnabled(settingsEditable);
             settingsDialog.FetchModelsButton.Enabled = !generating &&
                 connectionTestCancellation == null && !isAddingFiles &&
+                settingsEditable &&
                 HasModelListConnectionSettings();
-            settingsDialog.ModelProfilesButton.Enabled = !generating;
+            settingsDialog.ModelProfilesButton.Enabled = settingsEditable;
             settingsDialog.UninstallButton.Enabled = !generating;
-            settingsDialog.SendShortcutComboBox.Enabled = !generating;
+            settingsDialog.SendShortcutComboBox.Enabled = settingsEditable;
             if (extensionsButton != null)
             {
                 extensionsButton.Enabled = !generating &&
@@ -6475,10 +6667,16 @@ namespace FilePromptAIWin7
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.Items.Add(CreateExportItem(
                 "最新回复 · Markdown",
-                delegate { ExportLatestText(true); }));
+                delegate { ExportText(false, true); }));
             menu.Items.Add(CreateExportItem(
                 "最新回复 · 文本",
-                delegate { ExportLatestText(false); }));
+                delegate { ExportText(false, false); }));
+            menu.Items.Add(CreateExportItem(
+                "整个会话 · Markdown",
+                delegate { ExportText(true, true); }));
+            menu.Items.Add(CreateExportItem(
+                "整个会话 · 文本",
+                delegate { ExportText(true, false); }));
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(CreateExportItem(
                 "最新回复 · Word",
@@ -6526,7 +6724,7 @@ namespace FilePromptAIWin7
 
         private void OnSaveOutputClick(object sender, EventArgs args)
         {
-            ExportLatestText(true);
+            ExportText(false, true);
         }
 
         private void OnExportWordClick(object sender, EventArgs args)
@@ -6539,9 +6737,13 @@ namespace FilePromptAIWin7
             ExportTable(true);
         }
 
-        private void ExportLatestText(bool markdown)
+        private void ExportText(bool entireConversation, bool markdown)
         {
-            string output = GetLatestAssistantOutput();
+            string output = entireConversation
+                ? (markdown
+                    ? BuildConversationMarkdown()
+                    : BuildConversationPlainText())
+                : GetLatestAssistantOutput();
             if (string.IsNullOrEmpty(output))
             {
                 return;
@@ -6550,13 +6752,16 @@ namespace FilePromptAIWin7
             string extension = markdown ? ".md" : ".txt";
             using (SaveFileDialog dialog = new SaveFileDialog())
             {
-                dialog.Title = markdown ? "保存 Markdown 回复" : "保存文本回复";
+                dialog.Title = (entireConversation ? "导出整个会话 · " :
+                    "导出最新回复 · ") + (markdown ? "Markdown" : "文本");
                 dialog.Filter = markdown
                     ? "Markdown 文件|*.md|所有文件|*.*"
                     : "文本文件|*.txt|所有文件|*.*";
                 dialog.DefaultExt = extension.TrimStart('.');
                 dialog.AddExtension = true;
-                dialog.FileName = "模型输出_" +
+                dialog.FileName = (entireConversation
+                    ? "FilePromptAI会话_"
+                    : "FilePromptAI回复_") +
                     DateTime.Now.ToString("yyyyMMdd_HHmmss") + extension;
                 if (dialog.ShowDialog(this) != DialogResult.OK)
                 {
@@ -6569,7 +6774,8 @@ namespace FilePromptAIWin7
                         dialog.FileName,
                         output,
                         new UTF8Encoding(true));
-                    SetStatus(markdown ? "Markdown 已导出" : "文本已导出");
+                    SetStatus((entireConversation ? "整个会话" : "最新回复") +
+                        (markdown ? " Markdown 已导出" : "文本已导出"));
                 }
                 catch (Exception exception)
                 {
@@ -6787,6 +6993,35 @@ namespace FilePromptAIWin7
             }
 
             return markdown.ToString();
+        }
+
+        private string BuildConversationPlainText()
+        {
+            ConversationSession session = conversationStore.CurrentSession;
+            if (session == null || session.Messages == null ||
+                session.Messages.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            StringBuilder text = new StringBuilder();
+            text.AppendLine(session.Title);
+            text.AppendLine(new string('=', Math.Max(4, session.Title.Length)));
+            text.AppendLine();
+            foreach (ConversationMessage message in session.Messages)
+            {
+                if (message == null)
+                {
+                    continue;
+                }
+
+                text.AppendLine(message.Role == "assistant" ? "模型" : "你");
+                text.AppendLine(new string('-', 8));
+                text.AppendLine(message.Content ?? string.Empty);
+                text.AppendLine();
+            }
+
+            return text.ToString();
         }
 
         private void ShowSaveError(Exception exception)

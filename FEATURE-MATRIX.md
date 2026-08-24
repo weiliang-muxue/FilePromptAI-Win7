@@ -22,8 +22,8 @@
 | 模型发现与手工选择 | 已实现 | `src/ModelClient.cs` 的 `FetchModelsAsync` 读取同源 `/models`；模型输入仍可编辑；`tests/NetworkReliabilitySmokeTest.cs` 覆盖端点推导、响应校验和重定向拒绝。 | 模型列表是用户主动请求，不做后台发现。 |
 | 有鉴权及无鉴权连接 | v1.17 本次补齐，待最终测试 | `src/MainForm.cs`、`src/SettingsDialog.cs` 和 `src/ModelProfiles.cs` 允许 API Key 留空；`src/ModelClient.cs` 仅在 Key 非空时发送 `Authorization`；网络及模型配置回归覆盖匿名请求。 | 适用于 Ollama、vLLM 等无需鉴权的 OpenAI 兼容端点；不代替服务端访问控制。 |
 | 多模型配置保存与快速切换 | 已实现 | `src/ModelProfiles.cs` 的 `ModelProfileStore`、`src/ModelProfilesDialog.cs` 以及 `src/MainForm.cs` 的快速模型菜单。 | 配置保存在当前 Windows 用户本机，不云同步；跨用户不可解密的配置会被忽略。 |
-| 普通用户可编辑的 system prompt | v1.17 本次补齐，待最终测试 | `src/SettingsDialog.cs` 提供编辑页；`AppSettings.SystemPrompt` 与 `ModelProfile.SystemPrompt` 持久化；`MainForm.BuildCombinedSystemPrompt` 把自定义提示放在技能指令之前；`ModelClient.BuildInitialMessages` 将合并结果作为首条 `system` 消息。 | 最多输入 16,000 字符，并与技能及会话共同服从 48,000 字符预算。现有 API 测试验证通用 system 消息顺序，但自定义提示与技能合并顺序仍待专门回归。 |
-| `temperature`、`top_p`、最大输出 token | v1.17 本次补齐，待最终测试 | 设置页和模型配置均提供独立启用开关；`AppSettings`、`ModelProfile`、`ModelRequest` 使用可空值；`MainForm.GenerateAsync` 传入请求，`ModelClient.AddGenerationOptions` 映射为 `temperature`、`top_p`、`max_tokens` 并校验范围。 | 未启用时不写入载荷，由服务采用默认值。传输响应大小限制不是生成 token 上限；参数发送/省略、范围拒绝及持久化往返仍待专门回归。 |
+| 普通用户可编辑的 system prompt | v1.17 本次补齐，待最终测试 | `src/SettingsDialog.cs` 提供编辑页；`AppSettings.SystemPrompt` 与 `ModelProfile.SystemPrompt` 持久化；`MainForm.BuildCombinedSystemPrompt` 把自定义提示放在技能指令之前；`ModelClient.BuildInitialMessages` 将合并结果作为首条 `system` 消息；生成设置测试覆盖合并顺序和预算。 | 最多输入 16,000 字符，并与技能及会话共同服从 48,000 字符预算。 |
+| `temperature`、`top_p`、最大输出 token | v1.17 本次补齐，待最终测试 | 设置页和模型配置均提供独立启用开关；`AppSettings`、`ModelProfile`、`ModelRequest` 使用可空值；`MainForm.GenerateAsync` 传入请求，`ModelClient.AddGenerationOptions` 映射为 `temperature`、`top_p`、`max_tokens` 并校验范围；生成设置测试覆盖发送/省略、范围拒绝和持久化往返。 | 未启用时不写入载荷，由服务采用默认值。传输响应大小限制不是生成 token 上限。 |
 | 流式输出与停止 | 已实现 | `src/ModelClient.cs` 的流式响应处理、`src/MainForm.cs` 的 `GenerateAsync` 和 `CancellationTokenSource`；网络回归覆盖空闲超时、不完整流和取消优先级。 | 服务不支持流式时可回退到非流式；停止只取消当前请求。 |
 | 失败重试与回复重新生成 | 已实现 | `src/MainForm.cs` 的 `RetryLastFailedGeneration`、`StartRegeneration` 和原位替换逻辑；`tests/UiStateSmokeTest.cs` 覆盖成功、失败、取消及状态失效。 | 仅最新完整问答可原位重新生成；一次性二进制附件不会从旧本地路径静默重读。 |
 | 多轮上下文与预算控制 | 已实现 | `src/ConversationContextBudget.cs` 按完整问答轮次裁剪；`src/MainForm.cs` 将历史、当前文字、技能和附件正文纳入 48,000 字符预算。 | 这是字符预算，不是特定模型 tokenizer 的精确 token 计数。 |
@@ -33,12 +33,12 @@
 
 | 常见能力 | v1.17 状态 | 当前实现与证据 | 明确边界 |
 | --- | --- | --- | --- |
-| 文本、代码和 Office/PDF 附件问答 | 已实现 | `src/FileContentExtractor.cs` 的 `ExtractFile` 支持普通文本/代码、PDF、DOC/DOCX、RTF、XLS/XLSX；提取与加固 smoke tests 覆盖代表性文件和异常输入。 | 仅处理用户主动添加的文件，不扫描目录；不把本地路径发送给模型。 |
+| 文本、代码和 Office/PDF/XMind 附件问答 | 已实现 | `src/FileContentExtractor.cs` 的 `ExtractFile` 支持普通文本/代码、PDF、DOC/DOCX、RTF、XLS/XLSX、PPTX，以及新版 `content.json` 和旧版 `content.xml` XMind；PPTX 提取页标题、正文、表格和备注，XMind 保留多画布、主题层级和备注；提取与加固 smoke tests 覆盖正常及恶意压缩包。 | 仅处理用户主动添加的文件，不扫描目录；不把本地路径发送给模型。 |
 | 图片输入与视觉模型载荷 | 已实现 | `src/FileContentExtractor.cs` 压缩 PNG/JPEG/BMP/GIF/TIFF；`src/ModelClient.cs` 构造 `text` 与 `image_url` 多模态内容。 | 依赖所选模型支持兼容的视觉输入；不包含 OCR 引擎或本地图像识别。 |
 | 拖放、文件选择、路径读取和剪贴板 | 已实现 | `src/MainForm.cs` 的文件添加、专用拖放区、`OnReadPathClick` 和 `OnPasteClick`；UI 状态测试覆盖拖放句柄和忙碌状态。 | 粘贴路径本身不会触发后台读取，必须由用户执行读取动作。 |
 | 附件预览与生命周期保护 | 已实现 | `src/InputPreviewDialog.cs` 预览已读入内容；`src/MainForm.cs` 实施草稿二进制内存预算和一次性二进制规则。 | 文本正文可进入历史；图片和无文本二进制只发送当前轮，后续需要重新添加。 |
 | Markdown 阅读 | 已实现 | `src/MarkdownRichTextRenderer.cs` 和 `src/MarkdownDocument.cs` 支持标题、列表、代码块、引用和表格排版；`tests/MarkdownRendererSmokeTest.cs` 验证渲染。 | 代码块没有逐块复制按钮或语法高亮。 |
-| 复制与 Markdown/纯文本保存 | 已实现 | `src/MainForm.cs` 的 `OnCopyOutputClick`、`ExportLatestText`。 | 复制对象是当前最新回复，不是任意富文本片段管理器。 |
+| 复制与 Markdown/纯文本保存 | 已实现 | `src/MainForm.cs` 的 `OnCopyOutputClick`、`ExportText`、`BuildConversationMarkdown` 和 `BuildConversationPlainText`。 | 可保存最新回复或整个会话；复制对象仍是当前最新回复，不是任意富文本片段管理器。 |
 | 文档、演示、表格和思维导图导出 | 已实现 | `DocxExporter`、`PdfExporter`、`PptxExporter`、`XlsxExporter`、`CsvExporter`、`XMindExporter`，由 `src/MainForm.cs` 的导出菜单调用；各导出 smoke tests。 | 全部本地生成；PDF 中文输出依赖系统存在可嵌入的 CJK 字体。 |
 | 语音输入、朗读和实时语音对话 | 有意排除 | 源码和 UI 没有麦克风、STT、TTS 或音频会话路径。 | v1.17 不请求麦克风权限、不采集音频，也不随包提供语音模型。 |
 | 内置图像生成或编辑 | 未实现（非 v1.17 承诺） | 当前图片只作为用户附件发送给兼容视觉模型。 | 没有图像生成 API、画布或本地图像生成模型。 |
@@ -75,20 +75,20 @@
 | 模型与模型列表直连 | v1.17 本次补齐，待最终测试 | `src/ModelClient.cs` 明确 `UseProxy = false`；`tests/NetworkReliabilitySmokeTest.cs` 使用拒绝型系统代理验证请求仍直达用户端点。HTTP MCP 同样在 `src/McpRuntime.cs` 禁用系统代理。 | 不提供应用内代理配置；需要代理才能访问的服务不属于 v1.17 支持路径。 |
 | 无遥测、更新器和隐式辅助网络 | 已实现 | 当前源码没有遥测、崩溃上报、更新检查或辅助服务客户端；安装和启动不下载依赖。 | 生成时连接用户填写的模型 URL；启用 HTTP MCP 时还会连接用户填写的 MCP URL，因此“离线安装”不等于“生成时零网络”。 |
 | 离线依赖与 Windows 7 启动 | 已实现 | `build-offline-package.ps1` 打包固定校验的 .NET Framework 4.8 离线安装器和托管 DLL；bootstrapper 只使用离线/缓存信任检查。 | Windows 7 SP1 仍可能需要管理员预装 SHA-2、服务堆栈、TLS/根证书和字体等系统先决条件。 |
-| 包完整性与可验证发布证据 | v1.17 本次补齐，待最终测试 | 包内精确 `PACKAGE-CHECKSUMS-SHA256.txt`、外部 `RELEASE-SHA256.txt` 封存流程、`seal-release.ps1` 和 `tests/VerifyTaggedRelease.ps1`；最终必须由 annotated `v1.17` 标签固定。 | 候选源码或 ZIP 的存在不等于已封存发布；包内清单不能单独证明验收程序自身未被替换，也不单独证明构建可复现。 |
-| 目标 Windows 7 一键验收 | v1.17 本次补齐，待最终测试 | `acceptance/Program.cs` 校验精确包集合，使用隔离数据目录启动真实客户端，并在回环端点测试匿名模型发现、流式聊天、文件读取和导出。 | 总 PASS 必须来自 Windows 7 SP1、.NET 4.8、1920x1080、96 DPI 的目标机；Windows 10/11 报告不能替代。 |
+| 包完整性与可验证发布证据 | v1.17 本次补齐，待最终测试 | 包内精确 `PACKAGE-CHECKSUMS-SHA256.txt`、schema 2 测试 receipt、强制 `AcceptanceReportPath` 的 `seal-release.ps1`、外部 `RELEASE-SHA256.txt` 和 `tests/VerifyTaggedRelease.ps1`；receipt、Win7 PASS XML 与 ZIP 以包清单原始字节 SHA-256 和条目数绑定，最终再由 annotated `v1.17` 标签固定。 | 候选源码或 ZIP 的存在不等于已封存发布；报告 sidecar 提供传输完整性，不是数字签名；包内清单也不单独证明构建可复现。 |
+| 目标 Windows 7 一键验收 | v1.17 本次补齐，待最终测试 | `acceptance/Program.cs` 校验精确包集合，使用隔离数据目录启动真实客户端，并在回环端点测试匿名模型发现、流式聊天、文件读取和导出；schema 2 PASS 报告记录锁定并验证的包清单身份，FAIL 报告不携带有效身份。 | 总 PASS 必须来自 Windows 7 SP1、.NET 4.8、1920x1080、96 DPI 的目标机；Windows 10/11 报告不能替代，并且封存时必须同时提供 XML 与 sidecar。 |
 | 自动更新与后台遥测 | 有意排除 | 发布包没有自动更新器、遥测客户端或后台服务。 | 新版本由管理员离线取得、校验并部署。 |
 
 ## v1.17 本次补齐清单
 
 以下项目与 v1.16 已有能力区分列出，发布前均需以最终源码和重新生成的完整 ZIP 为准：
 
-1. 普通 system prompt、`temperature`、`top_p` 和最大输出 token 已从设置、模型配置接到请求载荷；候选源码已构建通过，仍待专门回归、最终离线包重建及发布验证。
+1. 普通 system prompt、`temperature`、`top_p` 和最大输出 token 已从设置、模型配置接到请求载荷并通过专项回归；仍须随最终候选重建离线包及执行发布验证。
 2. API Key 可留空，匿名模型列表和聊天请求不发送 `Authorization`，同时保存和切换无 Key 模型配置。
 3. 模型、模型列表及 HTTP MCP 不使用 Windows 系统代理，并以拒绝型代理回归证明直连行为。
 4. 附件提取依赖按批准的 NPOI 文件名加载，避免通配加载应用目录中的同名前缀 DLL；见 `FileContentExtractor.LoadNpoiAssemblies`。
-5. 离线包加入独立 `Verify-FilePromptAI.exe`，锁定并校验已验证载荷后再启动或反射加载真实客户端，输出 XML 报告及 SHA-256 sidecar。
-6. 固定发布摘要、annotated 标签及标签后复核流程，明确区分便利 sidecar、包内清单与 Git 标签中的外部身份锚点。
+5. 离线包加入独立 `Verify-FilePromptAI.exe`，锁定并校验已验证载荷后再启动或反射加载真实客户端，输出 schema 2 XML 报告及 SHA-256 sidecar；只有 PASS 报告记录有效包清单身份。
+6. 完整测试 receipt、真实 Win7 PASS 报告、固定发布摘要、annotated 标签及标签后复核流程以同一包清单身份串联，明确区分便利 sidecar、包内清单与 Git 标签中的外部身份锚点。
 7. 卸载及包验证继续按精确文件集合工作，保护发布目录中的额外文件和默认保留的用户数据。
 
 ## 显示支持口径
