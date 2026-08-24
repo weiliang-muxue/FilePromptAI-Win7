@@ -191,7 +191,7 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 先从可信的 `v1.17` Git 标签取得 `RELEASE-SHA256.txt`，再核对 ZIP 的 SHA-256：
 
 ```powershell
-git show v1.17:RELEASE-SHA256.txt
+git show v1.17:src/RELEASE-SHA256.txt
 certutil -hashfile .\FilePromptAI-Win7-Full-v1.17.zip SHA256
 ```
 

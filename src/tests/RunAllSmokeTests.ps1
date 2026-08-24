@@ -24,6 +24,26 @@ $receiptRelativePath = "tests/build-artifacts/release/ReleaseCandidate-v$Version
 $receiptPath = Join-Path $projectRoot ($receiptRelativePath.Replace('/', '\'))
 $candidateCommit = ''
 
+function Get-GitRelativeProjectPath {
+    param([string]$GitRoot)
+
+    $root = [IO.Path]::GetFullPath($GitRoot).TrimEnd('\')
+    $project = [IO.Path]::GetFullPath($projectRoot).TrimEnd('\')
+    if ([string]::Equals(
+            $root,
+            $project,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        return ''
+    }
+    $prefix = $root + '\'
+    if (-not $project.StartsWith(
+            $prefix,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The source project must be inside its Git worktree.'
+    }
+    return $project.Substring($prefix.Length).Replace('\', '/')
+}
+
 if (-not (Test-Path -LiteralPath $releaseEvidenceScript -PathType Leaf)) {
     throw "The release evidence helper is missing: $releaseEvidenceScript"
 }
@@ -57,14 +77,17 @@ function Assert-CleanCandidate {
 
 if ($WriteReleaseReceipt) {
     $gitRoot = (& git -C $projectRoot rev-parse --show-toplevel 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or
-        -not [string]::Equals(
-            [IO.Path]::GetFullPath($gitRoot).TrimEnd('\'),
-            [IO.Path]::GetFullPath($projectRoot).TrimEnd('\'),
-            [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Release receipt mode must run from the root of its Git worktree.'
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Release receipt mode requires a Git worktree.'
     }
-    & git -C $projectRoot check-ignore -q -- $receiptRelativePath
+    $gitProjectPath = Get-GitRelativeProjectPath -GitRoot $gitRoot
+    $gitReceiptPath = if ([string]::IsNullOrEmpty($gitProjectPath)) {
+        $receiptRelativePath
+    }
+    else {
+        "$gitProjectPath/$receiptRelativePath"
+    }
+    & git -C $gitRoot check-ignore -q -- $gitReceiptPath
     if ($LASTEXITCODE -ne 0) {
         throw 'The local release-candidate receipt must remain ignored by Git.'
     }

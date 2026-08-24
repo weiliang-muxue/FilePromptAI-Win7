@@ -32,6 +32,26 @@ if (-not (Test-Path -LiteralPath $releaseEvidenceScript -PathType Leaf)) {
 }
 . $releaseEvidenceScript
 
+function Get-GitRelativeProjectPath {
+    param([string]$GitRoot)
+
+    $root = [IO.Path]::GetFullPath($GitRoot).TrimEnd('\')
+    $project = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    if ([string]::Equals(
+            $root,
+            $project,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        return ''
+    }
+    $prefix = $root + '\'
+    if (-not $project.StartsWith(
+            $prefix,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The source project must be inside its Git worktree.'
+    }
+    return $project.Substring($prefix.Length).Replace('\', '/')
+}
+
 function Read-ReleaseReceipt {
     param([string]$Path)
 
@@ -83,12 +103,15 @@ function Read-ReleaseReceipt {
 }
 
 $gitRoot = (& git -C $ProjectRoot rev-parse --show-toplevel 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or
-    -not [string]::Equals(
-        [IO.Path]::GetFullPath($gitRoot).TrimEnd('\'),
-        $ProjectRoot.TrimEnd('\'),
-        [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The tagged release must be verified at the root of its Git worktree.'
+if ($LASTEXITCODE -ne 0) {
+    throw 'The tagged release verifier requires a Git worktree.'
+}
+$gitProjectPath = Get-GitRelativeProjectPath -GitRoot $gitRoot
+$gitManifestPath = if ([string]::IsNullOrEmpty($gitProjectPath)) {
+    'RELEASE-SHA256.txt'
+}
+else {
+    "$gitProjectPath/RELEASE-SHA256.txt"
 }
 
 $receipt = Read-ReleaseReceipt -Path $receiptPath
@@ -136,25 +159,25 @@ if (-not [string]::Equals(
     throw "The seal commit parent is not the tested candidate: parent=$candidateCommit; receipt=$($receipt.Candidate)"
 }
 
-$sealedPaths = @(& git -C $ProjectRoot diff --name-only --no-renames $candidateCommit $tagCommit --)
+$sealedPaths = @(& git -C $gitRoot diff --name-only --no-renames $candidateCommit $tagCommit --)
 if ($LASTEXITCODE -ne 0 -or
     $sealedPaths.Count -ne 1 -or
     -not [string]::Equals(
         $sealedPaths[0],
-        'RELEASE-SHA256.txt',
+        $gitManifestPath,
         [StringComparison]::Ordinal)) {
     throw 'The release seal commit must change exactly RELEASE-SHA256.txt relative to the tested candidate.'
 }
 
-$trackedPath = (& git -C $ProjectRoot ls-tree --name-only $tagCommit -- RELEASE-SHA256.txt 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $trackedPath -ne 'RELEASE-SHA256.txt') {
+$trackedPath = (& git -C $gitRoot ls-tree --name-only $tagCommit -- $gitManifestPath 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $trackedPath -ne $gitManifestPath) {
     throw 'RELEASE-SHA256.txt is missing from the release tag.'
 }
-$tagBlob = (& git -C $ProjectRoot rev-parse "${tagName}:RELEASE-SHA256.txt" 2>&1 | Out-String).Trim()
+$tagBlob = (& git -C $gitRoot rev-parse "${tagName}:$gitManifestPath" 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) {
     throw 'Unable to resolve the tagged release digest blob.'
 }
-$workingBlob = (& git -C $ProjectRoot hash-object --no-filters -- RELEASE-SHA256.txt 2>&1 | Out-String).Trim()
+$workingBlob = (& git -C $gitRoot hash-object --no-filters -- $gitManifestPath 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $tagBlob -ne $workingBlob) {
     throw 'The tagged release digest differs byte-for-byte from the working copy.'
 }

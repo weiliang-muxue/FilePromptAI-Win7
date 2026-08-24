@@ -26,6 +26,26 @@ $receiptPath = Join-Path $projectRoot ($receiptRelativePath.Replace('/', '\'))
 $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
 
+function Get-GitRelativeProjectPath {
+    param([string]$GitRoot)
+
+    $root = [IO.Path]::GetFullPath($GitRoot).TrimEnd('\')
+    $project = [IO.Path]::GetFullPath($projectRoot).TrimEnd('\')
+    if ([string]::Equals(
+            $root,
+            $project,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        return ''
+    }
+    $prefix = $root + '\'
+    if (-not $project.StartsWith(
+            $prefix,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The source project must be inside its Git worktree.'
+    }
+    return $project.Substring($prefix.Length).Replace('\', '/')
+}
+
 if (-not (Test-Path -LiteralPath $releaseEvidenceScript -PathType Leaf)) {
     throw "The release evidence helper is missing: $releaseEvidenceScript"
 }
@@ -91,15 +111,24 @@ foreach ($required in @($archivePath, $sidecarPath, $verifyScript)) {
 
 $gitRoot = (& git -C $projectRoot rev-parse --show-toplevel 2>&1 | Out-String).Trim()
 $gitExitCode = $LASTEXITCODE
-if ($gitExitCode -ne 0 -or
-    -not [string]::Equals(
-        [IO.Path]::GetFullPath($gitRoot).TrimEnd('\'),
-        $projectRoot.TrimEnd('\'),
-        [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'seal-release.ps1 must run from the root of its Git worktree.'
+if ($gitExitCode -ne 0) {
+    throw 'seal-release.ps1 requires a Git worktree.'
+}
+$gitProjectPath = Get-GitRelativeProjectPath -GitRoot $gitRoot
+$gitReceiptPath = if ([string]::IsNullOrEmpty($gitProjectPath)) {
+    $receiptRelativePath
+}
+else {
+    "$gitProjectPath/$receiptRelativePath"
+}
+$gitManifestPath = if ([string]::IsNullOrEmpty($gitProjectPath)) {
+    'RELEASE-SHA256.txt'
+}
+else {
+    "$gitProjectPath/RELEASE-SHA256.txt"
 }
 
-& git -C $projectRoot check-ignore -q -- $receiptRelativePath
+& git -C $gitRoot check-ignore -q -- $gitReceiptPath
 if ($LASTEXITCODE -ne 0) {
     throw 'The local release-candidate receipt must remain ignored by Git.'
 }
@@ -143,16 +172,16 @@ if ($indexExitCode -ne 0) {
     throw 'Unable to inspect the Git index before sealing the release.'
 }
 
-$statusLines = @(& git -C $projectRoot status --porcelain=v1 --untracked-files=all --ignore-submodules=none)
+$statusLines = @(& git -C $gitRoot status --porcelain=v1 --untracked-files=all --ignore-submodules=none)
 if ($LASTEXITCODE -ne 0) {
     throw 'Unable to inspect the Git working tree before sealing the release.'
 }
 $unexpectedChanges = @(
     $statusLines | Where-Object {
         $_ -notin @(
-            ' M RELEASE-SHA256.txt',
-            ' D RELEASE-SHA256.txt',
-            '?? RELEASE-SHA256.txt'
+            " M $gitManifestPath",
+            " D $gitManifestPath",
+            "?? $gitManifestPath"
         )
     }
 )
@@ -160,7 +189,7 @@ if ($unexpectedChanges.Count -ne 0) {
     throw "Release sealing requires a clean source candidate. Only an unstaged RELEASE-SHA256.txt may differ.`n$($unexpectedChanges -join "`n")"
 }
 
-$textAttribute = (& git -C $projectRoot check-attr text -- RELEASE-SHA256.txt 2>&1 | Out-String).Trim()
+$textAttribute = (& git -C $gitRoot check-attr text -- $gitManifestPath 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or
     -not $textAttribute.EndsWith(': text: unset', [StringComparison]::Ordinal)) {
     throw 'RELEASE-SHA256.txt must be marked -text in .gitattributes before sealing.'
