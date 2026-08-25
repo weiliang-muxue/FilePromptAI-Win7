@@ -235,6 +235,203 @@ function Read-FilePromptZipManifestIdentity {
     }
 }
 
+function Read-FilePromptReleaseReceipt {
+    param([string]$Path)
+
+    $bytes = Read-FilePromptLockedBytes `
+        -Path $Path `
+        -MaximumLength 16384 `
+        -Description 'The successful release-candidate receipt'
+    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+    try {
+        $text = $strictUtf8.GetString($bytes)
+    }
+    catch {
+        throw 'The release-candidate receipt is not valid UTF-8.'
+    }
+    if ($bytes.Length -ge 3 -and
+        $bytes[0] -eq 0xEF -and
+        $bytes[1] -eq 0xBB -and
+        $bytes[2] -eq 0xBF) {
+        throw 'The release-candidate receipt must be UTF-8 without BOM.'
+    }
+    $pattern = '\A' +
+        'FilePromptAI-Release-Receipt: 2\r\n' +
+        'Suite: tests/RunAllSmokeTests\.ps1\r\n' +
+        'Result: PASS\r\n' +
+        'Version: (?<Version>[0-9A-Za-z](?:[0-9A-Za-z._-]{0,30}[0-9A-Za-z])?)\r\n' +
+        'Candidate-Commit: (?<Candidate>[0-9a-f]{40}(?:[0-9a-f]{24})?)\r\n' +
+        'Archive-Name: (?<Archive>[0-9A-Za-z._-]+)\r\n' +
+        'Archive-SHA256: (?<Hash>[0-9A-F]{64})\r\n' +
+        'Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256\.txt\r\n' +
+        'Package-Manifest-SHA256: (?<ManifestHash>[0-9A-F]{64})\r\n' +
+        'Package-Manifest-Entry-Count: (?<ManifestEntryCount>[1-9][0-9]{0,8})\r\n\z'
+    $match = [Text.RegularExpressions.Regex]::Match(
+        $text,
+        $pattern,
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $match.Success) {
+        throw 'The release-candidate receipt has an invalid or non-canonical format.'
+    }
+    $manifestEntryCount = 0
+    if (-not [int]::TryParse(
+        $match.Groups['ManifestEntryCount'].Value,
+        [Globalization.NumberStyles]::None,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [ref]$manifestEntryCount)) {
+        throw 'The release-candidate receipt has an invalid package manifest entry count.'
+    }
+    return [pscustomobject]@{
+        Version = $match.Groups['Version'].Value
+        Candidate = $match.Groups['Candidate'].Value
+        Archive = $match.Groups['Archive'].Value
+        Hash = $match.Groups['Hash'].Value
+        ManifestHash = $match.Groups['ManifestHash'].Value
+        ManifestEntryCount = $manifestEntryCount
+        Sha256 = Get-FilePromptSha256Hex -Bytes $bytes
+    }
+}
+
+function Read-FilePromptCandidatePromotionEvidence {
+    param([string]$Path)
+
+    $bytes = Read-FilePromptLockedBytes `
+        -Path $Path `
+        -MaximumLength 16384 `
+        -Description 'The tracked candidate-promotion evidence'
+    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+    try {
+        $text = $strictUtf8.GetString($bytes)
+    }
+    catch {
+        throw 'The candidate-promotion evidence is not valid UTF-8.'
+    }
+    $pattern = '\A' +
+        'FilePromptAI-Candidate-Promotion: 1\r\n' +
+        'State: TESTED-CANDIDATE\r\n' +
+        'Version: (?<Version>[0-9A-Za-z](?:[0-9A-Za-z._-]{0,30}[0-9A-Za-z])?)\r\n' +
+        'Candidate-Commit: (?<Candidate>[0-9a-f]{40}(?:[0-9a-f]{24})?)\r\n' +
+        'Archive-Name: (?<Archive>[0-9A-Za-z._-]+)\r\n' +
+        'Archive-SHA256: (?<Hash>[0-9A-F]{64})\r\n' +
+        'Archive-Size: (?<Size>[1-9][0-9]{0,18})\r\n' +
+        'Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256\.txt\r\n' +
+        'Package-Manifest-SHA256: (?<ManifestHash>[0-9A-F]{64})\r\n' +
+        'Package-Manifest-Entry-Count: (?<ManifestEntryCount>[1-9][0-9]{0,8})\r\n' +
+        'Test-Receipt-SHA256: (?<ReceiptHash>[0-9A-F]{64})\r\n' +
+        'Promotion-Scope: CANDIDATE-ONLY\r\n' +
+        'Windows-7-Acceptance: NOT-ASSERTED\r\n\z'
+    $match = [Text.RegularExpressions.Regex]::Match(
+        $text,
+        $pattern,
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $match.Success) {
+        throw 'The candidate-promotion evidence has an invalid or non-canonical format.'
+    }
+    $size = [int64]0
+    $entryCount = 0
+    if (-not [int64]::TryParse(
+            $match.Groups['Size'].Value,
+            [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$size) -or
+        -not [int]::TryParse(
+            $match.Groups['ManifestEntryCount'].Value,
+            [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$entryCount)) {
+        throw 'The candidate-promotion evidence contains an invalid numeric field.'
+    }
+    return [pscustomobject]@{
+        Version = $match.Groups['Version'].Value
+        Candidate = $match.Groups['Candidate'].Value
+        Archive = $match.Groups['Archive'].Value
+        Hash = $match.Groups['Hash'].Value
+        Size = $size
+        ManifestHash = $match.Groups['ManifestHash'].Value
+        ManifestEntryCount = $entryCount
+        ReceiptHash = $match.Groups['ReceiptHash'].Value
+        Sha256 = Get-FilePromptSha256Hex -Bytes $bytes
+    }
+}
+
+function Read-FilePromptFormalReleaseEvidence {
+    param([string]$Path)
+
+    $bytes = Read-FilePromptLockedBytes `
+        -Path $Path `
+        -MaximumLength 16384 `
+        -Description 'The formal release evidence'
+    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+    try {
+        $text = $strictUtf8.GetString($bytes)
+    }
+    catch {
+        throw 'The formal release evidence is not valid UTF-8.'
+    }
+    $pattern = '\A' +
+        'FilePromptAI-Release-Evidence: 1\r\n' +
+        'State: FORMAL-RELEASE\r\n' +
+        'Version: (?<Version>[0-9A-Za-z](?:[0-9A-Za-z._-]{0,30}[0-9A-Za-z])?)\r\n' +
+        'Source-Candidate-Commit: (?<Candidate>[0-9a-f]{40}(?:[0-9a-f]{24})?)\r\n' +
+        'Promotion-Commit: (?<Promotion>[0-9a-f]{40}(?:[0-9a-f]{24})?)\r\n' +
+        'Archive-Name: (?<Archive>[0-9A-Za-z._-]+)\r\n' +
+        'Archive-SHA256: (?<Hash>[0-9A-F]{64})\r\n' +
+        'Archive-Size: (?<Size>[1-9][0-9]{0,18})\r\n' +
+        'Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256\.txt\r\n' +
+        'Package-Manifest-SHA256: (?<ManifestHash>[0-9A-F]{64})\r\n' +
+        'Package-Manifest-Entry-Count: (?<ManifestEntryCount>[1-9][0-9]{0,8})\r\n' +
+        'Candidate-Promotion-Evidence-SHA256: (?<PromotionEvidenceHash>[0-9A-F]{64})\r\n' +
+        'Test-Receipt-SHA256: (?<ReceiptHash>[0-9A-F]{64})\r\n' +
+        'Windows-7-Acceptance-Report-SHA256: (?<ReportHash>[0-9A-F]{64})\r\n' +
+        'Windows-7-Acceptance-Created-UTC: (?<CreatedUtc>[^\r\n]+)\r\n' +
+        'Windows-7-Acceptance-Verifier-Version: (?<VerifierVersion>[0-9]+(?:\.[0-9]+){3})\r\n\z'
+    $match = [Text.RegularExpressions.Regex]::Match(
+        $text,
+        $pattern,
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $match.Success) {
+        throw 'The formal release evidence has an invalid or non-canonical format.'
+    }
+    $size = [int64]0
+    $entryCount = 0
+    $createdUtc = [DateTime]::MinValue
+    if (-not [int64]::TryParse(
+            $match.Groups['Size'].Value,
+            [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$size) -or
+        -not [int]::TryParse(
+            $match.Groups['ManifestEntryCount'].Value,
+            [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$entryCount) -or
+        -not [DateTime]::TryParseExact(
+            $match.Groups['CreatedUtc'].Value,
+            'o',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$createdUtc) -or
+        $createdUtc.Kind -ne [DateTimeKind]::Utc) {
+        throw 'The formal release evidence contains an invalid numeric or timestamp field.'
+    }
+    return [pscustomobject]@{
+        Version = $match.Groups['Version'].Value
+        Candidate = $match.Groups['Candidate'].Value
+        Promotion = $match.Groups['Promotion'].Value
+        Archive = $match.Groups['Archive'].Value
+        Hash = $match.Groups['Hash'].Value
+        Size = $size
+        ManifestHash = $match.Groups['ManifestHash'].Value
+        ManifestEntryCount = $entryCount
+        PromotionEvidenceHash = $match.Groups['PromotionEvidenceHash'].Value
+        ReceiptHash = $match.Groups['ReceiptHash'].Value
+        ReportHash = $match.Groups['ReportHash'].Value
+        CreatedUtc = $createdUtc
+        VerifierVersion = $match.Groups['VerifierVersion'].Value
+        Sha256 = Get-FilePromptSha256Hex -Bytes $bytes
+    }
+}
+
 function Assert-FilePromptExactAttributes {
     param(
         [Xml.XmlElement]$Element,
@@ -439,12 +636,31 @@ function Read-FilePromptAcceptanceEvidence {
         -Name 'packageIdentity')[0]
     Assert-FilePromptExactAttributes `
         -Element $identity `
-        -Names @('status', 'manifestName', 'manifestSha256', 'manifestEntryCount') `
+        -Names @(
+            'status',
+            'archiveName',
+            'archiveSha256',
+            'archiveSize',
+            'manifestName',
+            'manifestSha256',
+            'manifestEntryCount') `
         -Description 'The Windows 7 acceptance package identity'
+    $archiveName = $identity.GetAttribute('archiveName')
+    $archiveSha256 = $identity.GetAttribute('archiveSha256')
+    $archiveSizeText = $identity.GetAttribute('archiveSize')
+    $archiveSize = [int64]0
     $manifestSha256 = $identity.GetAttribute('manifestSha256')
     $manifestEntryText = $identity.GetAttribute('manifestEntryCount')
     $manifestEntryCount = 0
     if ($identity.GetAttribute('status') -ne 'verified' -or
+        $archiveName -ne "FilePromptAI-Win7-Full-v$Version.zip" -or
+        $archiveSha256 -cnotmatch '^[0-9A-F]{64}$' -or
+        -not [int64]::TryParse(
+            $archiveSizeText,
+            [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$archiveSize) -or
+        $archiveSize -le 0 -or
         $identity.GetAttribute('manifestName') -ne 'PACKAGE-CHECKSUMS-SHA256.txt' -or
         $manifestSha256 -cnotmatch '^[0-9A-F]{64}$' -or
         -not [int]::TryParse(
@@ -466,6 +682,7 @@ function Read-FilePromptAcceptanceEvidence {
         'os.win7-sp1',
         'runtime.dotnet-4.8',
         'display.fullhd-100-percent',
+        'archive.identity',
         'package.checksums',
         'files.extract',
         'files.export',
@@ -540,6 +757,9 @@ function Read-FilePromptAcceptanceEvidence {
     return [pscustomobject]@{
         ReportPath = $reportPath
         ReportSha256 = $reportHash
+        ArchiveName = $archiveName
+        ArchiveSha256 = $archiveSha256
+        ArchiveSize = $archiveSize
         ManifestSha256 = $manifestSha256
         ManifestEntryCount = $manifestEntryCount
         VerifierVersion = $root.GetAttribute('verifierVersion')

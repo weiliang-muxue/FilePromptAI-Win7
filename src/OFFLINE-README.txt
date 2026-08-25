@@ -4,7 +4,10 @@ FilePrompt AI for Windows 7 离线完整版
 版本说明
 --------
 
-当前包为 FilePrompt AI v1.17，也是当前唯一维护版本。界面采用左侧会话导航、右侧会话
+当前唯一维护版本为 FilePrompt AI v1.17。版本号或包名本身不表示已经正式发布：只有
+annotated v1.17 标签中的 RELEASE-SHA256.txt、同一 ZIP 的成功测试 receipt，以及规定
+环境中的 Windows 7 PASS XML 和 sidecar 全部通过封存与标签后复核时，该 ZIP 才是
+正式发布包；缺少任一项时均按候选包处理。界面采用左侧会话导航、右侧会话
 记录和底部消息编辑器布局；模型、技能/MCP、会话和维护选项统一收进左侧
 “设置”窗口，不占用主工作区。附件列表收进底部消息编辑器，通过“+ 添加”选择文件、
 粘贴内容或打开路径窗口，有资料时才展开；新回复只更新本轮内容，不会清空并重画已有历史。源码仓库与离线包
@@ -13,11 +16,12 @@ FilePrompt AI for Windows 7 离线完整版
 使用方法
 --------
 
-1. 在解压或运行任何文件前，从可信的 v1.17 Git 标签取得 src 目录中的
-   RELEASE-SHA256.txt，并用 certutil -hashfile FilePromptAI-Win7-Full-v1.17.zip
-   SHA256 核对整个 ZIP。两个摘要必须完全相同。
+1. 在解压或运行任何文件前先判断包状态。已通过正式发布门禁的包应从可信 annotated
+   v1.17 标签内的 src\RELEASE-SHA256.txt 取得固定摘要；其他包必须按候选包处理，
+   并从可信候选提交中的 exe\README.txt 独立取得候选摘要。再用 certutil -hashfile
+   FilePromptAI-Win7-Full-v1.17.zip SHA256 核对整个 ZIP，两个摘要必须完全相同。
 2. ZIP 旁的 .zip.sha256.txt 只是便利副本；若二者来自同一下载位置，它不能独立
-   证明 ZIP 未被替换。RELEASE-SHA256.txt 刻意不放进 ZIP，以免摘要自引用。
+   证明 ZIP 未被替换。正式 RELEASE-SHA256.txt 刻意不放进 ZIP，以免摘要自引用。
 3. 校验成功后完整解压 ZIP，不要在压缩包中直接运行，也不要只复制 EXE。
 4. 双击“Start-FilePromptAI.exe”。
 5. 启动器会自动检测 Microsoft .NET Framework 4.8。
@@ -70,7 +74,9 @@ FilePrompt AI for Windows 7 离线完整版
   content.json 或旧版 content.xml 的 XMind 多画布、主题层级和备注；无需安装
   PowerPoint 或 XMind。
 - 当前运行期跨会话草稿合计最多保留 20 MB 二进制附件，超限时会要求先发送或移除。
-- 连接自检、流式输出、Markdown 排版、资料预览和长会话上下文控制。
+- 连接自检、流式输出、Markdown 排版、资料预览和长会话上下文控制；响应端兼容
+  标准 Chat SSE、常见网关的 Responses 文本事件封装、delta.text 与 NDJSON 分片，
+  但请求仍固定使用 Chat Completions 格式。
 - 可在左侧“设置”→“模型连接”→“模型配置...”保存多个内网模型预设；
   预设 API Key 使用当前用户 DPAPI 加密。
 - API Key 可留空，支持无需鉴权的 Ollama、vLLM 等 OpenAI 兼容内网服务；
@@ -81,8 +87,10 @@ FilePrompt AI for Windows 7 离线完整版
   导出 Excel/CSV；全部在本机生成，不依赖 Microsoft Office 或 XMind。
 - “快捷指令”可填入总结、提炼、翻译、PPT 大纲、XMind 结构和 Markdown 表格模板；
   对话记录菜单可载入上一条用户指令编辑重发，模板不会自动发送。
-- 网络请求具有超时、有限重试和异常流式结束检测；二进制附件请求使用
-  120 秒响应头等待上限且不会自动重复上传。
+- 网络请求具有超时、有限重试和异常流式结束检测；成功响应体断流后不会自动重发。
+  无附件的文字空流仅在 `[DONE]`、`finish_reason: stop` 或普通 `done: true` 且没有正文、
+  思考、工具、拒绝或错误内容时降级一次；`content_filter`、`length`、`tool_calls` 等
+  结束状态不会重提。二进制附件任何情况下都不会因流式兼容降级而自动重复上传。
 - 有未发送文字、已添加资料或运行中任务时，关闭程序会先要求确认，默认不退出。
 - 会话文件内容损坏时先在同目录重命名保留；有效文件若只是暂时被占用、无权限或
   无法安全读取，不会被标记为损坏或移动，而是进入粘性只读保护并保持原文件不变。
@@ -139,12 +147,21 @@ Windows 7 一键验收
 ------------------
 
 在目标 Windows 7 SP1 电脑上安装 .NET Framework 4.8，将主屏设置为
-1920×1080、100% 缩放，然后直接运行根目录中的 Verify-FilePromptAI.exe。
+1920×1080、100% 缩放。保留原始 ZIP，并把它完整解压到另一个目录；原始 ZIP
+不得放在解压目录内。进入解压目录后运行（--archive 参数不可省略）：
+
+.\Verify-FilePromptAI.exe --archive D:\Transfer\FilePromptAI-Win7-Full-v1.17.zip
+
+参数必须指向这次解压所用、名称仍为 FilePromptAI-Win7-Full-v1.17.zip 的原始 ZIP。
+不能只双击验收器；验收期间它会保持原始 ZIP 的只读句柄，并把 ZIP 的 SHA-256、
+大小和包清单身份写入报告。
 
 验收程序不访问公网、不修改注册表、不请求管理员权限，也不使用现有用户会话。
-运行前必须先按“使用方法”从可信 Git 标签核对整个 ZIP；包内清单不能单独证明
+运行前必须先按“使用方法”判断包状态：正式包从可信 Git 标签取得固定摘要，其他包从
+可信候选提交取得独立候选摘要。包内清单不能单独证明
 Verify-FilePromptAI.exe 自身未被替换。
-它先验证 PACKAGE-CHECKSUMS-SHA256.txt 的精确文件集合和每个文件的 SHA-256；
+它先验证 --archive 指向的 ZIP 与 PACKAGE-CHECKSUMS-SHA256.txt 的身份，再校验解压目录
+中的精确文件集合和每个文件的 SHA-256；
 只有包校验通过才会加载和启动真实 app\FilePromptAI.exe。随后用独立临时数据目录
 检查窗口启动，以 127.0.0.1 回环服务验证无 API Key 的主动 /models 发现和流式
 Chat Completions，并调用真实程序检查 TXT、PDF、DOCX、PNG 解析以及 DOCX、PDF、

@@ -16,9 +16,8 @@ if ([string]::IsNullOrWhiteSpace($Version) -or
 $projectRoot = [IO.Path]::GetFullPath(
     (Split-Path -Parent $MyInvocation.MyCommand.Path))
 $manifestPath = Join-Path $projectRoot 'RELEASE-SHA256.txt'
+$formalEvidencePath = Join-Path $projectRoot 'RELEASE-EVIDENCE.txt'
 $archiveName = "FilePromptAI-Win7-Full-v$Version.zip"
-$archivePath = Join-Path $projectRoot $archiveName
-$sidecarPath = "$archivePath.sha256.txt"
 $verifyScript = Join-Path $projectRoot 'tests\VerifyReleaseSha256.ps1'
 $releaseEvidenceScript = Join-Path $projectRoot 'tests\ReleaseAcceptanceEvidence.ps1'
 $receiptRelativePath = "tests/build-artifacts/release/ReleaseCandidate-v$Version.txt"
@@ -103,18 +102,26 @@ function Read-ReleaseReceipt {
     }
 }
 
-foreach ($required in @($archivePath, $sidecarPath, $verifyScript)) {
-    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        throw "Required release artifact is missing: $required"
-    }
-}
-
 $gitRoot = (& git -C $projectRoot rev-parse --show-toplevel 2>&1 | Out-String).Trim()
 $gitExitCode = $LASTEXITCODE
 if ($gitExitCode -ne 0) {
     throw 'seal-release.ps1 requires a Git worktree.'
 }
 $gitProjectPath = Get-GitRelativeProjectPath -GitRoot $gitRoot
+$distributionRoot = Join-Path $gitRoot 'exe'
+$archivePath = Join-Path $distributionRoot $archiveName
+$sidecarPath = "$archivePath.sha256.txt"
+$candidateEvidenceName = "ReleaseCandidate-v$Version.txt"
+$candidateEvidencePath = Join-Path $distributionRoot $candidateEvidenceName
+foreach ($required in @(
+    $archivePath,
+    $sidecarPath,
+    $candidateEvidencePath,
+    $verifyScript)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Required release artifact is missing: $required"
+    }
+}
 $gitReceiptPath = if ([string]::IsNullOrEmpty($gitProjectPath)) {
     $receiptRelativePath
 }
@@ -127,13 +134,23 @@ $gitManifestPath = if ([string]::IsNullOrEmpty($gitProjectPath)) {
 else {
     "$gitProjectPath/RELEASE-SHA256.txt"
 }
+$gitFormalEvidencePath = if ([string]::IsNullOrEmpty($gitProjectPath)) {
+    'RELEASE-EVIDENCE.txt'
+}
+else {
+    "$gitProjectPath/RELEASE-EVIDENCE.txt"
+}
+$gitArchivePath = "exe/$archiveName"
+$gitSidecarPath = "$gitArchivePath.sha256.txt"
+$gitCandidateEvidencePath = "exe/$candidateEvidenceName"
+$gitReadmePath = 'exe/README.txt'
 
 & git -C $gitRoot check-ignore -q -- $gitReceiptPath
 if ($LASTEXITCODE -ne 0) {
     throw 'The local release-candidate receipt must remain ignored by Git.'
 }
 
-$receipt = Read-ReleaseReceipt -Path $receiptPath
+$receipt = Read-FilePromptReleaseReceipt -Path $receiptPath
 if (-not [string]::Equals($receipt.Version, $Version, [StringComparison]::Ordinal) -or
     -not [string]::Equals($receipt.Archive, $archiveName, [StringComparison]::Ordinal)) {
     throw 'The release-candidate receipt is for a different release version or archive.'
@@ -142,6 +159,10 @@ $acceptance = Read-FilePromptAcceptanceEvidence `
     -Path $AcceptanceReportPath `
     -Version $Version
 if (-not [string]::Equals(
+        $acceptance.ArchiveSha256,
+        $receipt.Hash,
+        [StringComparison]::Ordinal) -or
+    -not [string]::Equals(
         $acceptance.ManifestSha256,
         $receipt.ManifestHash,
         [StringComparison]::Ordinal) -or
@@ -154,12 +175,34 @@ $gitExitCode = $LASTEXITCODE
 if ($gitExitCode -ne 0) {
     throw 'Unable to resolve the release candidate HEAD commit.'
 }
-if (-not [string]::Equals(
-    $headCommit,
-    $receipt.Candidate,
-    [StringComparison]::OrdinalIgnoreCase)) {
-    throw "The tested candidate receipt does not match HEAD: receipt=$($receipt.Candidate); HEAD=$headCommit"
+$parentLine = (& git -C $gitRoot rev-list --parents -n 1 $headCommit 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to inspect the promotion commit parent.'
 }
+$parentFields = @($parentLine -split '\s+')
+if ($parentFields.Count -ne 2 -or
+    -not [string]::Equals(
+        $parentFields[1],
+        $receipt.Candidate,
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw "The promotion commit parent is not the tested source candidate: receipt=$($receipt.Candidate); HEAD=$headCommit"
+}
+$promotionPaths = @(& git -C $gitRoot diff --name-only --no-renames $receipt.Candidate $headCommit --)
+$expectedPromotionPaths = @(
+    $gitArchivePath,
+    $gitSidecarPath,
+    $gitReadmePath,
+    $gitCandidateEvidencePath
+)
+if ($LASTEXITCODE -ne 0 -or
+    @(Compare-Object `
+        -ReferenceObject @($expectedPromotionPaths | Sort-Object) `
+        -DifferenceObject @($promotionPaths | Sort-Object) `
+        -CaseSensitive).Count -ne 0) {
+    throw 'The promotion commit must change exactly the four authorized exe release paths.'
+}
+$candidateEvidence = Read-FilePromptCandidatePromotionEvidence `
+    -Path $candidateEvidencePath
 
 # No index entry may differ from HEAD. In particular, an old staged digest
 # must never survive while the working copy is replaced with the new digest.
@@ -181,23 +224,29 @@ $unexpectedChanges = @(
         $_ -notin @(
             " M $gitManifestPath",
             " D $gitManifestPath",
-            "?? $gitManifestPath"
+            "?? $gitManifestPath",
+            " M $gitFormalEvidencePath",
+            " D $gitFormalEvidencePath",
+            "?? $gitFormalEvidencePath"
         )
     }
 )
 if ($unexpectedChanges.Count -ne 0) {
-    throw "Release sealing requires a clean source candidate. Only an unstaged RELEASE-SHA256.txt may differ.`n$($unexpectedChanges -join "`n")"
+    throw "Release sealing requires a clean promotion commit. Only unstaged formal release evidence may differ.`n$($unexpectedChanges -join "`n")"
 }
 
-$textAttribute = (& git -C $gitRoot check-attr text -- $gitManifestPath 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or
-    -not $textAttribute.EndsWith(': text: unset', [StringComparison]::Ordinal)) {
-    throw 'RELEASE-SHA256.txt must be marked -text in .gitattributes before sealing.'
+foreach ($gitTextPath in @($gitManifestPath, $gitFormalEvidencePath)) {
+    $textAttribute = (& git -C $gitRoot check-attr text -- $gitTextPath 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or
+        -not $textAttribute.EndsWith(': text: unset', [StringComparison]::Ordinal)) {
+        throw 'Formal release evidence must be marked -text in .gitattributes before sealing.'
+    }
 }
 
 $archiveIdentity = Read-FilePromptReleaseArchiveIdentity `
     -ArchivePath $archivePath
 $archiveHash = $archiveIdentity.ArchiveSha256
+$archiveSize = (Get-Item -LiteralPath $archivePath).Length
 if (-not [string]::Equals(
     $archiveHash,
     $receipt.Hash,
@@ -211,6 +260,23 @@ if (-not [string]::Equals(
     $archiveIdentity.ManifestEntryCount -ne $receipt.ManifestEntryCount) {
     throw 'The final release ZIP package manifest identity does not match the successful receipt.'
 }
+if ($acceptance.ArchiveSize -ne $archiveSize -or
+    -not [string]::Equals(
+        $acceptance.ArchiveSha256,
+        $archiveHash,
+        [StringComparison]::Ordinal)) {
+    throw 'The Windows 7 acceptance report does not identify the exact promoted release ZIP.'
+}
+if (-not [string]::Equals($candidateEvidence.Version, $Version, [StringComparison]::Ordinal) -or
+    -not [string]::Equals($candidateEvidence.Candidate, $receipt.Candidate, [StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals($candidateEvidence.Archive, $archiveName, [StringComparison]::Ordinal) -or
+    -not [string]::Equals($candidateEvidence.Hash, $archiveHash, [StringComparison]::Ordinal) -or
+    $candidateEvidence.Size -ne $archiveSize -or
+    -not [string]::Equals($candidateEvidence.ManifestHash, $receipt.ManifestHash, [StringComparison]::Ordinal) -or
+    $candidateEvidence.ManifestEntryCount -ne $receipt.ManifestEntryCount -or
+    -not [string]::Equals($candidateEvidence.ReceiptHash, $receipt.Sha256, [StringComparison]::Ordinal)) {
+    throw 'The tracked candidate-promotion evidence does not match the tested promoted artifact.'
+}
 $expectedText = "$archiveHash *$archiveName`r`n"
 $sidecarBytes = [IO.File]::ReadAllBytes($sidecarPath)
 $sidecarText = $strictUtf8.GetString($sidecarBytes)
@@ -220,6 +286,23 @@ if (-not [string]::Equals(
     [StringComparison]::Ordinal)) {
     throw 'The generated ZIP sidecar is not the exact SHA-256 record recorded by the successful test run.'
 }
+$formalEvidenceText =
+    "FilePromptAI-Release-Evidence: 1`r`n" +
+    "State: FORMAL-RELEASE`r`n" +
+    "Version: $Version`r`n" +
+    "Source-Candidate-Commit: $($receipt.Candidate)`r`n" +
+    "Promotion-Commit: $headCommit`r`n" +
+    "Archive-Name: $archiveName`r`n" +
+    "Archive-SHA256: $archiveHash`r`n" +
+    "Archive-Size: $archiveSize`r`n" +
+    "Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256.txt`r`n" +
+    "Package-Manifest-SHA256: $($receipt.ManifestHash)`r`n" +
+    "Package-Manifest-Entry-Count: $($receipt.ManifestEntryCount)`r`n" +
+    "Candidate-Promotion-Evidence-SHA256: $($candidateEvidence.Sha256)`r`n" +
+    "Test-Receipt-SHA256: $($receipt.Sha256)`r`n" +
+    "Windows-7-Acceptance-Report-SHA256: $($acceptance.ReportSha256)`r`n" +
+    "Windows-7-Acceptance-Created-UTC: $($acceptance.CreatedUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture))`r`n" +
+    "Windows-7-Acceptance-Verifier-Version: $($acceptance.VerifierVersion)`r`n"
 
 $temporaryManifest = Join-Path $projectRoot (
     '.RELEASE-SHA256.' + [Guid]::NewGuid().ToString('N') + '.tmp'
@@ -239,16 +322,43 @@ finally {
     }
 }
 
+$temporaryEvidence = Join-Path $projectRoot (
+    '.RELEASE-EVIDENCE.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+)
+try {
+    [IO.File]::WriteAllText($temporaryEvidence, $formalEvidenceText, $utf8NoBom)
+    if (Test-Path -LiteralPath $formalEvidencePath -PathType Leaf) {
+        [IO.File]::Replace($temporaryEvidence, $formalEvidencePath, $null)
+    }
+    else {
+        [IO.File]::Move($temporaryEvidence, $formalEvidencePath)
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $temporaryEvidence -PathType Leaf) {
+        Remove-Item -LiteralPath $temporaryEvidence -Force
+    }
+}
+
+$writtenEvidence = Read-FilePromptFormalReleaseEvidence -Path $formalEvidencePath
+if (-not [string]::Equals(
+        $writtenEvidence.ReportHash,
+        $acceptance.ReportSha256,
+        [StringComparison]::Ordinal)) {
+    throw 'The written formal release evidence failed its self-check.'
+}
+
 & powershell.exe `
     -NoLogo `
     -NoProfile `
     -ExecutionPolicy Bypass `
     -File $verifyScript `
     -Version $Version `
-    -ProjectRoot $projectRoot
+    -ProjectRoot $distributionRoot `
+    -ReleaseManifestPath $manifestPath
 if ($LASTEXITCODE -ne 0) {
     throw 'The sealed release SHA-256 record failed verification.'
 }
 
-Write-Host "SEALED | $manifestPath | candidate=$headCommit | sha256=$archiveHash | manifestSha256=$($receipt.ManifestHash) | acceptanceSha256=$($acceptance.ReportSha256)"
-Write-Host 'Commit only RELEASE-SHA256.txt, then create the annotated release tag.'
+Write-Host "SEALED | $manifestPath | promotion=$headCommit | sha256=$archiveHash | manifestSha256=$($receipt.ManifestHash) | acceptanceSha256=$($acceptance.ReportSha256)"
+Write-Host 'Commit only RELEASE-SHA256.txt and RELEASE-EVIDENCE.txt, then create the annotated release tag.'

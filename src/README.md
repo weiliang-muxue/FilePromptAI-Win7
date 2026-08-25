@@ -2,9 +2,12 @@
 
 一个面向 Windows 7 与内网自定义模型的文件问答 AI 客户端，不依赖 WebView2。
 
-## 当前发布
+## 版本与发布状态
 
-当前版本为 **v1.17**。这是仓库和离线安装包的唯一维护版本；界面采用左侧会话导航、
+当前唯一维护版本为 **v1.17**。版本号或包名本身不表示已经正式发布：只有 annotated
+`v1.17` 标签中的 `RELEASE-SHA256.txt`、同一 ZIP 的成功测试 receipt，以及规定环境中的
+Windows 7 PASS XML 和 sidecar 全部通过封存与标签后复核时，该 ZIP 才是正式发布包；
+缺少任一项时均按候选包处理。这是仓库和离线安装包的唯一维护版本；界面采用左侧会话导航、
 右侧会话记录和底部消息编辑器布局；模型、技能/MCP、会话和维护选项
 统一收进左侧“设置”窗口，不占用主工作区。
 附件列表直接收进底部消息编辑器：通过“+ 添加”选择文件、粘贴内容或打开路径窗口，
@@ -12,8 +15,9 @@
 左侧会话支持置顶、当前/已归档视图，并可从最新模型回复创建独立分支；分支复制
 此前上下文，原会话保持不变。
 打包脚本会在项目根目录生成 `FilePromptAI-Win7-Full-v1.17.zip` 及其 SHA-256
-校验 sidecar；正式发布的固定摘要另存于对应 Git 标签跟踪的
-`RELEASE-SHA256.txt`。源码和构建脚本均保留在仓库中，便于内网环境审计、
+校验 sidecar。便利 sidecar 不决定发布状态；通过上述门禁后，固定摘要另存于对应 Git
+标签跟踪的 `RELEASE-SHA256.txt`。源码和构建脚本均保留在
+仓库中，便于内网环境审计、
 重建和离线分发。
 
 ## 当前功能
@@ -32,6 +36,8 @@
   工具调用默认也逐次确认。
 - 可拖入、选择多个本地文件，也可粘贴一个或多个文件路径后主动点击读取；
   不扫描目录，不会仅因粘贴路径就在后台读取。
+- Windows 路径检查超过 15 秒会保留未读路径供重试；若上一次网络路径检查仍在由
+  Windows 收尾，新操作不会再启动第二个后台检查，避免不可取消的路径探测不断累积。
 - Windows 7 只注册一个始终可见的专用拖放区，避免子控件句柄变化导致
   `DragDrop 注册失败`；拖放不可用时仍可用文件选择器或路径读取。
 - 从剪贴板粘贴文字、图片或资源管理器中复制的文件。
@@ -44,7 +50,9 @@
 - 模型只收到文件名、提取出的内容和内联数据，不会收到本地路径。
 - 文本资料正文会随会话历史保留；图片和无文本内联文件只发送当前轮，后续轮次
   若需再次查看请主动重新添加，程序不会偷偷从本地路径重读。
-- 支持流式输出、停止、复制结果，并可将最新回复或整个会话保存为 Markdown/文本文件。
+- 支持标准 Chat Completions SSE，以及常见兼容网关返回的 Responses 文本事件封装、
+  `delta.text` 和 NDJSON 文本分片；停止、复制结果，并可将最新回复或整个会话保存为
+  Markdown/文本文件。思考字段、工具参数和加密内容不会混入最终回复。
 - 可对最新模型回复原位重新生成，用新结果替换原回复，避免在会话中堆叠重复问答；
   请求失败后可从失败位置快速重试。
 - 可在主工作区快速切换已保存的模型配置，无需先打开设置窗口。
@@ -52,6 +60,9 @@
   被丢弃，不会再次追加到已经完成的回复后面。
 - 窗口缩放和最小尺寸下专用拖放入口保持句柄稳定，对话记录和输入框仍然可见；
   完整上下文摘要可通过悬停提示和无障碍描述查看。
+- 主窗口、设置窗口和路径窗口使用 WinForms DPI 缩放，应用清单声明 system-DPI-aware；
+  固定发布显示门禁读取实际屏幕指标、当前显示模式和 96×96 system DPI，不使用截图缩放
+  来替代真实环境。
 - 支持多会话、新建/重命名/删除会话，并在后续提问中携带当前会话历史；
   超长会话按预算保留最近的完整问答轮次，不拆分单条消息。
 - 会话可置顶、归档或移回，并在“当前 / 已归档”视图间切换；置顶会话始终排在
@@ -61,6 +72,9 @@
 - 可搜索会话标题和近期内容；会话切换时保留当前运行期内尚未发送的草稿。
 - 可在“设置”→“模型连接”中独立测试 URL、Key、模型连接，不写入会话；
   验证失败时会定位到对应输入项。
+- “设置”窗口按一次打开/保存形成事务：在其中应用模型配置只更新待保存值，只有
+  保存并关闭父窗口才写入 `settings.xml`；取消会恢复打开前的连接、生成参数和快捷键。
+  模型配置列表本身仍由“模型配置”窗口单独保存。
 - 模型回复按标题、列表、代码块和 Markdown 表格排版显示。
 - 双击或按 Enter 可预览已主动添加的文字/图片，不会重新读取本地文件。
 - 全部会话可备份为 `.fpc` 并合并恢复；备份不包含 URL、API Key 或模型配置。
@@ -73,8 +87,12 @@
 - MCP 的命令、参数、工作目录、环境变量、URL 和请求头整体使用 Windows DPAPI
   加密保存；不会把这些连接配置作为提示词发给模型。
 - 完整请求 URL 不跟随 3xx 重定向，避免把用户资料转发到其他地址。
-- 网络请求具有响应头超时、流式空闲超时和有限重试；附件请求使用 120 秒等待上限，
-  任何二进制附件请求都不会自动重复上传。HTTP 400/413/415/422 会显示服务端信息以及
+- 网络请求具有响应头超时、流式空闲超时和有限重试；进入成功响应体后若断流或读取超时，
+  不会自动重复提交。无二进制附件的文字请求只有收到 `[DONE]`、`finish_reason: stop`
+  或普通 `done: true` 且没有正文、思考、工具、拒绝或错误内容时，才自动改用一次非流式
+  请求；`content_filter`、`length`、`tool_calls` 等结束状态不会重提。任何二进制附件
+  请求都不会自动重复上传。附件请求使用 120 秒等待上限，
+  HTTP 400/413/415/422 会显示服务端信息以及
   本轮附件名称、类型和大小；二进制数据在 Base64 序列化前后均检查 32 MB 请求上限。
 - 会话按完整问答轮次原子保存；保存失败会回滚，重复启动会切回现有窗口。
 - 会话文件内容损坏时先在同目录重命名保留；若有效文件只是暂时被占用、无权限或
@@ -109,6 +127,10 @@ Content-Type: application/json
 ```
 
 有图片时，`content` 使用 `text` + `image_url` 的多模态数组格式。
+程序不会把上述请求自动改写为 Responses、Anthropic 或 Ollama 原生请求格式；这些服务
+应提供 Chat Completions 兼容入口。响应解析可兼容标准 SSE、部分网关使用的 Responses
+`response.output_text.delta` 事件封装，以及 `application/x-ndjson` 等逐行 JSON 文本分片。
+这项响应兼容不代表原生支持其他请求协议。
 启用技能后，程序会在最前面增加 `system` 消息。启用并成功连接 MCP 后，程序
 使用 Chat Completions 的 `tools`、`tool_choice: "auto"`、assistant
 `tool_calls` 和 `tool` 结果消息完成最多 8 轮调用；自定义模型接口需兼容这些字段。
@@ -187,15 +209,21 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 
 ## Windows 7 离线完整版
 
-优先使用 `FilePromptAI-Win7-Full-v1.17.zip`。在解压或运行其中任何程序前，
-先从可信的 `v1.17` Git 标签取得 `RELEASE-SHA256.txt`，再核对 ZIP 的 SHA-256：
+优先使用 `FilePromptAI-Win7-Full-v1.17.zip`。在解压或运行其中任何程序前，先按本节开头
+的门禁证据判断包状态。已封存的正式包应从可信 annotated `v1.17` 标签取得固定摘要；
+未满足正式发布门禁的包必须按候选包处理，并从可信候选提交中的 `exe/README.txt`
+独立取得候选摘要。随后核对 ZIP：
 
 ```powershell
+# 正式包
 git show v1.17:src/RELEASE-SHA256.txt
+# 候选包
+git show <可信候选提交>:exe/README.txt
 certutil -hashfile .\FilePromptAI-Win7-Full-v1.17.zip SHA256
 ```
 
-两个摘要必须完全相同。随 ZIP 生成的 `.zip.sha256.txt` 只是便利副本，若它与 ZIP
+只能使用与包状态相符的摘要来源，列出的摘要必须与计算结果完全相同。随 ZIP 生成的
+`.zip.sha256.txt` 只是便利副本，若它与 ZIP
 来自同一下载位置，不能独立证明 ZIP 未被替换。`RELEASE-SHA256.txt` 刻意不放进
 ZIP，避免摘要自引用；它也为包内 `Verify-FilePromptAI.exe` 提供外部身份锚点。
 
@@ -226,17 +254,24 @@ Chat Completions 兼容端点。用户主动启用的 stdio MCP 及其运行环�
 
 ### Windows 7 一键验收
 
-在目标 Windows 7 SP1 电脑上完整解压离线包，先安装包内 .NET Framework 4.8，
-将主屏设置为 1920×1080、100% 缩放，然后直接运行：
+在目标 Windows 7 SP1 电脑上先安装包内 .NET Framework 4.8，将主屏设置为
+1920×1080、100% 缩放。保留原始 ZIP，并把它完整解压到另一个目录；原始 ZIP
+不得放在解压目录内。进入解压目录后运行，`--archive` 参数不可省略：
 
-```text
-Verify-FilePromptAI.exe
+```powershell
+.\Verify-FilePromptAI.exe --archive `
+    'D:\Transfer\FilePromptAI-Win7-Full-v1.17.zip'
 ```
 
+参数必须指向这次解压所用、名称仍为 `FilePromptAI-Win7-Full-v1.17.zip` 的原始 ZIP。
+验收期间程序会保持该 ZIP 的只读句柄并把其 SHA-256、大小和包清单身份写入报告。
+
 验收程序不访问公网、不修改注册表、不请求管理员权限，也不使用用户现有会话数据。
-运行前必须先按上一节从可信 Git 标签核对整个 ZIP；包内清单不能单独证明验收程序
+运行前必须先按上一节判断包状态：正式包从可信 Git 标签取得固定摘要，其他包从可信
+候选提交取得独立候选摘要。包内清单不能单独证明验收程序
 自身未被替换。
-它会校验精确包清单，使用独立临时数据目录启动真实客户端，并通过 127.0.0.1
+它会把原始 ZIP 身份与解压载荷进行比对，校验精确包清单，使用独立临时数据目录启动
+真实客户端，并通过 127.0.0.1
 回环服务验证无 API Key 的主动 `/models` 发现及流式 Chat Completions；TXT、PDF、
 DOCX、PNG 解析和 DOCX、PDF、PPTX、XLSX、CSV、XMind 导出也直接调用包内真实程序。
 XML schema 2 报告和同名 `.sha256.txt` 写到 `%TEMP%`；如果该目录位于发布包内，则
@@ -278,19 +313,52 @@ powershell -ExecutionPolicy Bypass -File .\build-offline-package.ps1
 Microsoft Authenticode 签名，并生成 `PACKAGE-CHECKSUMS-SHA256.txt`。仅准备和
 检查发布目录而不生成 ZIP 时，可加 `-StageOnly`。
 
-发布维护者先提交待发布源码，确认工作树和索引均为空，再以发布候选模式运行完整
-测试。只有全部测试和离线包验证成功后，脚本才会在被 Git 忽略的
-`tests\build-artifacts\release` 中写入 schema 2 receipt，把测试通过的 candidate HEAD、
-最终 ZIP 的名称和 SHA-256，以及 staging/ZIP 中同一份包清单的 SHA-256 和条目数绑定：
+正式发布使用三段不可跳步的提交链：`C`（源码候选）→ `P`（原字节晋升）→ `S`
+（Windows 7 PASS 证据封存）。本文档只定义门禁，不表示当前仓库已经取得 Windows 7
+PASS。
+
+先提交待发布源码为 `C`，确认整个工作树和索引均为空，再以发布候选模式运行完整测试。
+只有全部测试和离线包验证成功后，脚本才会在被 Git 忽略的
+`tests\build-artifacts\release` 中写入 schema 2 receipt，把 `C`、最终 ZIP 的名称、
+SHA-256、大小，以及 staging/ZIP 中同一份包清单的原始字节 SHA-256 和条目数绑定：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1 `
     -Version 1.17 -WriteReleaseReceipt
 ```
 
-receipt 生成后不得重建 ZIP 或移动 HEAD。将最终 ZIP 原样带到规定环境，在真实
-Windows 7 SP1、.NET Framework 4.8、1920×1080@96 DPI 机器上运行包内验收器并保留
-总 `PASS` XML 及其同名 sidecar。随后把该报告路径作为必填参数显式封存固定摘要：
+receipt 生成后不得重建 ZIP 或移动 `C`。从 `C` 的干净工作树运行晋升脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\promote-release-candidate.ps1 `
+    -Version 1.17
+```
+
+脚本逐字节复制 receipt 绑定的 ZIP 和 sidecar 到 `exe`，再生成候选说明与候选证据。
+随后创建 `C` 的直接子提交 `P`；`P` 必须只修改以下四个路径，不能夹带源码或正式
+发布结论：
+
+```text
+exe/FilePromptAI-Win7-Full-v1.17.zip
+exe/FilePromptAI-Win7-Full-v1.17.zip.sha256.txt
+exe/README.txt
+exe/ReleaseCandidate-v1.17.txt
+```
+
+其中 ZIP 由 Git LFS 跟踪；晋升不允许重压缩或重建它。`P` 仍只是已测试候选，不表示
+Windows 7 已通过。
+
+将 `P` 中的同一字节 ZIP 原样带到规定环境，在 Windows 7 SP1、.NET Framework 4.8、
+1920×1080@96 DPI 机器上解压到独立目录，同时把原始 ZIP 留在解压目录之外，然后运行：
+
+```powershell
+.\Verify-FilePromptAI.exe --archive `
+    'D:\Transfer\FilePromptAI-Win7-Full-v1.17.zip'
+```
+
+只有验收器输出总 `PASS` 时，才同时保留 XML 和同名 sidecar；Windows 10/11 的诊断报告
+不能替代该证据。回到仍位于 `P` 且保留本地 receipt 的构建工作树，把报告路径作为必填
+参数运行封存：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\seal-release.ps1 `
@@ -298,13 +366,22 @@ powershell -ExecutionPolicy Bypass -File .\seal-release.ps1 `
     -AcceptanceReportPath 'D:\Acceptance\FilePromptAI-Acceptance-....xml'
 ```
 
-封存要求 HEAD 仍是 receipt 中的已测试 candidate、索引完全为空，并且除未暂存的
-`RELEASE-SHA256.txt` 外源码工作树干净；实际 ZIP 和 sidecar 也必须与 receipt 完全
-一致。封存脚本以禁止 DTD 和外部实体的 XML 读取器验证报告 sidecar、schema、总
-`PASS`/退出码 0、v1.17 verifier、全部必需检查唯一且为 `pass`，并要求报告、receipt
-及 ZIP 内清单的内容身份完全一致。摘要文件固定使用 UTF-8 无 BOM 和 CRLF，且
-`.gitattributes` 禁止 Git 对它做换行转换。随后只提交 `RELEASE-SHA256.txt`，创建
-指向该提交的 annotated 标签。
+封存要求 `HEAD` 是 `P`、`P` 的唯一父提交是 receipt 中的 `C`、`C`→`P` 恰好只有上述
+四个路径，且索引为空。除封存脚本将要写入的两个文件外，工作树必须干净；`exe` 中
+ZIP、sidecar 和候选证据也必须仍与 receipt 完全一致。脚本以禁止 DTD 和外部实体的 XML
+读取器验证报告 sidecar、schema、总 `PASS`/退出码 0、v1.17 verifier、全部必需检查唯一
+且为 `pass`，并要求报告、receipt、候选证据及 ZIP 内清单的身份完全一致。
+
+封存脚本只生成以下两个正式证据文件。只提交这两个文件，创建 `P` 的直接子提交 `S`：
+
+```text
+src/RELEASE-SHA256.txt
+src/RELEASE-EVIDENCE.txt
+```
+
+两文件固定使用 UTF-8 无 BOM 和 CRLF，且 `.gitattributes` 禁止 Git 换行转换。`S` 必须
+恰好是两文件 seal commit，不能修改 ZIP 或任何其他路径；annotated `v1.17` 标签只可
+指向 `S`。
 封存后不得再次运行会重建 ZIP 的命令。
 
 标签建立后运行：
@@ -316,11 +393,10 @@ powershell -ExecutionPolicy Bypass `
     -AcceptanceReportPath 'D:\Acceptance\FilePromptAI-Acceptance-....xml'
 ```
 
-验证脚本要求标签指向 HEAD；seal commit 必须只有一个父提交，该父提交必须是 receipt
-记录的 candidate，并且两者之间只能修改 `RELEASE-SHA256.txt`。它还会按原始字节
-复核标签中的 CRLF 摘要，并再次确认本地 ZIP、sidecar、receipt 与同一真实 Win7
-验收报告的包清单身份一致。全部通过后，再将同一 ZIP 与摘要上传为 GitHub Release
-资产并做一次下载后复核。
+验证脚本要求标签指向 `S`，复核 `C`→`P` 的四路径 promotion commit 和 `P`→`S` 的
+两文件 seal commit，并按原始字节确认标签中的 CRLF 摘要、本地 ZIP、sidecar、receipt、
+候选证据与所提供 Windows 7 PASS 报告的身份一致。只有该命令实际通过后，才可发布或
+推送标签与资产；文档和候选文件本身不能证明已经通过。
 
 ## 测试
 
@@ -330,9 +406,10 @@ powershell -ExecutionPolicy Bypass `
 powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1
 ```
 
-界面截图测试单独运行 `tests\CaptureUiSmokeTest.ps1`，支持正常窗口、最小窗口和
-125% 物理尺寸预览。发布前在 1920×1080、100% 缩放的主屏上运行
-`tests\CaptureUiSmokeTest.ps1 -FullHd100`，脚本会校验屏幕尺寸和 96 DPI，
+界面截图测试单独运行 `tests\CaptureUiSmokeTest.ps1`，支持正常窗口和最小窗口。
+截图进程会声明 system-DPI-aware，使窗口边界和截图使用同一物理坐标空间；该脚本
+不提供或声称 125% 实机验收。发布前在 1920×1080、100% 缩放的主屏上运行
+`tests\CaptureUiSmokeTest.ps1 -FullHd100`，脚本会校验屏幕指标、当前显示模式和 96×96 DPI，
 并按完整工作区生成固定验收截图。设置、技能和 MCP 窗口分别使用
 `tests\CaptureExtensionsUiSmokeTest.ps1 -Mode Settings`、`-Mode Skills` 和
 `-Mode Mcp` 留存截图；发布验收时三条命令均加 `-FullHd100`，脚本同样会拒绝

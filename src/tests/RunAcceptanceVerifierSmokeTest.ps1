@@ -52,6 +52,8 @@ $testRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = Split-Path -Parent $testRoot
 $stagingRoot = Join-Path $projectRoot "FilePromptAI-offline-release-v$Version"
 $verifierPath = Join-Path $stagingRoot 'Verify-FilePromptAI.exe'
+$archiveName = "FilePromptAI-Win7-Full-v$Version.zip"
+$archivePath = Join-Path $projectRoot $archiveName
 $isWindows7Sp1 = [FilePromptAIAcceptanceHostOs]::IsWindows7Sp1Workstation()
 
 function Assert-ExpectedHostOutcome {
@@ -84,8 +86,10 @@ function Assert-ExpectedHostOutcome {
     }
 }
 
-if (-not (Test-Path -LiteralPath $verifierPath -PathType Leaf)) {
-    throw "Acceptance verifier was not found: $verifierPath"
+foreach ($required in @($verifierPath, $archivePath)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Acceptance verifier input was not found: $required"
+    }
 }
 
 $beforeReports = @(
@@ -111,7 +115,7 @@ if (Test-Path -LiteralPath $acceptanceFallbackRoot -PathType Container) {
     )
 }
 
-$output = & $verifierPath 2>&1 | Out-String
+$output = & $verifierPath --archive $archivePath 2>&1 | Out-String
 $exitCode = $LASTEXITCODE
 Write-Host $output.TrimEnd()
 
@@ -121,6 +125,7 @@ Assert-ExpectedHostOutcome `
     -Context 'The primary verifier run'
 foreach ($requiredPass in @(
     'runtime.dotnet-4.8',
+    'archive.identity',
     'package.checksums',
     'files.extract',
     'files.export',
@@ -185,6 +190,9 @@ function Assert-FailedReportHasNoVerifiedIdentity {
             $failedRoot.result -ne 'fail' -or
             $failedIdentity.status -ne 'unverified' -or
             $failedIdentity.Attributes.Count -ne 1 -or
+            $failedIdentity.HasAttribute('archiveName') -or
+            $failedIdentity.HasAttribute('archiveSha256') -or
+            $failedIdentity.HasAttribute('archiveSize') -or
             $failedIdentity.HasAttribute('manifestSha256') -or
             $failedIdentity.HasAttribute('manifestEntryCount') -or
             $failedIdentity.HasAttribute('manifestName')) {
@@ -207,6 +215,17 @@ function Assert-FailedReportHasNoVerifiedIdentity {
         }
     }
 }
+
+$missingArchiveOutput = & $verifierPath 2>&1 | Out-String
+$missingArchiveExitCode = $LASTEXITCODE
+if (($missingArchiveExitCode -band 128) -ne 128 -or
+    $missingArchiveOutput -notmatch 'Usage: Verify-FilePromptAI\.exe --archive') {
+    throw "The verifier accepted an invocation without the original ZIP.`n$missingArchiveOutput"
+}
+Assert-FailedReportHasNoVerifiedIdentity `
+    -Output $missingArchiveOutput `
+    -Context 'The missing-archive verifier run'
+
 if ($document.filePromptAiAcceptance.result -ne $(
     if ($isWindows7Sp1) { 'pass' } else { 'fail' }
 )) {
@@ -225,6 +244,7 @@ $requiredIds = @(
     'os.win7-sp1',
     'runtime.dotnet-4.8',
     'display.fullhd-100-percent',
+    'archive.identity',
     'package.checksums',
     'files.extract',
     'files.export',
@@ -249,7 +269,14 @@ if ($isWindows7Sp1) {
     $expectedManifestEntryCount = @(
         Get-Content -LiteralPath $manifestPath -Encoding UTF8
     ).Count
+    $expectedArchive = Get-Item -LiteralPath $archivePath
+    $expectedArchiveHash = (
+        Get-FileHash -LiteralPath $archivePath -Algorithm SHA256
+    ).Hash
     if ($identity.status -ne 'verified' -or
+        $identity.archiveName -cne $archiveName -or
+        $identity.archiveSha256 -cne $expectedArchiveHash -or
+        [int64]$identity.archiveSize -ne $expectedArchive.Length -or
         $identity.manifestName -ne 'PACKAGE-CHECKSUMS-SHA256.txt' -or
         $identity.manifestSha256 -cne $expectedManifestHash -or
         [int]$identity.manifestEntryCount -ne $expectedManifestEntryCount) {
@@ -259,6 +286,9 @@ if ($isWindows7Sp1) {
 else {
     if ($identity.status -ne 'unverified' -or
         $identity.Attributes.Count -ne 1 -or
+        $identity.HasAttribute('archiveName') -or
+        $identity.HasAttribute('archiveSha256') -or
+        $identity.HasAttribute('archiveSize') -or
         $identity.HasAttribute('manifestSha256') -or
         $identity.HasAttribute('manifestEntryCount') -or
         $identity.HasAttribute('manifestName')) {
@@ -304,7 +334,7 @@ $savedTmp = $env:TMP
 try {
     $env:TEMP = $stagingRoot
     $env:TMP = $stagingRoot
-    $fallbackOutput = & $verifierPath 2>&1 | Out-String
+    $fallbackOutput = & $verifierPath --archive $archivePath 2>&1 | Out-String
     $fallbackExitCode = $LASTEXITCODE
 }
 finally {
@@ -373,7 +403,7 @@ try {
 
     $env:TEMP = $junctionPath
     $env:TMP = $junctionPath
-    $junctionOutput = & $verifierPath 2>&1 | Out-String
+    $junctionOutput = & $verifierPath --archive $archivePath 2>&1 | Out-String
     $junctionExitCode = $LASTEXITCODE
 }
 finally {
@@ -429,7 +459,7 @@ try {
         Join-Path $tamperRoot 'acceptance\fixtures\acceptance.txt'
     ) -Value 'tampered' -Encoding ASCII
     $tamperVerifier = Join-Path $tamperRoot 'Verify-FilePromptAI.exe'
-    $tamperOutput = & $tamperVerifier 2>&1 | Out-String
+    $tamperOutput = & $tamperVerifier --archive $archivePath 2>&1 | Out-String
     $tamperExitCode = $LASTEXITCODE
     if (($tamperExitCode -band 8) -ne 8 -or
         $tamperOutput -notmatch '(?m)^FAIL \| package\.checksums \|' -or
@@ -469,7 +499,7 @@ try {
         $tamperManifest,
         $tamperLines,
         (New-Object Text.UTF8Encoding($false)))
-    $recalculatedOutput = & $tamperVerifier 2>&1 | Out-String
+    $recalculatedOutput = & $tamperVerifier --archive $archivePath 2>&1 | Out-String
     $recalculatedExitCode = $LASTEXITCODE
     if (($recalculatedExitCode -band 8) -ne 8 -or
         $recalculatedOutput -notmatch '(?m)^FAIL \| package\.checksums \|' -or

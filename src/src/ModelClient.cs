@@ -164,6 +164,7 @@ namespace FilePromptAIWin7
             Notify(onStatus, "正在连接模型接口…");
 
             AttemptException firstError = null;
+            EmptyStreamCompatibilityException emptyStreamError = null;
             try
             {
                 return await SendAttemptAsync(
@@ -172,6 +173,10 @@ namespace FilePromptAIWin7
                     true,
                     onDelta,
                     cancellationToken).ConfigureAwait(false);
+            }
+            catch (EmptyStreamCompatibilityException exception)
+            {
+                emptyStreamError = exception;
             }
             catch (AttemptException exception)
             {
@@ -205,13 +210,29 @@ namespace FilePromptAIWin7
                 throw;
             }
 
-            if (HasBinaryAttachments(request) ||
+            if (emptyStreamError != null)
+            {
+                if (HasBinaryAttachments(request))
+                {
+                    throw CreateEmptyStreamAttachmentException(
+                        emptyStreamError,
+                        request);
+                }
+
+                Notify(
+                    onStatus,
+                    "流式响应未包含兼容正文，正在改用普通请求…");
+            }
+            else if (HasBinaryAttachments(request) ||
                 !IsStreamUnsupported(firstError))
             {
                 throw CreateUserFacingException(firstError, request);
             }
+            else
+            {
+                Notify(onStatus, "接口不支持流式输出，正在改用普通请求…");
+            }
 
-            Notify(onStatus, "接口不支持流式输出，正在改用普通请求…");
             AttemptException secondError = null;
             try
             {
@@ -221,6 +242,10 @@ namespace FilePromptAIWin7
                     false,
                     onDelta,
                     cancellationToken).ConfigureAwait(false);
+            }
+            catch (EmptyStreamCompatibilityException exception)
+            {
+                throw new ModelCallException(exception.Message);
             }
             catch (AttemptException exception)
             {
@@ -712,10 +737,9 @@ namespace FilePromptAIWin7
                             ? string.Empty
                             : response.Content.Headers.ContentType.MediaType;
 
-                        if (mediaType.IndexOf(
-                            "text/event-stream",
-                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        if (IsServerSentEventsMediaType(mediaType))
                         {
+                            ValidateStreamingResponseLength(response.Content);
                             using (Stream streamBody = await response.Content
                                 .ReadAsStreamAsync()
                                 .ConfigureAwait(false))
@@ -723,17 +747,57 @@ namespace FilePromptAIWin7
                                 return await ReadServerSentEventsAsync(
                                     streamBody,
                                     onDelta,
-                                    cancellationToken).ConfigureAwait(false);
+                                    cancellationToken,
+                                    stream,
+                                    requestId,
+                                    mediaType).ConfigureAwait(false);
+                            }
+                        }
+
+                        if (IsJsonLinesMediaType(mediaType))
+                        {
+                            ValidateStreamingResponseLength(response.Content);
+                            using (Stream streamBody = await response.Content
+                                .ReadAsStreamAsync()
+                                .ConfigureAwait(false))
+                            {
+                                return await ReadJsonLinesAsync(
+                                    streamBody,
+                                    onDelta,
+                                    cancellationToken,
+                                    stream,
+                                    requestId,
+                                    mediaType).ConfigureAwait(false);
                             }
                         }
 
                         string body = await ReadBoundedResponseAsync(
                             response.Content,
                             cancellationToken).ConfigureAwait(false);
-                        string result = ExtractText(Deserialize(body));
+                        if (stream && LooksLikeServerSentEvents(body))
+                        {
+                            byte[] bufferedBytes = Encoding.UTF8.GetBytes(body);
+                            using (MemoryStream bufferedStream = new MemoryStream(
+                                bufferedBytes,
+                                false))
+                            {
+                                return await ReadServerSentEventsAsync(
+                                    bufferedStream,
+                                    onDelta,
+                                    cancellationToken,
+                                    true,
+                                    requestId,
+                                    string.IsNullOrEmpty(mediaType)
+                                        ? "未提供"
+                                        : mediaType).ConfigureAwait(false);
+                            }
+                        }
+
+                        object parsedBody = Deserialize(body);
+                        string result = ExtractText(parsedBody);
                         if (string.IsNullOrEmpty(result))
                         {
-                            string error = ExtractErrorMessage(Deserialize(body));
+                            string error = ExtractErrorMessage(parsedBody);
                             if (!string.IsNullOrEmpty(error))
                             {
                                 throw new ModelCallException(error);
@@ -1052,7 +1116,7 @@ namespace FilePromptAIWin7
 
                 ObserveFault(readTask);
                 cancellationToken.ThrowIfCancellationRequested();
-                throw new ConnectionAttemptException(
+                throw new StreamReadException(
                     "模型接口响应读取超时（连续 " +
                     FormatSeconds(responseReadIdleTimeout) +
                     " 秒未收到数据）。",
@@ -1188,12 +1252,16 @@ namespace FilePromptAIWin7
         private async Task<string> ReadServerSentEventsAsync(
             Stream stream,
             Action<string> onDelta,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool requestedStreaming,
+            string requestId,
+            string mediaType)
         {
             StringBuilder result = new StringBuilder();
             StringBuilder eventData = new StringBuilder();
             string eventName = string.Empty;
             bool streamCompleted = false;
+            StreamDiagnostics diagnostics = new StreamDiagnostics();
             // Closing a socket is not a successful stream terminator.
             using (StreamReader reader = new StreamReader(
                 stream,
@@ -1202,14 +1270,16 @@ namespace FilePromptAIWin7
                 4096,
                 true))
             {
+                BoundedLineState lineState = new BoundedLineState();
                 while (true)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     string line;
                     try
                     {
-                        line = await AwaitReadWithIdleTimeoutAsync(
-                            reader.ReadLineAsync(),
+                        line = await ReadBoundedLineAsync(
+                            reader,
+                            lineState,
                             cancellationToken).ConfigureAwait(false);
                     }
                     catch (ObjectDisposedException)
@@ -1228,7 +1298,8 @@ namespace FilePromptAIWin7
                             eventData,
                             eventName,
                             result,
-                            onDelta);
+                            onDelta,
+                            diagnostics);
                         break;
                     }
 
@@ -1244,7 +1315,8 @@ namespace FilePromptAIWin7
                             eventData,
                             eventName,
                             result,
-                            onDelta);
+                            onDelta,
+                            diagnostics);
                         eventName = string.Empty;
                         if (streamCompleted)
                         {
@@ -1288,15 +1360,191 @@ namespace FilePromptAIWin7
 
             if (!streamCompleted)
             {
-                throw new ConnectionAttemptException(
+                throw new StreamReadException(
                     "流式响应未完整结束，请重试；已收到的部分内容不会保存为成功回复。",
                     null);
             }
 
             if (result.Length == 0)
             {
+                string details = BuildStreamDiagnosticSuffix(
+                    diagnostics,
+                    requestId,
+                    mediaType);
+                if (requestedStreaming && diagnostics.CanFallback)
+                {
+                    throw new EmptyStreamCompatibilityException(
+                        "接口建立了流式连接，但没有返回文本内容；" +
+                            "当前响应结构可能不兼容流式解析。" +
+                            details);
+                }
+
                 throw new ModelCallException(
-                    "接口建立了流式连接，但没有返回文本内容。");
+                    BuildEmptyStreamMessage(diagnostics) + details);
+            }
+
+            return result.ToString();
+        }
+
+        private static void ValidateStreamingResponseLength(HttpContent content)
+        {
+            if (content == null)
+            {
+                return;
+            }
+
+            long? contentLength = content.Headers.ContentLength;
+            // UTF-8 can use up to four bytes per character. This is only an
+            // early rejection; the decoded stream is bounded independently.
+            long maximumBytes = MaximumResponseBytes;
+            if (contentLength.HasValue && contentLength.Value > maximumBytes)
+            {
+                throw new ModelCallException(
+                    "模型接口响应超过 8 MB 字符安全限制。");
+            }
+        }
+
+        private async Task<string> ReadBoundedLineAsync(
+            StreamReader reader,
+            BoundedLineState state,
+            CancellationToken cancellationToken)
+        {
+            StringBuilder line = null;
+            while (true)
+            {
+                if (state.Offset >= state.Count)
+                {
+                    state.Count = await AwaitReadWithIdleTimeoutAsync(
+                        reader.ReadAsync(
+                            state.Buffer,
+                            0,
+                            state.Buffer.Length),
+                        cancellationToken).ConfigureAwait(false);
+                    state.Offset = 0;
+                    if (state.Count == 0)
+                    {
+                        return line == null ? null : line.ToString();
+                    }
+                }
+
+                while (state.Offset < state.Count)
+                {
+                    char current = state.Buffer[state.Offset++];
+                    if (current == '\n')
+                    {
+                        if (line != null && line.Length > 0 &&
+                            line[line.Length - 1] == '\r')
+                        {
+                            line.Length--;
+                        }
+
+                        return line == null
+                            ? string.Empty
+                            : line.ToString();
+                    }
+
+                    if (line == null)
+                    {
+                        line = new StringBuilder(4096);
+                    }
+                    if (line.Length >= MaximumResponseCharacters)
+                    {
+                        throw new ModelCallException(
+                            "模型接口响应超过 8 MB 字符安全限制。");
+                    }
+
+                    line.Append(current);
+                }
+            }
+        }
+
+        private async Task<string> ReadJsonLinesAsync(
+            Stream stream,
+            Action<string> onDelta,
+            CancellationToken cancellationToken,
+            bool requestedStreaming,
+            string requestId,
+            string mediaType)
+        {
+            StringBuilder result = new StringBuilder();
+            StreamDiagnostics diagnostics = new StreamDiagnostics();
+            bool streamCompleted = false;
+            using (StreamReader reader = new StreamReader(
+                stream,
+                Encoding.UTF8,
+                true,
+                4096,
+                true))
+            {
+                BoundedLineState lineState = new BoundedLineState();
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    string line = await ReadBoundedLineAsync(
+                        reader,
+                        lineState,
+                        cancellationToken).ConfigureAwait(false);
+                    if (line == null)
+                    {
+                        break;
+                    }
+
+                    line = line.Trim();
+                    if (line.Length == 0)
+                    {
+                        continue;
+                    }
+                    if (line[0] == '\u001e')
+                    {
+                        line = line.Substring(1).TrimStart();
+                    }
+                    if (line.Length == 0)
+                    {
+                        continue;
+                    }
+                    if (line.Length > MaximumResponseCharacters)
+                    {
+                        throw new ModelCallException(
+                            "模型接口响应超过 8 MB 字符安全限制。");
+                    }
+
+                    StringBuilder record = new StringBuilder(line);
+                    streamCompleted = ProcessEventData(
+                        record,
+                        string.Empty,
+                        result,
+                        onDelta,
+                        diagnostics);
+                    if (streamCompleted)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (!streamCompleted)
+            {
+                throw new StreamReadException(
+                    "流式响应未完整结束，请重试；已收到的部分内容不会保存为成功回复。",
+                    null);
+            }
+
+            if (result.Length == 0)
+            {
+                string details = BuildStreamDiagnosticSuffix(
+                    diagnostics,
+                    requestId,
+                    mediaType);
+                if (requestedStreaming && diagnostics.CanFallback)
+                {
+                    throw new EmptyStreamCompatibilityException(
+                        "接口建立了流式连接，但没有返回文本内容；" +
+                            "当前响应结构可能不兼容流式解析。" +
+                            details);
+                }
+
+                throw new ModelCallException(
+                    BuildEmptyStreamMessage(diagnostics) + details);
             }
 
             return result.ToString();
@@ -1306,17 +1554,29 @@ namespace FilePromptAIWin7
             StringBuilder eventData,
             string eventName,
             StringBuilder result,
-            Action<string> onDelta)
+            Action<string> onDelta,
+            StreamDiagnostics diagnostics)
         {
             if (eventData.Length == 0)
             {
-                return IsCompletionName(eventName);
+                bool namedCompletion = IsCompletionName(eventName);
+                if (namedCompletion)
+                {
+                    diagnostics.CompletionSeen = true;
+                }
+
+                return namedCompletion;
             }
 
             string data = eventData.ToString();
             eventData.Clear();
+            diagnostics.EventCount++;
+            diagnostics.AddEventName(eventName);
             if (string.Equals(data.Trim(), "[DONE]", StringComparison.OrdinalIgnoreCase))
             {
+                diagnostics.CompletionSeen = true;
+                diagnostics.FallbackCompletionSeen = true;
+                diagnostics.AddTerminationReason("[DONE]");
                 return true;
             }
 
@@ -1353,27 +1613,95 @@ namespace FilePromptAIWin7
             {
                 throw new ModelCallException(error);
             }
+            if (IsErrorEventName(eventName) || IsErrorEventPayload(parsed))
+            {
+                throw new ModelCallException(
+                    "模型接口返回了流式错误事件，但没有提供错误说明。");
+            }
 
-            string delta = ExtractDelta(parsed);
+            ClassifyStreamEvent(parsed, eventName, diagnostics);
+            ClassifyStreamTermination(parsed, diagnostics);
+            bool completed = IsCompletionName(eventName) ||
+                IsExplicitStreamCompletion(parsed);
+            string delta = ExtractDelta(parsed, eventName, !completed);
             if (!string.IsNullOrEmpty(delta))
             {
                 EnsureResponseCapacity(result.Length, delta.Length);
                 result.Append(delta);
+                diagnostics.VisibleTextEventCount++;
                 Notify(onDelta, delta);
             }
-            else if (result.Length == 0)
+
+            if (completed && AllowsCompletionSnapshot(parsed, eventName))
             {
                 string fullText = ExtractText(parsed);
-                if (!string.IsNullOrEmpty(fullText))
+                string snapshotSuffix = GetCompletionSnapshotSuffix(
+                    result.ToString(),
+                    fullText);
+                if (!string.IsNullOrEmpty(snapshotSuffix))
                 {
-                    EnsureResponseCapacity(result.Length, fullText.Length);
-                    result.Append(fullText);
-                    Notify(onDelta, fullText);
+                    EnsureResponseCapacity(
+                        result.Length,
+                        snapshotSuffix.Length);
+                    result.Append(snapshotSuffix);
+                    diagnostics.VisibleTextEventCount++;
+                    Notify(onDelta, snapshotSuffix);
                 }
             }
 
-            return IsCompletionName(eventName) ||
-                IsExplicitStreamCompletion(parsed);
+            if (completed)
+            {
+                diagnostics.CompletionSeen = true;
+            }
+
+            return completed;
+        }
+
+        private static bool AllowsCompletionSnapshot(
+            object parsed,
+            string eventName)
+        {
+            IDictionary<string, object> root = AsDictionary(parsed);
+            if (root == null)
+            {
+                return false;
+            }
+
+            string effectiveType = GetString(root, "type");
+            if (string.IsNullOrWhiteSpace(effectiveType))
+            {
+                effectiveType = eventName ?? string.Empty;
+            }
+
+            return !IsHiddenReasoningType(effectiveType) &&
+                !IsToolDeltaType(effectiveType) &&
+                !IsInputEchoType(effectiveType) &&
+                !HasReasoningContent(root, effectiveType) &&
+                !HasToolContent(root, effectiveType) &&
+                !HasRefusalContent(root, effectiveType);
+        }
+
+        private static string GetCompletionSnapshotSuffix(
+            string accumulated,
+            string snapshot)
+        {
+            accumulated = accumulated ?? string.Empty;
+            snapshot = snapshot ?? string.Empty;
+            if (snapshot.Length == 0)
+            {
+                return string.Empty;
+            }
+            if (accumulated.Length == 0)
+            {
+                return snapshot;
+            }
+            if (snapshot.Length > accumulated.Length &&
+                snapshot.StartsWith(accumulated, StringComparison.Ordinal))
+            {
+                return snapshot.Substring(accumulated.Length);
+            }
+
+            return string.Empty;
         }
 
         private static bool IsExplicitStreamCompletion(object parsed)
@@ -1417,6 +1745,690 @@ namespace FilePromptAIWin7
             foreach (object choiceValue in choices)
             {
                 if (HasFinishReason(AsDictionary(choiceValue)))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void ClassifyStreamTermination(
+            object parsed,
+            StreamDiagnostics diagnostics)
+        {
+            IDictionary<string, object> root = AsDictionary(parsed);
+            if (root == null)
+            {
+                return;
+            }
+
+            if (IsTrue(GetValue(root, "done")))
+            {
+                string doneReason = GetString(root, "done_reason");
+                if (string.IsNullOrWhiteSpace(doneReason) ||
+                    IsNormalStopReason(doneReason))
+                {
+                    diagnostics.FallbackCompletionSeen = true;
+                }
+                else
+                {
+                    diagnostics.SemanticTerminationSeen = true;
+                }
+
+                diagnostics.AddTerminationReason(
+                    string.IsNullOrWhiteSpace(doneReason)
+                        ? "done:true"
+                        : NormalizeTerminationReason(doneReason));
+            }
+
+            ClassifyFinishReason(root, diagnostics);
+            IList choices = AsList(GetValue(root, "choices"));
+            if (choices == null)
+            {
+                return;
+            }
+
+            foreach (object choiceValue in choices)
+            {
+                ClassifyFinishReason(
+                    AsDictionary(choiceValue),
+                    diagnostics);
+            }
+        }
+
+        private static void ClassifyFinishReason(
+            IDictionary<string, object> value,
+            StreamDiagnostics diagnostics)
+        {
+            if (value == null)
+            {
+                return;
+            }
+
+            string reason = Convert.ToString(
+                GetValue(value, "finish_reason"),
+                CultureInfo.InvariantCulture);
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                return;
+            }
+
+            reason = reason.Trim();
+            diagnostics.AddTerminationReason(
+                NormalizeTerminationReason(reason));
+            if (IsNormalStopReason(reason))
+            {
+                diagnostics.FallbackCompletionSeen = true;
+            }
+            else
+            {
+                diagnostics.SemanticTerminationSeen = true;
+            }
+        }
+
+        private static bool IsNormalStopReason(string value)
+        {
+            return string.Equals(
+                (value ?? string.Empty).Trim(),
+                "stop",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string NormalizeTerminationReason(string value)
+        {
+            string normalized = (value ?? string.Empty).Trim();
+            if (string.Equals(
+                    normalized,
+                    "stop",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return "stop";
+            }
+            if (string.Equals(
+                    normalized,
+                    "content_filter",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return "content_filter";
+            }
+            if (string.Equals(
+                    normalized,
+                    "length",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return "length";
+            }
+            if (string.Equals(
+                    normalized,
+                    "tool_calls",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return "tool_calls";
+            }
+            if (string.Equals(
+                    normalized,
+                    "function_call",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return "function_call";
+            }
+
+            return "other";
+        }
+
+        private static bool IsCompletionEvent(
+            object parsed,
+            string eventName)
+        {
+            return IsCompletionName(eventName) ||
+                IsExplicitStreamCompletion(parsed);
+        }
+
+        private static bool IsErrorEventName(string eventName)
+        {
+            string normalized = (eventName ?? string.Empty).Trim();
+            return string.Equals(
+                    normalized,
+                    "error",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "response.failed",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "response.incomplete",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsErrorEventPayload(object parsed)
+        {
+            IDictionary<string, object> root = AsDictionary(parsed);
+            if (root == null)
+            {
+                return false;
+            }
+
+            string type = GetString(root, "type");
+            string status = GetString(root, "status");
+            IDictionary<string, object> response =
+                AsDictionary(GetValue(root, "response"));
+            string responseStatus = GetString(response, "status");
+            return IsErrorEventName(type) ||
+                string.Equals(
+                    status,
+                    "failed",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    status,
+                    "incomplete",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    responseStatus,
+                    "failed",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    responseStatus,
+                    "incomplete",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void ClassifyStreamEvent(
+            object parsed,
+            string eventName,
+            StreamDiagnostics diagnostics)
+        {
+            IDictionary<string, object> root = AsDictionary(parsed);
+            if (root == null)
+            {
+                return;
+            }
+
+            string effectiveType = GetString(root, "type");
+            if (string.IsNullOrWhiteSpace(effectiveType))
+            {
+                effectiveType = eventName ?? string.Empty;
+            }
+            diagnostics.AddEventName(effectiveType);
+
+            if (HasReasoningContent(root, effectiveType))
+            {
+                diagnostics.HiddenReasoningEventCount++;
+            }
+            if (HasToolContent(root, effectiveType))
+            {
+                diagnostics.ToolEventCount++;
+            }
+            if (HasRefusalContent(root, effectiveType))
+            {
+                diagnostics.RefusalEventCount++;
+            }
+        }
+
+        private static bool HasReasoningContent(
+            IDictionary<string, object> root,
+            string effectiveType)
+        {
+            string[] payloadKeys =
+            {
+                "delta", "text", "output_text", "content", "data",
+                "summary", "signature",
+                "reasoning", "reasoning_content", "thinking", "analysis",
+                "encrypted_content", "choices", "message", "response",
+                "output", "item"
+            };
+            if ((IsHiddenReasoningType(effectiveType) &&
+                    HasMeaningfulPayload(root, payloadKeys)) ||
+                HasMeaningfulPayload(
+                    root,
+                    "reasoning",
+                    "reasoning_content",
+                    "thinking",
+                    "analysis",
+                    "encrypted_content") ||
+                HasMeaningfulTypedPart(
+                    GetValue(root, "content"),
+                    IsHiddenReasoningType,
+                    payloadKeys))
+            {
+                return true;
+            }
+
+            IDictionary<string, object> message =
+                AsDictionary(GetValue(root, "message"));
+            if (HasMeaningfulPayload(
+                    message,
+                    "reasoning",
+                    "reasoning_content",
+                    "thinking",
+                    "analysis",
+                    "encrypted_content") ||
+                HasMeaningfulTypedPart(
+                    GetValue(message, "content"),
+                    IsHiddenReasoningType,
+                    payloadKeys))
+            {
+                return true;
+            }
+
+            IDictionary<string, object> rootDelta =
+                AsDictionary(GetValue(root, "delta"));
+            if ((IsHiddenReasoningType(GetString(rootDelta, "type")) &&
+                    HasMeaningfulPayload(rootDelta, payloadKeys)) ||
+                HasMeaningfulPayload(
+                    rootDelta,
+                    "reasoning",
+                    "reasoning_content",
+                    "thinking",
+                    "analysis",
+                    "encrypted_content") ||
+                HasMeaningfulTypedPart(
+                    GetValue(rootDelta, "content"),
+                    IsHiddenReasoningType,
+                    payloadKeys))
+            {
+                return true;
+            }
+
+            IList choices = AsList(GetValue(root, "choices"));
+            if (choices == null)
+            {
+                return false;
+            }
+
+            foreach (object choiceValue in choices)
+            {
+                IDictionary<string, object> choice =
+                    AsDictionary(choiceValue);
+                IDictionary<string, object> delta =
+                    AsDictionary(GetValue(choice, "delta"));
+                IDictionary<string, object> choiceMessage =
+                    AsDictionary(GetValue(choice, "message"));
+                if ((IsHiddenReasoningType(GetString(delta, "type")) &&
+                        HasMeaningfulPayload(delta, payloadKeys)) ||
+                    HasMeaningfulPayload(
+                        delta,
+                        "reasoning",
+                        "reasoning_content",
+                        "thinking",
+                        "analysis",
+                        "encrypted_content") ||
+                    HasMeaningfulPayload(
+                        choiceMessage,
+                        "reasoning",
+                        "reasoning_content",
+                        "thinking",
+                        "analysis",
+                        "encrypted_content") ||
+                    HasMeaningfulTypedPart(
+                        GetValue(delta, "content"),
+                        IsHiddenReasoningType,
+                        payloadKeys) ||
+                    HasMeaningfulTypedPart(
+                        GetValue(choiceMessage, "content"),
+                        IsHiddenReasoningType,
+                        payloadKeys))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsHiddenReasoningType(string type)
+        {
+            string normalized = (type ?? string.Empty).Trim();
+            return normalized.IndexOf(
+                    "reasoning",
+                    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normalized.IndexOf(
+                    "thinking",
+                    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normalized.IndexOf(
+                    "analysis",
+                    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normalized.IndexOf(
+                    "encrypted",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool HasToolContent(
+            IDictionary<string, object> root,
+            string effectiveType)
+        {
+            string[] payloadKeys =
+            {
+                "delta", "text", "output_text", "content", "data",
+                "partial_json",
+                "arguments", "input", "tool_calls", "function_call",
+                "function", "name", "id", "call_id", "choices", "message",
+                "response", "output", "item"
+            };
+            if ((IsToolDeltaType(effectiveType) &&
+                    HasMeaningfulPayload(root, payloadKeys)) ||
+                HasMeaningfulPayload(root, "tool_calls", "function_call") ||
+                HasMeaningfulTypedPart(
+                    GetValue(root, "content"),
+                    IsToolDeltaType,
+                    payloadKeys))
+            {
+                return true;
+            }
+
+            IDictionary<string, object> rootMessage =
+                AsDictionary(GetValue(root, "message"));
+            if (HasMeaningfulPayload(
+                    rootMessage,
+                    "tool_calls",
+                    "function_call") ||
+                HasMeaningfulTypedPart(
+                    GetValue(rootMessage, "content"),
+                    IsToolDeltaType,
+                    payloadKeys))
+            {
+                return true;
+            }
+
+            IDictionary<string, object> rootDelta =
+                AsDictionary(GetValue(root, "delta"));
+            if ((IsToolDeltaType(GetString(rootDelta, "type")) &&
+                    HasMeaningfulPayload(rootDelta, payloadKeys)) ||
+                HasMeaningfulPayload(
+                    rootDelta,
+                    "tool_calls",
+                    "function_call") ||
+                HasMeaningfulTypedPart(
+                    GetValue(rootDelta, "content"),
+                    IsToolDeltaType,
+                    payloadKeys))
+            {
+                return true;
+            }
+
+            IList choices = AsList(GetValue(root, "choices"));
+            if (choices == null)
+            {
+                return false;
+            }
+
+            foreach (object choiceValue in choices)
+            {
+                IDictionary<string, object> choice =
+                    AsDictionary(choiceValue);
+                IDictionary<string, object> delta =
+                    AsDictionary(GetValue(choice, "delta"));
+                IDictionary<string, object> message =
+                    AsDictionary(GetValue(choice, "message"));
+                if ((IsToolDeltaType(GetString(delta, "type")) &&
+                        HasMeaningfulPayload(delta, payloadKeys)) ||
+                    HasMeaningfulPayload(delta, "tool_calls", "function_call") ||
+                    HasMeaningfulPayload(message, "tool_calls", "function_call") ||
+                    HasMeaningfulTypedPart(
+                        GetValue(delta, "content"),
+                        IsToolDeltaType,
+                        payloadKeys) ||
+                    HasMeaningfulTypedPart(
+                        GetValue(message, "content"),
+                        IsToolDeltaType,
+                        payloadKeys))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsToolDeltaType(string type)
+        {
+            string normalized = (type ?? string.Empty).Trim();
+            return normalized.IndexOf(
+                    "tool",
+                    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normalized.IndexOf(
+                    "function",
+                    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normalized.IndexOf(
+                    "input_json",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool HasRefusalContent(
+            IDictionary<string, object> root,
+            string effectiveType)
+        {
+            IDictionary<string, object> rootDelta =
+                AsDictionary(GetValue(root, "delta"));
+            IDictionary<string, object> rootMessage =
+                AsDictionary(GetValue(root, "message"));
+            if (HasMeaningfulPayload(root, "refusal") ||
+                HasMeaningfulPayload(rootDelta, "refusal") ||
+                HasMeaningfulPayload(rootMessage, "refusal") ||
+                ((effectiveType ?? string.Empty).IndexOf(
+                    "refusal",
+                    StringComparison.OrdinalIgnoreCase) >= 0 &&
+                HasMeaningfulPayload(
+                    root,
+                    "delta",
+                    "text",
+                    "content",
+                    "refusal")))
+            {
+                return true;
+            }
+
+            IList choices = AsList(GetValue(root, "choices"));
+            if (choices == null)
+            {
+                return false;
+            }
+
+            foreach (object choiceValue in choices)
+            {
+                IDictionary<string, object> choice =
+                    AsDictionary(choiceValue);
+                IDictionary<string, object> delta =
+                    AsDictionary(GetValue(choice, "delta"));
+                IDictionary<string, object> message =
+                    AsDictionary(GetValue(choice, "message"));
+                if (HasMeaningfulPayload(delta, "refusal") ||
+                    HasMeaningfulPayload(message, "refusal"))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool HasMeaningfulPayload(
+            IDictionary<string, object> dictionary,
+            params string[] keys)
+        {
+            if (dictionary == null)
+            {
+                return false;
+            }
+
+            foreach (string key in keys)
+            {
+                object value = GetValue(dictionary, key);
+                if (IsOpaquePayloadKey(key)
+                    ? HasMeaningfulOpaqueValue(value)
+                    : HasMeaningfulValue(value))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool HasMeaningfulValue(object value)
+        {
+            if (value == null)
+            {
+                return false;
+            }
+
+            string text = value as string;
+            if (text != null)
+            {
+                return !string.IsNullOrWhiteSpace(text);
+            }
+
+            IList list = AsList(value);
+            if (list != null)
+            {
+                foreach (object item in list)
+                {
+                    if (HasMeaningfulValue(item))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            IDictionary<string, object> dictionary = AsDictionary(value);
+            if (dictionary != null)
+            {
+                foreach (KeyValuePair<string, object> pair in dictionary)
+                {
+                    if (!IsProtocolMetadataKey(pair.Key) &&
+                        (IsOpaquePayloadKey(pair.Key)
+                            ? HasMeaningfulOpaqueValue(pair.Value)
+                            : HasMeaningfulValue(pair.Value)))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool HasMeaningfulOpaqueValue(object value)
+        {
+            if (value == null)
+            {
+                return false;
+            }
+
+            string text = value as string;
+            if (text != null)
+            {
+                return !string.IsNullOrWhiteSpace(text);
+            }
+
+            IList list = AsList(value);
+            if (list != null)
+            {
+                foreach (object item in list)
+                {
+                    if (HasMeaningfulOpaqueValue(item))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            IDictionary<string, object> dictionary = AsDictionary(value);
+            if (dictionary != null)
+            {
+                foreach (KeyValuePair<string, object> pair in dictionary)
+                {
+                    if (HasMeaningfulOpaqueValue(pair.Value))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool IsOpaquePayloadKey(string value)
+        {
+            string normalized = (value ?? string.Empty).Trim();
+            return string.Equals(
+                    normalized,
+                    "arguments",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "input",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "data",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "partial_json",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "encrypted_content",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "signature",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsProtocolMetadataKey(string value)
+        {
+            string normalized = (value ?? string.Empty).Trim();
+            return string.Equals(normalized, "type", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normalized, "index", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normalized, "role", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normalized, "status", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normalized, "finish_reason", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normalized, "done", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normalized, "done_reason", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool HasMeaningfulTypedPart(
+            object content,
+            Func<string, bool> typePredicate,
+            params string[] payloadKeys)
+        {
+            if (typePredicate == null)
+            {
+                return false;
+            }
+
+            IDictionary<string, object> singlePart = AsDictionary(content);
+            if (singlePart != null &&
+                typePredicate(GetString(singlePart, "type")) &&
+                HasMeaningfulPayload(singlePart, payloadKeys))
+            {
+                return true;
+            }
+
+            IList parts = AsList(content);
+            if (parts == null)
+            {
+                return false;
+            }
+
+            foreach (object partValue in parts)
+            {
+                IDictionary<string, object> part =
+                    AsDictionary(partValue);
+                if (part != null &&
+                    typePredicate(GetString(part, "type")) &&
+                    HasMeaningfulPayload(part, payloadKeys))
                 {
                     return true;
                 }
@@ -1488,6 +2500,129 @@ namespace FilePromptAIWin7
                 throw new ModelCallException(
                     "模型接口响应超过 8 MB 字符安全限制。");
             }
+        }
+
+        private static string BuildEmptyStreamMessage(
+            StreamDiagnostics diagnostics)
+        {
+            if (diagnostics.ToolEventCount > 0)
+            {
+                return "接口建立了流式连接，但没有返回文本内容。" +
+                    "模型只返回了工具调用，没有返回最终可显示正文。";
+            }
+            if (diagnostics.RefusalEventCount > 0)
+            {
+                return "接口建立了流式连接，但没有返回文本内容。" +
+                    "模型拒绝了请求，但接口没有返回可显示的拒绝说明。";
+            }
+            if (diagnostics.HiddenReasoningEventCount > 0)
+            {
+                return "接口建立了流式连接，但没有返回文本内容。" +
+                    "模型只返回了思考内容，没有返回最终可显示正文。";
+            }
+            if (diagnostics.SemanticTerminationSeen)
+            {
+                return "接口建立了流式连接，但没有返回文本内容。" +
+                    "模型以非普通状态结束，程序没有自动重复提交。";
+            }
+
+            return "接口建立了流式连接，但没有返回文本内容。";
+        }
+
+        private static string BuildStreamDiagnosticSuffix(
+            StreamDiagnostics diagnostics,
+            string requestId,
+            string mediaType)
+        {
+            StringBuilder suffix = new StringBuilder();
+            suffix.Append("\r\n\r\n响应结构：");
+            suffix.Append(string.IsNullOrWhiteSpace(mediaType)
+                ? "未提供 Content-Type"
+                : mediaType.Trim());
+            suffix.Append("；流事件 ");
+            suffix.Append(diagnostics.EventCount.ToString(
+                CultureInfo.InvariantCulture));
+            suffix.Append(" 个；终止标记：");
+            suffix.Append(diagnostics.CompletionSeen ? "是" : "否");
+
+            string names = diagnostics.GetEventNames();
+            if (!string.IsNullOrEmpty(names))
+            {
+                suffix.Append("；事件类型：");
+                suffix.Append(names);
+            }
+            string terminationReasons = diagnostics.GetTerminationReasons();
+            if (!string.IsNullOrEmpty(terminationReasons))
+            {
+                suffix.Append("；结束原因：");
+                suffix.Append(terminationReasons);
+            }
+            if (!string.IsNullOrWhiteSpace(requestId))
+            {
+                suffix.Append("\r\n请求 ID：");
+                suffix.Append(requestId.Trim());
+            }
+
+            return suffix.ToString();
+        }
+
+        private static ModelCallException CreateEmptyStreamAttachmentException(
+            EmptyStreamCompatibilityException exception,
+            ModelRequest request)
+        {
+            return new ModelCallException(
+                exception.Message +
+                "\r\n\r\n为避免重复上传，程序没有自动改用普通请求；" +
+                "请确认该接口支持附件流式输出后手动重试。" +
+                BuildBinaryAttachmentSummary(request));
+        }
+
+        private static bool IsServerSentEventsMediaType(string mediaType)
+        {
+            return string.Equals(
+                (mediaType ?? string.Empty).Trim(),
+                "text/event-stream",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsJsonLinesMediaType(string mediaType)
+        {
+            string normalized = (mediaType ?? string.Empty).Trim();
+            return string.Equals(
+                    normalized,
+                    "application/x-ndjson",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "application/ndjson",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "application/jsonlines",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "application/json-seq",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool LooksLikeServerSentEvents(string body)
+        {
+            if (string.IsNullOrWhiteSpace(body))
+            {
+                return false;
+            }
+
+            string normalized = body.TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
+            if (!normalized.StartsWith("data:", StringComparison.OrdinalIgnoreCase) &&
+                !normalized.StartsWith("event:", StringComparison.OrdinalIgnoreCase) &&
+                !normalized.StartsWith(":", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return normalized.IndexOf("\r\n\r\n", StringComparison.Ordinal) >= 0 ||
+                normalized.IndexOf("\n\n", StringComparison.Ordinal) >= 0;
         }
 
         private TimeSpan GetResponseHeadersTimeout(ModelRequest request)
@@ -2301,7 +3436,10 @@ namespace FilePromptAIWin7
             return json.DeserializeObject(value);
         }
 
-        private static string ExtractDelta(object parsed)
+        private static string ExtractDelta(
+            object parsed,
+            string eventName,
+            bool allowSnapshotFallback)
         {
             IDictionary<string, object> root = AsDictionary(parsed);
             if (root == null)
@@ -2310,10 +3448,30 @@ namespace FilePromptAIWin7
             }
 
             string type = GetString(root, "type");
-            if (!string.IsNullOrEmpty(type) &&
-                type.IndexOf("output_text.delta", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (string.IsNullOrWhiteSpace(type))
             {
-                return GetString(root, "delta");
+                type = eventName ?? string.Empty;
+            }
+
+            if (string.Equals(
+                type,
+                "response.output_text.delta",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return ExtractDeltaValue(GetValue(root, "delta"));
+            }
+            if (string.Equals(
+                type,
+                "response.refusal.delta",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return ExtractDeltaValue(GetValue(root, "delta"));
+            }
+            if (IsHiddenReasoningType(type) ||
+                IsToolDeltaType(type) ||
+                IsInputEchoType(type))
+            {
+                return string.Empty;
             }
 
             IList choices = AsList(GetValue(root, "choices"));
@@ -2322,7 +3480,20 @@ namespace FilePromptAIWin7
                 IDictionary<string, object> choice = AsDictionary(choices[0]);
                 IDictionary<string, object> delta =
                     AsDictionary(GetValue(choice, "delta"));
-                string content = ExtractContent(GetValue(delta, "content"));
+                string content = ExtractVisibleContent(
+                    GetValue(delta, "content"));
+                if (!string.IsNullOrEmpty(content))
+                {
+                    return content;
+                }
+
+                content = ExtractTypedDeltaText(delta);
+                if (!string.IsNullOrEmpty(content))
+                {
+                    return content;
+                }
+
+                content = ExtractVisibleContent(GetValue(delta, "refusal"));
                 if (!string.IsNullOrEmpty(content))
                 {
                     return content;
@@ -2333,11 +3504,144 @@ namespace FilePromptAIWin7
                 {
                     return choiceText;
                 }
+
+                if (allowSnapshotFallback)
+                {
+                    IDictionary<string, object> message =
+                        AsDictionary(GetValue(choice, "message"));
+                    content = ExtractVisibleContent(
+                        GetValue(message, "content"));
+                    if (string.IsNullOrEmpty(content))
+                    {
+                        content = ExtractVisibleContent(
+                            GetValue(message, "refusal"));
+                    }
+                    if (!string.IsNullOrEmpty(content))
+                    {
+                        return content;
+                    }
+                }
             }
 
             IDictionary<string, object> topDelta =
                 AsDictionary(GetValue(root, "delta"));
-            return ExtractContent(GetValue(topDelta, "content"));
+            string topContent = ExtractVisibleContent(
+                GetValue(topDelta, "content"));
+            if (string.IsNullOrEmpty(topContent))
+            {
+                topContent = ExtractTypedDeltaText(topDelta);
+            }
+            if (string.IsNullOrEmpty(topContent))
+            {
+                topContent = GetStringValue(topDelta, "output_text");
+            }
+            if (!string.IsNullOrEmpty(topContent))
+            {
+                return topContent;
+            }
+
+            if (allowSnapshotFallback)
+            {
+                IDictionary<string, object> messageRoot =
+                    AsDictionary(GetValue(root, "message"));
+                string messageContent = ExtractVisibleContent(
+                    GetValue(messageRoot, "content"));
+                if (!string.IsNullOrEmpty(messageContent))
+                {
+                    return messageContent;
+                }
+
+                return GetValue(root, "response") as string ?? string.Empty;
+            }
+
+            return string.Empty;
+        }
+
+        private static string ExtractTypedDeltaText(
+            IDictionary<string, object> delta)
+        {
+            if (delta == null)
+            {
+                return string.Empty;
+            }
+
+            string type = GetString(delta, "type");
+            if (!string.IsNullOrWhiteSpace(type) &&
+                !IsVisibleDeltaTextType(type))
+            {
+                return string.Empty;
+            }
+
+            return GetStringValue(delta, "text");
+        }
+
+        private static bool IsVisibleDeltaTextType(string type)
+        {
+            string normalized = (type ?? string.Empty).Trim();
+            return string.Equals(
+                    normalized,
+                    "text",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "text_delta",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "output_text",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "output_text.delta",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    "response.output_text.delta",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsInputEchoType(string type)
+        {
+            string normalized = (type ?? string.Empty).Trim();
+            return normalized.IndexOf(
+                    "input_text",
+                    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normalized.IndexOf(
+                    "input_audio",
+                    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normalized.IndexOf(
+                    "input_image",
+                    StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normalized.IndexOf(
+                    "input_file",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static string ExtractDeltaValue(object value)
+        {
+            string text = value as string;
+            if (text != null)
+            {
+                return text;
+            }
+
+            IDictionary<string, object> dictionary = AsDictionary(value);
+            if (dictionary == null)
+            {
+                return string.Empty;
+            }
+
+            text = ExtractVisibleContent(GetValue(dictionary, "content"));
+            if (string.IsNullOrEmpty(text))
+            {
+                text = GetStringValue(dictionary, "text");
+            }
+            if (string.IsNullOrEmpty(text))
+            {
+                text = GetStringValue(dictionary, "output_text");
+            }
+
+            return text;
         }
 
         private static string ExtractText(object parsed)
@@ -2360,13 +3664,20 @@ namespace FilePromptAIWin7
                 IDictionary<string, object> choice = AsDictionary(choices[0]);
                 IDictionary<string, object> message =
                     AsDictionary(GetValue(choice, "message"));
-                string content = ExtractContent(GetValue(message, "content"));
+                string content = ExtractVisibleContent(
+                    GetValue(message, "content"));
                 if (!string.IsNullOrEmpty(content))
                 {
                     return content;
                 }
 
-                content = ExtractContent(GetValue(choice, "text"));
+                content = ExtractVisibleContent(GetValue(choice, "text"));
+                if (!string.IsNullOrEmpty(content))
+                {
+                    return content;
+                }
+
+                content = ExtractVisibleContent(GetValue(message, "refusal"));
                 if (!string.IsNullOrEmpty(content))
                 {
                     return content;
@@ -2375,10 +3686,17 @@ namespace FilePromptAIWin7
 
             IDictionary<string, object> messageRoot =
                 AsDictionary(GetValue(root, "message"));
-            string messageContent = ExtractContent(GetValue(messageRoot, "content"));
+            string messageContent = ExtractVisibleContent(
+                GetValue(messageRoot, "content"));
             if (!string.IsNullOrEmpty(messageContent))
             {
                 return messageContent;
+            }
+
+            string responseText = GetValue(root, "response") as string;
+            if (!string.IsNullOrEmpty(responseText))
+            {
+                return responseText;
             }
 
             StringBuilder output = new StringBuilder();
@@ -2396,7 +3714,7 @@ namespace FilePromptAIWin7
                 return output.ToString();
             }
 
-            return ExtractContent(GetValue(root, "content"));
+            return ExtractVisibleContent(GetValue(root, "content"));
         }
 
         private static void AppendOutputArray(StringBuilder output, IList items)
@@ -2409,11 +3727,21 @@ namespace FilePromptAIWin7
             foreach (object item in items)
             {
                 IDictionary<string, object> itemDictionary = AsDictionary(item);
+                string itemType = GetString(itemDictionary, "type");
+                if (!string.IsNullOrWhiteSpace(itemType) &&
+                    !string.Equals(
+                        itemType,
+                        "message",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 object contentValue = GetValue(itemDictionary, "content");
-                string content = ExtractContent(contentValue);
+                string content = ExtractVisibleContent(contentValue);
                 if (string.IsNullOrEmpty(content))
                 {
-                    content = GetString(itemDictionary, "text");
+                    content = GetStringValue(itemDictionary, "text");
                 }
 
                 if (!string.IsNullOrEmpty(content))
@@ -2424,6 +3752,11 @@ namespace FilePromptAIWin7
         }
 
         private static string ExtractContent(object content)
+        {
+            return ExtractVisibleContent(content);
+        }
+
+        private static string ExtractVisibleContent(object content)
         {
             if (content == null)
             {
@@ -2439,13 +3772,19 @@ namespace FilePromptAIWin7
             IDictionary<string, object> dictionary = AsDictionary(content);
             if (dictionary != null)
             {
-                string text = GetString(dictionary, "text");
+                string type = GetString(dictionary, "type");
+                if (!IsVisibleContentType(type))
+                {
+                    return string.Empty;
+                }
+
+                string text = GetStringValue(dictionary, "text");
                 if (!string.IsNullOrEmpty(text))
                 {
                     return text;
                 }
 
-                return GetString(dictionary, "content");
+                return GetStringValue(dictionary, "content");
             }
 
             IList list = AsList(content);
@@ -2457,10 +3796,31 @@ namespace FilePromptAIWin7
             StringBuilder result = new StringBuilder();
             foreach (object item in list)
             {
-                result.Append(ExtractContent(item));
+                result.Append(ExtractVisibleContent(item));
             }
 
             return result.ToString();
+        }
+
+        private static bool IsVisibleContentType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                return true;
+            }
+
+            return string.Equals(
+                    type,
+                    "text",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    type,
+                    "output_text",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    type,
+                    "refusal",
+                    StringComparison.OrdinalIgnoreCase);
         }
 
         private static string ExtractErrorMessage(object parsed)
@@ -2490,7 +3850,8 @@ namespace FilePromptAIWin7
                 return LimitServerErrorMessage(errorText);
             }
 
-            message = GetString(root, "message");
+            object rootMessageValue = GetValue(root, "message");
+            message = rootMessageValue as string;
             if (!string.IsNullOrWhiteSpace(message))
             {
                 return LimitServerErrorMessage(message);
@@ -2520,6 +3881,16 @@ namespace FilePromptAIWin7
                 {
                     return LimitServerErrorMessage(message);
                 }
+            }
+
+            IDictionary<string, object> response =
+                AsDictionary(GetValue(root, "response"));
+            IDictionary<string, object> responseError =
+                AsDictionary(GetValue(response, "error"));
+            message = GetString(responseError, "message");
+            if (!string.IsNullOrWhiteSpace(message))
+            {
+                return LimitServerErrorMessage(message);
             }
 
             return string.Empty;
@@ -2610,6 +3981,13 @@ namespace FilePromptAIWin7
             return value == null
                 ? string.Empty
                 : Convert.ToString(value, CultureInfo.InvariantCulture);
+        }
+
+        private static string GetStringValue(
+            IDictionary<string, object> dictionary,
+            string key)
+        {
+            return GetValue(dictionary, key) as string ?? string.Empty;
         }
 
         private static EndpointAttempt BuildExactAttempt(string endpoint)
@@ -3132,6 +4510,80 @@ namespace FilePromptAIWin7
             public Uri Url { get; set; }
         }
 
+        private sealed class StreamDiagnostics
+        {
+            private readonly HashSet<string> eventNames =
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            private readonly HashSet<string> terminationReasons =
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            public int EventCount { get; set; }
+            public int VisibleTextEventCount { get; set; }
+            public int HiddenReasoningEventCount { get; set; }
+            public int ToolEventCount { get; set; }
+            public int RefusalEventCount { get; set; }
+            public bool CompletionSeen { get; set; }
+            public bool FallbackCompletionSeen { get; set; }
+            public bool SemanticTerminationSeen { get; set; }
+
+            public bool CanFallback
+            {
+                get
+                {
+                    return CompletionSeen &&
+                        FallbackCompletionSeen &&
+                        !SemanticTerminationSeen &&
+                        VisibleTextEventCount == 0 &&
+                        HiddenReasoningEventCount == 0 &&
+                        ToolEventCount == 0 &&
+                        RefusalEventCount == 0;
+                }
+            }
+
+            public void AddEventName(string value)
+            {
+                string normalized = (value ?? string.Empty).Trim();
+                if (normalized.Length > 0 && eventNames.Count < 16)
+                {
+                    eventNames.Add(normalized.Length <= 80
+                        ? normalized
+                        : normalized.Substring(0, 80));
+                }
+            }
+
+            public string GetEventNames()
+            {
+                List<string> names = eventNames.ToList();
+                names.Sort(StringComparer.OrdinalIgnoreCase);
+                return string.Join(", ", names.ToArray());
+            }
+
+            public void AddTerminationReason(string value)
+            {
+                string normalized = (value ?? string.Empty).Trim();
+                if (normalized.Length > 0 && terminationReasons.Count < 8)
+                {
+                    terminationReasons.Add(normalized.Length <= 80
+                        ? normalized
+                        : normalized.Substring(0, 80));
+                }
+            }
+
+            public string GetTerminationReasons()
+            {
+                List<string> reasons = terminationReasons.ToList();
+                reasons.Sort(StringComparer.OrdinalIgnoreCase);
+                return string.Join(", ", reasons.ToArray());
+            }
+        }
+
+        private sealed class BoundedLineState
+        {
+            public readonly char[] Buffer = new char[4096];
+            public int Offset { get; set; }
+            public int Count { get; set; }
+        }
+
         private sealed class AttemptException : Exception
         {
             public int StatusCode { get; private set; }
@@ -3159,6 +4611,25 @@ namespace FilePromptAIWin7
                 string message,
                 Exception innerException)
                 : base(message, innerException)
+            {
+            }
+        }
+
+        private sealed class StreamReadException : HttpRequestException
+        {
+            public StreamReadException(
+                string message,
+                Exception innerException)
+                : base(message, innerException)
+            {
+            }
+        }
+
+        private sealed class EmptyStreamCompatibilityException :
+            Exception
+        {
+            public EmptyStreamCompatibilityException(string message)
+                : base(message)
             {
             }
         }

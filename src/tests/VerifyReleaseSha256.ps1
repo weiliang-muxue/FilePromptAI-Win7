@@ -1,6 +1,7 @@
 param(
     [string]$Version = '1.17',
-    [string]$ProjectRoot = ''
+    [string]$ProjectRoot = '',
+    [string]$ReleaseManifestPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,7 +20,12 @@ $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
 $archiveName = "FilePromptAI-Win7-Full-v$Version.zip"
 $archivePath = Join-Path $ProjectRoot $archiveName
 $sidecarPath = "$archivePath.sha256.txt"
-$manifestPath = Join-Path $ProjectRoot 'RELEASE-SHA256.txt'
+$manifestPath = if ([string]::IsNullOrWhiteSpace($ReleaseManifestPath)) {
+    Join-Path $ProjectRoot 'RELEASE-SHA256.txt'
+}
+else {
+    [IO.Path]::GetFullPath($ReleaseManifestPath)
+}
 foreach ($required in @($archivePath, $sidecarPath, $manifestPath)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required release checksum artifact is missing: $required"

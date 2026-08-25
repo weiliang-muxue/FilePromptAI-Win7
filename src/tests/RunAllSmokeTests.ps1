@@ -104,6 +104,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $scripts = @(
     'RunReleaseSha256SmokeTest.ps1',
+    'RunCandidatePromotionSmokeTest.ps1',
     'RunReleaseSealingSmokeTest.ps1',
     'RunApiSmokeTest.ps1',
     'RunApiHardeningSmokeTest.ps1',

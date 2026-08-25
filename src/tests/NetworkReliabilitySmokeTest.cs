@@ -63,6 +63,28 @@ internal static class NetworkReliabilitySmokeTest
             TestConnectionEstablishmentFailureRetries(clientType, requestType);
             TestStreamIdleTimeout(clientType, requestType);
             TestIncompleteStreamFails(clientType, requestType);
+            TestIncompleteStreamBeforeTextDoesNotRetry(
+                clientType,
+                requestType);
+            TestStreamingProtocolMatrix(clientType, requestType);
+            TestStreamingResponseLimits(clientType, requestType);
+            TestReasoningAndToolStreamDataDoNotLeak(
+                clientType,
+                requestType);
+            TestStreamingErrorEvents(clientType, requestType);
+            TestEmptyCompletedTextStreamFallsBack(
+                clientType,
+                requestType);
+            TestStructuredEmptyCompletedTextStreamFallsBack(
+                clientType,
+                requestType);
+            TestSemanticEmptyCompletionDoesNotFallback(
+                clientType,
+                requestType);
+            TestEmptyCompletedAttachmentStreamDoesNotRetry(
+                clientType,
+                requestType,
+                itemType);
             TestFinishReasonCompletesStream(clientType, requestType);
             TestEventNameCompletesStream(clientType, requestType);
             TestCancellationWinsOverHeadersTimeout(clientType, requestType);
@@ -1277,21 +1299,12 @@ internal static class NetworkReliabilitySmokeTest
     {
         TcpListener listener = StartListener();
         int port = GetPort(listener);
-        Task server = Task.Factory.StartNew(
-            delegate
-            {
-                using (TcpClient connection = listener.AcceptTcpClient())
-                {
-                    ReadRequest(connection.GetStream());
-                    SendResponse(
-                        connection.GetStream(),
-                        200,
-                        "OK",
-                        "text/event-stream",
-                        "data: {\"choices\":[{\"delta\":{\"content\":\"cut-off\"}}]}\r\n\r\n",
-                        null);
-                }
-            });
+        Task<int> server = StartCountingStreamingServer(
+            listener,
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"cut-off\"}}]}\r\n\r\n",
+            2,
+            null);
         object client = CreateClient(clientType, 2000, 1000, 2, 10, 1000);
         try
         {
@@ -1311,15 +1324,1134 @@ internal static class NetworkReliabilitySmokeTest
                 "Incomplete stream failure type");
             AssertContains(failure.Message, "未完整结束", "Incomplete stream guidance");
             AssertEqual("cut-off", delta.ToString(), "Incomplete stream partial delta observed");
-            server.Wait(TimeSpan.FromSeconds(2));
-            Thread.Sleep(200);
-            AssertTrue(!listener.Pending(), "Incomplete stream not retried after delta");
+            AssertEqual(
+                1,
+                Wait(server),
+                "Incomplete stream not retried after delta");
         }
         finally
         {
             ((IDisposable)client).Dispose();
             listener.Stop();
         }
+    }
+
+    private static void TestIncompleteStreamBeforeTextDoesNotRetry(
+        Type clientType,
+        Type requestType)
+    {
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        Task<int> server = StartCountingStreamingServer(
+            listener,
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\r\n\r\n",
+            3,
+            null);
+        object client = CreateClient(clientType, 2000, 1000, 3, 10, 1000);
+        try
+        {
+            StringBuilder delta = new StringBuilder();
+            Exception failure = GenerateFailure(
+                clientType,
+                client,
+                CreateRequest(
+                    requestType,
+                    "http://127.0.0.1:" + port +
+                        "/incomplete-stream-before-text"),
+                delta,
+                CancellationToken.None,
+                TimeSpan.FromSeconds(5));
+            AssertType(
+                failure,
+                "FilePromptAIWin7.ModelCallException",
+                "Incomplete pre-text stream failure type");
+            AssertContains(
+                failure.Message,
+                "未完整结束",
+                "Incomplete pre-text stream guidance");
+            AssertEqual(
+                string.Empty,
+                delta.ToString(),
+                "Incomplete pre-text stream emits no delta");
+            AssertEqual(
+                1,
+                Wait(server),
+                "Incomplete pre-text stream submitted once");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static void TestStreamingProtocolMatrix(
+        Type clientType,
+        Type requestType)
+    {
+        RunSseSuccessCase(
+            clientType,
+            requestType,
+            "Standard string content",
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\r\n\r\n" +
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"REASONING_SECRET\"}}]}\r\n\r\n" +
+                "data: {\"choices\":[{\"delta\":{\"content\":\"standard-\"}}]}\r\n\r\n" +
+                "data: {\"choices\":[{\"delta\":{\"content\":\"text\"}}]}\r\n\r\n" +
+                "data: [DONE]\r\n\r\n",
+            "standard-text");
+
+        RunSseSuccessCase(
+            clientType,
+            requestType,
+            "Responses event-name-only deltas",
+            "event: response.output_text.delta\r\n" +
+                "data: {\"delta\":\"responses-\"}\r\n\r\n" +
+                "event: response.output_text.delta\r\n" +
+                "data: {\"delta\":\"events\"}\r\n\r\n" +
+                "event: response.completed\r\n" +
+                "data: {\"response\":{\"status\":\"completed\",\"output\":[]}}\r\n\r\n",
+            "responses-events");
+
+        RunSseSuccessCase(
+            clientType,
+            requestType,
+            "Choice delta.text fragments",
+            "data: {\"choices\":[{\"delta\":{\"text\":\"choice-\"}}]}\r\n\r\n" +
+                "data: {\"choices\":[{\"delta\":{\"text\":\"delta-text\"}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "choice-delta-text");
+
+        RunSseSuccessCase(
+            clientType,
+            requestType,
+            "Root delta.text filters non-text deltas",
+            "event: content_block_delta\r\n" +
+                "data: {\"delta\":{\"type\":\"thinking_delta\"," +
+                "\"thinking\":\"REASONING_SECRET\"}}\r\n\r\n" +
+                "event: content_block_delta\r\n" +
+                "data: {\"delta\":{\"type\":\"input_json_delta\"," +
+                "\"partial_json\":\"TOOL_SECRET\"}}\r\n\r\n" +
+                "event: content_block_delta\r\n" +
+                "data: {\"delta\":{\"type\":\"text_delta\"," +
+                "\"text\":\"delta-\"}}\r\n\r\n" +
+                "event: content_block_delta\r\n" +
+                "data: {\"delta\":{\"type\":\"text_delta\"," +
+                "\"text\":\"text\"}}\r\n\r\n" +
+                "event: message_stop\r\n" +
+                "data: {}\r\n\r\n",
+            "delta-text");
+
+        RunSseSuccessCase(
+            clientType,
+            requestType,
+            "Array content filters non-text parts",
+            "data: {\"choices\":[{\"delta\":{\"content\":[" +
+                "{\"type\":\"reasoning\",\"text\":\"REASONING_SECRET\"}," +
+                "{\"type\":\"tool_use\",\"text\":\"TOOL_SECRET\"}," +
+                "{\"type\":\"input_text\",\"text\":\"INPUT_SECRET\"}," +
+                "{\"type\":\"text\",\"text\":\"array-\"}," +
+                "{\"type\":\"output_text\",\"text\":\"content\"}]}}]}\r\n\r\n" +
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "array-content");
+
+        RunSseSuccessCase(
+            clientType,
+            requestType,
+            "Completion snapshot does not duplicate prior delta",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\r\n\r\n" +
+                "data: {\"choices\":[{\"delta\":{}," +
+                "\"message\":{\"content\":\"hello\"}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "hello");
+
+        RunSseSuccessCase(
+            clientType,
+            requestType,
+            "Completion delta wins over full snapshot",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\r\n\r\n" +
+                "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}," +
+                "\"message\":{\"content\":\"hello\"}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "hello");
+
+        RunSseSuccessCase(
+            clientType,
+            requestType,
+            "Snapshot-only completion remains visible",
+            "data: {\"choices\":[{\"delta\":{}," +
+                "\"message\":{\"content\":\"snapshot-only\"}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "snapshot-only");
+
+        RunNdjsonSuccessCase(
+            clientType,
+            requestType,
+            "Ollama root message NDJSON fragments",
+            "{\"model\":\"local\",\"message\":{\"role\":\"assistant\"," +
+                "\"thinking\":\"REASONING_SECRET\",\"content\":\"ollama-\"," +
+                "\"tool_calls\":[{\"function\":{\"name\":\"lookup\"," +
+                "\"arguments\":{\"secret\":\"TOOL_SECRET\"}}}]}," +
+                "\"done\":false}\n" +
+                "{\"model\":\"local\",\"message\":{\"role\":\"assistant\"," +
+                "\"content\":\"done\"},\"done\":false}\n" +
+                "{\"model\":\"local\",\"message\":{\"role\":\"assistant\"," +
+                "\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n",
+            "ollama-done");
+
+        RunNdjsonSuccessCase(
+            clientType,
+            requestType,
+            "Ollama root response NDJSON fragments",
+            "{\"model\":\"local\",\"response\":\"root-\"," +
+                "\"thinking\":\"REASONING_SECRET\",\"done\":false}\n" +
+                "{\"model\":\"local\",\"response\":\"response\"," +
+                "\"done\":false}\n" +
+                "{\"model\":\"local\",\"response\":\"\"," +
+                "\"done\":true,\"done_reason\":\"stop\"}\n",
+            "root-response");
+
+        RunNdjsonSuccessCase(
+            clientType,
+            requestType,
+            "Ollama repeated and prefixed message fragments append",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"ha\"}," +
+                "\"done\":false}\n" +
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"ha\"}," +
+                "\"done\":false}\n" +
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"a\"}," +
+                "\"done\":false}\n" +
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"ab\"}," +
+                "\"done\":false}\n" +
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"\"}," +
+                "\"done\":true}\n",
+            "hahaaab");
+
+        RunNdjsonSuccessCase(
+            clientType,
+            requestType,
+            "Ollama cumulative completion snapshot is ignored",
+            "{\"message\":{\"content\":\"ollama-\"},\"done\":false}\n" +
+                "{\"message\":{\"content\":\"done\"},\"done\":false}\n" +
+                "{\"message\":{\"content\":\"ollama-done\"}," +
+                "\"done\":true,\"done_reason\":\"stop\"}\n",
+            "ollama-done");
+
+        RunNdjsonSuccessCase(
+            clientType,
+            requestType,
+            "Single completed snapshot remains visible",
+            "{\"response\":\"single-snapshot\",\"done\":true}\n",
+            "single-snapshot");
+    }
+
+    private static void TestReasoningAndToolStreamDataDoNotLeak(
+        Type clientType,
+        Type requestType)
+    {
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Typed reasoning delta.text",
+            "data: {\"choices\":[{\"delta\":{" +
+                "\"type\":\"reasoning\",\"text\":\"REASONING_SECRET\"}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Typed tool delta.text",
+            "data: {\"choices\":[{\"delta\":{" +
+                "\"type\":\"input_json_delta\",\"text\":\"TOOL_SECRET\"}," +
+                "\"finish_reason\":\"tool_calls\"}]}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Reasoning-only completed stream",
+            "data: {\"choices\":[{\"delta\":{" +
+                "\"reasoning_content\":\"REASONING_FIELD_SECRET\"}}]}\r\n\r\n" +
+                "data: {\"choices\":[{\"delta\":{\"content\":[" +
+                "{\"type\":\"reasoning\"," +
+                "\"text\":\"REASONING_PART_SECRET\"}]}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Tool-only completed stream",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{" +
+                "\"index\":0,\"id\":\"call_1\",\"type\":\"function\"," +
+                "\"function\":{\"name\":\"lookup\"," +
+                "\"arguments\":\"{\\\"secret\\\":\\\"TOOL_SECRET\\\"}\"}}]}}]}\r\n\r\n" +
+                "data: {\"choices\":[{\"delta\":{}," +
+                "\"finish_reason\":\"tool_calls\"}]}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Hidden typed part blocks fallback",
+            "data: {\"choices\":[{\"delta\":{\"content\":[{" +
+                "\"type\":\"thinking\",\"text\":\"REASONING_SECRET\"}]}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Analysis typed part blocks fallback",
+            "data: {\"choices\":[{\"delta\":{\"content\":[{" +
+                "\"type\":\"analysis\",\"data\":\"REASONING_SECRET\"}]}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Encrypted typed part blocks fallback",
+            "data: {\"choices\":[{\"delta\":{\"content\":[{" +
+                "\"type\":\"encrypted_content\"," +
+                "\"encrypted_content\":\"REASONING_SECRET\"}]}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Tool typed part blocks fallback",
+            "data: {\"choices\":[{\"delta\":{\"content\":[{" +
+                "\"type\":\"tool_use\",\"name\":\"lookup\"," +
+                "\"input\":{\"value\":\"TOOL_SECRET\"}}]}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Function typed part blocks fallback",
+            "data: {\"choices\":[{\"delta\":{\"content\":[{" +
+                "\"type\":\"function\",\"arguments\":{" +
+                "\"type\":\"TOOL_SECRET\"}}]}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Input JSON typed delta blocks fallback",
+            "data: {\"choices\":[{\"delta\":{" +
+                "\"type\":\"input_json_delta\"," +
+                "\"partial_json\":\"TOOL_SECRET\"}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Reasoning completion snapshot does not leak",
+            "data: {\"type\":\"response.reasoning.done\"," +
+                "\"completed\":true," +
+                "\"output_text\":\"REASONING_SECRET\"}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Tool completion snapshot does not leak or retry",
+            "event: response.function_call_arguments.done\r\n" +
+                "data: {\"done\":true,\"done_reason\":\"stop\"," +
+                "\"message\":{\"content\":\"TOOL_SECRET\"}}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Untyped root reasoning delta blocks fallback",
+            "data: {\"delta\":{\"thinking\":\"REASONING_SECRET\"}," +
+                "\"done\":true,\"done_reason\":\"stop\"}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Untyped root tool delta blocks fallback",
+            "data: {\"delta\":{\"tool_calls\":[{" +
+                "\"function\":{\"arguments\":\"TOOL_SECRET\"}}]}," +
+                "\"done\":true,\"done_reason\":\"stop\"}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Root refusal blocks fallback",
+            "data: {\"refusal\":\"REFUSAL_SECRET\"," +
+                "\"done\":true,\"done_reason\":\"stop\"}\r\n\r\n",
+            "拒绝",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Root message refusal blocks fallback",
+            "data: {\"message\":{\"content\":\"\"," +
+                "\"refusal\":\"REFUSAL_SECRET\"}," +
+                "\"done\":true,\"done_reason\":\"stop\"}\r\n\r\n",
+            "拒绝",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Tool event-name payload blocks fallback",
+            "event: response.function_call_arguments.delta\r\n" +
+                "data: {\"delta\":\"TOOL_SECRET\"}\r\n\r\n" +
+                "data: [DONE]\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Reasoning event name filters choice content",
+            "event: response.reasoning.delta\r\n" +
+                "data: {\"choices\":[{\"delta\":{" +
+                "\"content\":\"REASONING_SECRET\"}}]}\r\n\r\n" +
+                "data: [DONE]\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Tool event name filters root delta text",
+            "event: content_block_delta.function_call\r\n" +
+                "data: {\"delta\":{\"text\":\"TOOL_SECRET\"}}\r\n\r\n" +
+                "data: [DONE]\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Root message typed tool blocks fallback",
+            "data: {\"message\":{\"content\":[{" +
+                "\"type\":\"tool_use\",\"name\":\"lookup\"," +
+                "\"input\":{\"value\":\"TOOL_SECRET\"}}]}," +
+                "\"done\":true,\"done_reason\":\"stop\"}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+
+        RunSseSuccessCase(
+            clientType,
+            requestType,
+            "Chat reasoning fields do not leak",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"REASONING_FIELD_SECRET\"}}]}\r\n\r\n" +
+                "data: {\"choices\":[{\"delta\":{\"content\":\"visible-text\"}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "visible-text");
+
+        RunSseSuccessCase(
+            clientType,
+            requestType,
+            "Chat tool fragments do not leak",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{" +
+                "\"index\":0,\"id\":\"call_1\",\"type\":\"function\"," +
+                "\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"secret\\\":\\\"TOOL_SECRET\\\"}\"}}]}}]}\r\n\r\n" +
+                "data: {\"choices\":[{\"delta\":{\"content\":\"tool-safe-text\"}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "tool-safe-text");
+    }
+
+    private static void TestStreamingResponseLimits(
+        Type clientType,
+        Type requestType)
+    {
+        TestOversizedStreamingContentLength(
+            clientType,
+            requestType,
+            "text/event-stream");
+        TestOversizedStreamingContentLength(
+            clientType,
+            requestType,
+            "application/x-ndjson");
+    }
+
+    private static void TestOversizedStreamingContentLength(
+        Type clientType,
+        Type requestType,
+        string contentType)
+    {
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        Task<int> server = Task.Factory.StartNew(
+            delegate
+            {
+                int requests = 0;
+                while (requests < 2)
+                {
+                    if (requests > 0 && !WaitForPendingConnection(listener, 500))
+                    {
+                        break;
+                    }
+                    using (TcpClient connection = listener.AcceptTcpClient())
+                    {
+                        requests++;
+                        NetworkStream stream = connection.GetStream();
+                        ReadRequest(stream);
+                        string headers =
+                            "HTTP/1.1 200 OK\r\n" +
+                            "Content-Type: " + contentType + "; charset=utf-8\r\n" +
+                            "Content-Length: 16777217\r\n" +
+                            "Connection: close\r\n\r\n";
+                        byte[] bytes = Encoding.ASCII.GetBytes(headers);
+                        stream.Write(bytes, 0, bytes.Length);
+                        stream.Flush();
+                    }
+                }
+                return requests;
+            });
+        object client = CreateClient(clientType, 2000, 1000, 2, 10, 1000);
+        try
+        {
+            StringBuilder delta = new StringBuilder();
+            Exception failure = GenerateFailure(
+                clientType,
+                client,
+                CreateRequest(requestType, "http://127.0.0.1:" + port +
+                    "/oversized-stream"),
+                delta,
+                CancellationToken.None,
+                TimeSpan.FromSeconds(5));
+            AssertType(
+                failure,
+                "FilePromptAIWin7.ModelCallException",
+                contentType + " oversized content length type");
+            AssertContains(
+                failure.Message,
+                "超过 8 MB",
+                contentType + " oversized content length guidance");
+            AssertEqual(
+                string.Empty,
+                delta.ToString(),
+                contentType + " oversized content length delta");
+            AssertEqual(
+                1,
+                Wait(server),
+                contentType + " oversized content length request count");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static void TestStreamingErrorEvents(
+        Type clientType,
+        Type requestType)
+    {
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Standard SSE error event",
+            "event: error\r\n" +
+                "data: {\"type\":\"error\",\"error\":{\"message\":\"standard-stream-error\"}}\r\n\r\n",
+            "standard-stream-error",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Empty Responses failure event",
+            "event: response.failed\r\n" +
+                "data: {}\r\n\r\n",
+            "流式错误事件",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Responses nested error event",
+            "event: response.failed\r\n" +
+                "data: {\"response\":{\"error\":{" +
+                "\"message\":\"responses-nested-error\"}}}\r\n\r\n",
+            "responses-nested-error",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Error after visible text",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial-visible\"}}]}\r\n\r\n" +
+                "event: error\r\n" +
+                "data: {\"type\":\"error\",\"error\":{\"message\":\"late-stream-error\"}}\r\n\r\n",
+            "late-stream-error",
+            "partial-visible");
+    }
+
+    private static void TestEmptyCompletedTextStreamFallsBack(
+        Type clientType,
+        Type requestType)
+    {
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        string firstRequest = null;
+        string secondRequest = null;
+        Task<int> server = Task.Factory.StartNew(
+            delegate
+            {
+                int requests = 0;
+                using (TcpClient first = listener.AcceptTcpClient())
+                {
+                    requests++;
+                    firstRequest = ReadRequestText(first.GetStream());
+                    SendResponse(
+                        first.GetStream(),
+                        200,
+                        "OK",
+                        "text/event-stream",
+                        "data: [DONE]\r\n\r\n",
+                        null);
+                }
+
+                while (requests < 3 &&
+                    WaitForPendingConnection(
+                        listener,
+                        requests == 1 ? 2000 : 500))
+                {
+                    using (TcpClient fallback = listener.AcceptTcpClient())
+                    {
+                        requests++;
+                        string request = ReadRequestText(
+                            fallback.GetStream());
+                        if (requests == 2)
+                        {
+                            secondRequest = request;
+                        }
+
+                        SendResponse(
+                            fallback.GetStream(),
+                            200,
+                            "OK",
+                            "application/json",
+                            "{\"choices\":[{\"message\":{\"content\":\"empty-stream-fallback\"}}]}",
+                            null);
+                    }
+                }
+
+                return requests;
+            });
+        object client = CreateClient(clientType, 2000, 1000, 2, 10, 1000);
+        try
+        {
+            StringBuilder delta = new StringBuilder();
+            string result = Generate(
+                clientType,
+                client,
+                CreateRequest(
+                    requestType,
+                    "http://127.0.0.1:" + port + "/empty-stream-fallback"),
+                delta,
+                CancellationToken.None,
+                TimeSpan.FromSeconds(5));
+            AssertEqual(
+                "empty-stream-fallback",
+                result,
+                "Empty completed text stream fallback result");
+            AssertEqual(
+                "empty-stream-fallback",
+                delta.ToString(),
+                "Empty completed text stream fallback delta");
+            AssertEqual(
+                2,
+                Wait(server),
+                "Empty completed text stream request count");
+            AssertContains(
+                firstRequest,
+                "\"stream\":true",
+                "Empty completed text stream first request streams");
+            AssertContains(
+                secondRequest,
+                "\"stream\":false",
+                "Empty completed text stream fallback disables streaming");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static void TestEmptyCompletedAttachmentStreamDoesNotRetry(
+        Type clientType,
+        Type requestType,
+        Type itemType)
+    {
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        string requestText = null;
+        Task<int> server = StartCountingSseServer(
+            listener,
+            "data: [DONE]\r\n\r\n",
+            2,
+            delegate(string value, int requestNumber)
+            {
+                if (requestNumber == 1)
+                {
+                    requestText = value;
+                }
+            });
+        object client = CreateClient(clientType, 2000, 1000, 3, 10, 1000);
+        try
+        {
+            object request = CreateRequest(
+                requestType,
+                "http://127.0.0.1:" + port +
+                    "/empty-attachment-stream");
+            SetBinaryAttachment(requestType, request, itemType);
+            StringBuilder delta = new StringBuilder();
+            Exception failure = GenerateFailure(
+                clientType,
+                client,
+                request,
+                delta,
+                CancellationToken.None,
+                TimeSpan.FromSeconds(5));
+            AssertType(
+                failure,
+                "FilePromptAIWin7.ModelCallException",
+                "Empty completed attachment stream failure type");
+            AssertContains(
+                failure.Message,
+                "为避免重复上传",
+                "Empty completed attachment stream guidance");
+            AssertEqual(
+                string.Empty,
+                delta.ToString(),
+                "Empty completed attachment stream emits no delta");
+            AssertEqual(
+                1,
+                Wait(server),
+                "Empty completed attachment stream submitted once");
+            AssertContains(
+                requestText,
+                "\"stream\":true",
+                "Empty completed attachment request streams once");
+            AssertContains(
+                requestText,
+                "data:image/png;base64,AQIDBA==",
+                "Empty completed attachment was sent on first request");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static void TestStructuredEmptyCompletedTextStreamFallsBack(
+        Type clientType,
+        Type requestType)
+    {
+        string[] emptyBodies =
+        {
+            "data: {\"choices\":[{\"delta\":{}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "data: {\"message\":{\"role\":\"assistant\"," +
+                "\"content\":\"\"},\"done\":true}\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{" +
+                "\"reasoning_content\":\"\"}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{" +
+                "\"tool_calls\":[]}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{" +
+                "\"refusal\":\"\"}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":[{" +
+                "\"type\":\"reasoning\",\"text\":\"\"},{" +
+                "\"type\":\"thinking\",\"content\":\"\"},{" +
+                "\"type\":\"analysis\",\"data\":\"\"},{" +
+                "\"type\":\"encrypted_content\"," +
+                "\"encrypted_content\":\"\"},{" +
+                "\"type\":\"tool_use\",\"name\":\"\"," +
+                "\"input\":{}},{\"type\":\"function\"," +
+                "\"arguments\":{}},{\"type\":\"input_json_delta\"," +
+                "\"partial_json\":\"\"}]}," +
+                "\"finish_reason\":\"stop\"}]}\r\n\r\n",
+            "event: response.reasoning.delta\r\n" +
+                "data: {\"delta\":\"\"}\r\n\r\n" +
+                "data: [DONE]\r\n\r\n",
+            "event: response.function_call_arguments.delta\r\n" +
+                "data: {\"delta\":{\"type\":\"input_json_delta\"," +
+                "\"partial_json\":\"\"}}\r\n\r\n" +
+                "data: [DONE]\r\n\r\n",
+            "data: {\"delta\":{\"reasoning_content\":\"\"}," +
+                "\"done\":true,\"done_reason\":\"stop\"}\r\n\r\n",
+            "data: {\"delta\":{\"tool_calls\":[]}," +
+                "\"done\":true,\"done_reason\":\"stop\"}\r\n\r\n"
+        };
+        foreach (string emptyBody in emptyBodies)
+        {
+            TcpListener listener = StartListener();
+            int port = GetPort(listener);
+            Task<int> server = Task.Factory.StartNew(
+                delegate
+                {
+                    int requests = 0;
+                    using (TcpClient first = listener.AcceptTcpClient())
+                    {
+                        requests++;
+                        ReadRequest(first.GetStream());
+                        SendResponse(
+                            first.GetStream(),
+                            200,
+                            "OK",
+                            "text/event-stream",
+                            emptyBody,
+                            null);
+                    }
+
+                    if (WaitForPendingConnection(listener, 2000))
+                    {
+                        using (TcpClient second = listener.AcceptTcpClient())
+                        {
+                            requests++;
+                            string request = ReadRequestText(second.GetStream());
+                            AssertContains(
+                                request,
+                                "\"stream\":false",
+                                "Structured empty fallback disables streaming");
+                            SendResponse(
+                                second.GetStream(),
+                                200,
+                                "OK",
+                                "application/json",
+                                "{\"choices\":[{\"message\":{" +
+                                    "\"content\":\"structured-empty-fallback\"}}]}",
+                                null);
+                        }
+                    }
+
+                    return requests;
+                });
+            object client = CreateClient(
+                clientType,
+                2000,
+                1000,
+                2,
+                10,
+                1000);
+            try
+            {
+                StringBuilder delta = new StringBuilder();
+                string result = Generate(
+                    clientType,
+                    client,
+                    CreateRequest(
+                        requestType,
+                        "http://127.0.0.1:" + port +
+                            "/structured-empty-fallback"),
+                    delta,
+                    CancellationToken.None,
+                    TimeSpan.FromSeconds(5));
+                AssertEqual(
+                    "structured-empty-fallback",
+                    result,
+                    "Structured empty fallback result");
+                AssertEqual(
+                    "structured-empty-fallback",
+                    delta.ToString(),
+                    "Structured empty fallback delta");
+                AssertEqual(
+                    2,
+                    Wait(server),
+                    "Structured empty fallback request count");
+            }
+            finally
+            {
+                ((IDisposable)client).Dispose();
+                listener.Stop();
+            }
+        }
+    }
+
+    private static void TestSemanticEmptyCompletionDoesNotFallback(
+        Type clientType,
+        Type requestType)
+    {
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Content-filtered empty completion",
+            "data: {\"choices\":[{\"delta\":{}," +
+                "\"finish_reason\":\"content_filter\"}]}\r\n\r\n",
+            "非普通状态",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Length-limited empty completion",
+            "data: {\"choices\":[{\"delta\":{}," +
+                "\"finish_reason\":\"length\"}]}\r\n\r\n",
+            "非普通状态",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Tool-call empty completion",
+            "data: {\"choices\":[{\"delta\":{}," +
+                "\"finish_reason\":\"tool_calls\"}]}\r\n\r\n",
+            "非普通状态",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Legacy function-call empty completion",
+            "data: {\"choices\":[{\"delta\":{}," +
+                "\"finish_reason\":\"function_call\"}]}\r\n\r\n",
+            "非普通状态",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Non-stop done reason",
+            "data: {\"message\":{\"content\":\"\"}," +
+                "\"done\":true,\"done_reason\":\"length\"}\r\n\r\n",
+            "非普通状态",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Unknown termination reason is redacted",
+            "data: {\"choices\":[{\"delta\":{}," +
+                "\"finish_reason\":\"REASONING_SECRET\\r\\n伪造诊断\"}]}\r\n\r\n",
+            "结束原因：other",
+            string.Empty);
+
+        RunSseFailureCase(
+            clientType,
+            requestType,
+            "Unnamed Responses completion",
+            "event: response.completed\r\n" +
+                "data: {\"response\":{\"status\":\"completed\"," +
+                "\"output\":[]}}\r\n\r\n",
+            "没有返回",
+            string.Empty);
+    }
+
+    private static void RunSseSuccessCase(
+        Type clientType,
+        Type requestType,
+        string name,
+        string body,
+        string expected)
+    {
+        RunStreamingSuccessCase(
+            clientType,
+            requestType,
+            name,
+            "text/event-stream",
+            body,
+            expected);
+    }
+
+    private static void RunNdjsonSuccessCase(
+        Type clientType,
+        Type requestType,
+        string name,
+        string body,
+        string expected)
+    {
+        RunStreamingSuccessCase(
+            clientType,
+            requestType,
+            name,
+            "application/x-ndjson",
+            body,
+            expected);
+    }
+
+    private static void RunStreamingSuccessCase(
+        Type clientType,
+        Type requestType,
+        string name,
+        string contentType,
+        string body,
+        string expected)
+    {
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        Task<int> server = StartCountingStreamingServer(
+            listener,
+            contentType,
+            body,
+            2,
+            null);
+        object client = CreateClient(clientType, 2000, 1000, 2, 10, 1000);
+        try
+        {
+            StringBuilder delta = new StringBuilder();
+            string result = Generate(
+                clientType,
+                client,
+                CreateRequest(
+                    requestType,
+                    "http://127.0.0.1:" + port +
+                        (contentType == "text/event-stream"
+                            ? "/sse-success"
+                            : "/ndjson-success")),
+                delta,
+                CancellationToken.None,
+                TimeSpan.FromSeconds(5));
+            AssertEqual(expected, result, name + " result");
+            AssertEqual(expected, delta.ToString(), name + " delta");
+            AssertNotContains(result, "SECRET", name + " hides non-text data");
+            AssertEqual(1, Wait(server), name + " request count");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static void RunSseFailureCase(
+        Type clientType,
+        Type requestType,
+        string name,
+        string body,
+        string expectedMessage,
+        string expectedDelta)
+    {
+        TcpListener listener = StartListener();
+        int port = GetPort(listener);
+        Task<int> server = StartCountingSseServer(listener, body, 2, null);
+        object client = CreateClient(clientType, 2000, 1000, 2, 10, 1000);
+        try
+        {
+            StringBuilder delta = new StringBuilder();
+            Exception failure = GenerateFailure(
+                clientType,
+                client,
+                CreateRequest(
+                    requestType,
+                    "http://127.0.0.1:" + port + "/sse-failure"),
+                delta,
+                CancellationToken.None,
+                TimeSpan.FromSeconds(5));
+            AssertType(
+                failure,
+                "FilePromptAIWin7.ModelCallException",
+                name + " failure type");
+            AssertContains(failure.Message, expectedMessage, name + " guidance");
+            AssertNotContains(failure.Message, "SECRET", name + " hides secret in error");
+            AssertEqual(expectedDelta, delta.ToString(), name + " delta");
+            AssertEqual(1, Wait(server), name + " request count");
+        }
+        finally
+        {
+            ((IDisposable)client).Dispose();
+            listener.Stop();
+        }
+    }
+
+    private static Task<int> StartCountingSseServer(
+        TcpListener listener,
+        string body,
+        int maximumConnections,
+        Action<string, int> onRequest)
+    {
+        return StartCountingStreamingServer(
+            listener,
+            "text/event-stream",
+            body,
+            maximumConnections,
+            onRequest);
+    }
+
+    private static Task<int> StartCountingStreamingServer(
+        TcpListener listener,
+        string contentType,
+        string body,
+        int maximumConnections,
+        Action<string, int> onRequest)
+    {
+        return Task.Factory.StartNew(
+            delegate
+            {
+                int requests = 0;
+                while (requests < maximumConnections)
+                {
+                    if (requests > 0 &&
+                        !WaitForPendingConnection(listener, 500))
+                    {
+                        break;
+                    }
+
+                    using (TcpClient connection = listener.AcceptTcpClient())
+                    {
+                        requests++;
+                        string request = ReadRequestText(
+                            connection.GetStream());
+                        if (onRequest != null)
+                        {
+                            onRequest(request, requests);
+                        }
+
+                        SendResponse(
+                            connection.GetStream(),
+                            200,
+                            "OK",
+                            contentType,
+                            body,
+                            null);
+                    }
+                }
+
+                return requests;
+            });
+    }
+
+    private static bool WaitForPendingConnection(
+        TcpListener listener,
+        int timeoutMilliseconds)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        while (stopwatch.ElapsedMilliseconds < timeoutMilliseconds)
+        {
+            if (listener.Pending())
+            {
+                return true;
+            }
+
+            Thread.Sleep(10);
+        }
+
+        return listener.Pending();
     }
 
     private static void TestFinishReasonCompletesStream(

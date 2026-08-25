@@ -2,6 +2,7 @@
 
 # The release tag must preserve the exact UTF-8/CRLF checksum record.
 RELEASE-SHA256.txt -text
+RELEASE-EVIDENCE.txt -text
 
 # Keep binary fixtures and application assets byte-for-byte identical.
 *.docx binary

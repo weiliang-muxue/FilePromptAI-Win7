@@ -106,6 +106,7 @@ namespace FilePromptAIWin7
         private CancellationTokenSource generationCancellation;
         private CancellationTokenSource connectionTestCancellation;
         private CancellationTokenSource fileAddCancellation;
+        private Task pendingPathResolution;
         private StringBuilder streamedResponse;
         private StringBuilder pendingStreamOutput;
         private string renderedSessionId;
@@ -125,6 +126,7 @@ namespace FilePromptAIWin7
         private bool showArchivedSessions;
         private bool retryAvailable;
         private bool retryRegeneration;
+        private bool settingsDialogTransactionActive;
         private string retrySessionId;
         private string retryPromptText;
         private string sendShortcutMode;
@@ -240,6 +242,8 @@ namespace FilePromptAIWin7
         {
             Text = WindowTitle;
             StartPosition = FormStartPosition.CenterScreen;
+            AutoScaleDimensions = new SizeF(96F, 96F);
+            AutoScaleMode = AutoScaleMode.Dpi;
             MinimumSize = new Size(900, 540);
             Rectangle workingArea = Screen.PrimaryScreen.WorkingArea;
             Size = new Size(
@@ -251,7 +255,6 @@ namespace FilePromptAIWin7
                     Math.Min(760, workingArea.Height - 32)));
             Font = new Font("Microsoft YaHei", 9F, FontStyle.Regular);
             BackColor = UiTheme.WindowBackground;
-            AutoScaleMode = AutoScaleMode.None;
             DoubleBuffered = true;
             try
             {
@@ -266,6 +269,37 @@ namespace FilePromptAIWin7
 
             KeyDown += OnMainKeyDown;
             FormClosing += OnFormClosing;
+        }
+
+        protected override void OnShown(EventArgs args)
+        {
+            base.OnShown(args);
+            ConstrainToWorkingArea(Screen.FromControl(this).WorkingArea);
+        }
+
+        private void ConstrainToWorkingArea(Rectangle workingArea)
+        {
+            if (workingArea.Width <= 0 || workingArea.Height <= 0)
+            {
+                return;
+            }
+
+            const int margin = 16;
+            int maximumWidth = Math.Max(1, workingArea.Width - margin * 2);
+            int maximumHeight = Math.Max(1, workingArea.Height - margin * 2);
+            MinimumSize = new Size(
+                Math.Min(MinimumSize.Width, maximumWidth),
+                Math.Min(MinimumSize.Height, maximumHeight));
+            Size = new Size(
+                Math.Min(Math.Max(Width, MinimumSize.Width), maximumWidth),
+                Math.Min(Math.Max(Height, MinimumSize.Height), maximumHeight));
+            Location = new Point(
+                Math.Max(
+                    workingArea.Left + margin,
+                    Math.Min(Left, workingArea.Right - margin - Width)),
+                Math.Max(
+                    workingArea.Top + margin,
+                    Math.Min(Top, workingArea.Bottom - margin - Height)));
         }
 
         private void BuildInterface()
@@ -1236,7 +1270,16 @@ namespace FilePromptAIWin7
             settingsDialog.PrepareForOpen(focusControl, validationMessage);
             settingsDialog.DialogResult = DialogResult.None;
 
-            DialogResult result = settingsDialog.ShowDialog(this);
+            DialogResult result;
+            settingsDialogTransactionActive = true;
+            try
+            {
+                result = settingsDialog.ShowDialog(this);
+            }
+            finally
+            {
+                settingsDialogTransactionActive = false;
+            }
             if (result == DialogResult.OK)
             {
                 if (loadedAppSettings != null &&
@@ -3145,10 +3188,14 @@ namespace FilePromptAIWin7
                 {
                     bool saved = ApplyModelProfile(dialog.SelectedProfile);
                     UpdateQuickModelButton();
-                    SetStatus(saved
-                        ? "已切换并保存模型配置：" +
-                            dialog.SelectedProfile.Name
-                        : "已临时切换模型配置，但当前设置未能保存");
+                    SetStatus(settingsDialogTransactionActive
+                        ? "已暂时切换模型配置：" +
+                            dialog.SelectedProfile.Name +
+                            "；保存并关闭设置后写入本机。"
+                        : saved
+                            ? "已切换并保存模型配置：" +
+                                dialog.SelectedProfile.Name
+                            : "已临时切换模型配置，但当前设置未能保存");
                 }
 
             }
@@ -3355,7 +3402,7 @@ namespace FilePromptAIWin7
                 maxOutputTokensEnabledCheckBox,
                 maxOutputTokensNumericUpDown,
                 profile.MaxOutputTokens);
-            bool saved = SaveSettings();
+            bool saved = settingsDialogTransactionActive || SaveSettings();
             connectionStatusLabel.Text = BuildConnectionStatus();
             testConnectionButton.Enabled = HasCompleteConnectionSettings();
             settingsDialog.FetchModelsButton.Enabled =
@@ -4376,6 +4423,36 @@ namespace FilePromptAIWin7
                 return outcome;
             }
 
+            Task previousResolution = pendingPathResolution;
+            if (previousResolution != null)
+            {
+                if (!previousResolution.IsCompleted)
+                {
+                    outcome.TimedOut = true;
+                    foreach (string candidate in candidates)
+                    {
+                        AddFailedPath(outcome, candidate);
+                    }
+                    PreserveFailedPathsForRetry(outcome);
+                    SetStatus(
+                        "上一次网络路径检查仍在由 Windows 收尾；" +
+                        "为避免后台任务累积，请稍后重试。");
+                    return outcome;
+                }
+
+                // Observe a completed background failure before releasing the
+                // single-flight guard. The result itself was already reported
+                // as a timeout to the user and must not mutate the current UI.
+                if (previousResolution.IsFaulted)
+                {
+                    AggregateException ignored = previousResolution.Exception;
+                }
+                if (ReferenceEquals(pendingPathResolution, previousResolution))
+                {
+                    pendingPathResolution = null;
+                }
+            }
+
             // Bound raw input separately from the real-file limit. This lets
             // a pasted list contain harmless duplicates or missing paths
             // without causing a valid file to be rejected before resolution.
@@ -4409,6 +4486,7 @@ namespace FilePromptAIWin7
             List<string> errors = new List<string>();
             CancellationTokenSource addCancellation =
                 new CancellationTokenSource();
+            bool deferCancellationDispose = false;
             fileAddCancellation = addCancellation;
             try
             {
@@ -4422,12 +4500,17 @@ namespace FilePromptAIWin7
                             cancellationToken);
                     },
                     cancellationToken);
+                pendingPathResolution = resolution;
                 Task completed = await Task.WhenAny(
                     resolution,
                     Task.Delay(PathResolutionTimeoutMilliseconds));
                 if (!ReferenceEquals(completed, resolution))
                 {
                     addCancellation.Cancel();
+                    deferCancellationDispose = true;
+                    DisposeCancellationWhenComplete(
+                        resolution,
+                        addCancellation);
                     SetStatus(
                         "文件路径检查超时，请确认网络路径可访问后重试。");
                     outcome.TimedOut = true;
@@ -4439,6 +4522,10 @@ namespace FilePromptAIWin7
                 }
 
                 FileResolutionResult resolved = await resolution;
+                if (ReferenceEquals(pendingPathResolution, resolution))
+                {
+                    pendingPathResolution = null;
+                }
                 foreach (string rejected in resolved.RejectedPaths)
                 {
                     AddFailedPath(outcome, rejected);
@@ -4518,7 +4605,10 @@ namespace FilePromptAIWin7
                     fileAddCancellation = null;
                 }
 
-                addCancellation.Dispose();
+                if (!deferCancellationDispose)
+                {
+                    addCancellation.Dispose();
+                }
                 isAddingFiles = false;
                 if (!isClosing && !IsDisposed && !Disposing)
                 {
@@ -4568,6 +4658,17 @@ namespace FilePromptAIWin7
             }
 
             return outcome;
+        }
+
+        private static void DisposeCancellationWhenComplete(
+            Task task,
+            CancellationTokenSource cancellation)
+        {
+            task.ContinueWith(
+                delegate { cancellation.Dispose(); },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
 
         private void PreserveFailedPathsForRetry(FileAddResult outcome)

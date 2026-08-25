@@ -2,12 +2,28 @@ param(
     [ValidateSet('Empty', 'Conversation')]
     [string]$Mode = 'Conversation',
     [switch]$MinimumWindow,
-    [switch]$FullHd100,
-    [switch]$Physical125
+    [switch]$FullHd100
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
+
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class FilePromptAICaptureDpiNative
+{
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetProcessDPIAware();
+}
+'@
+
+# PrintWindow and GetWindowRect must use the same physical coordinate space as
+# the system-DPI-aware application. Otherwise Windows virtualizes the bounds
+# at 96 DPI and the right/bottom of a 125% window is silently cropped.
+$null = [FilePromptAICaptureDpiNative]::SetProcessDPIAware()
 
 $projectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $application = Join-Path $projectRoot 'dist\FilePromptAI.exe'
@@ -32,8 +48,8 @@ if (-not (Test-Path -LiteralPath $artifactRoot)) {
     New-Item -ItemType Directory -Path $artifactRoot | Out-Null
 }
 
-if ($FullHd100 -and ($MinimumWindow -or $Physical125)) {
-    throw '-FullHd100 cannot be combined with -MinimumWindow or -Physical125.'
+if ($FullHd100 -and $MinimumWindow) {
+    throw '-FullHd100 cannot be combined with -MinimumWindow.'
 }
 
 if ($FullHd100) {
@@ -279,7 +295,6 @@ try {
     $height = $rect.Bottom - $rect.Top
     $bitmap = New-Object Drawing.Bitmap $width, $height
     $graphics = [Drawing.Graphics]::FromImage($bitmap)
-    $physicalPath = ''
     try {
         $deviceContext = $graphics.GetHdc()
         try {
@@ -295,38 +310,6 @@ try {
             $graphics.ReleaseHdc($deviceContext)
         }
         $bitmap.Save($outputPath, [Drawing.Imaging.ImageFormat]::Png)
-        if ($Physical125) {
-            $physicalPath = [IO.Path]::Combine(
-                [IO.Path]::GetDirectoryName($outputPath),
-                [IO.Path]::GetFileNameWithoutExtension($outputPath) +
-                    '-physical125.png'
-            )
-            $scaledWidth = [int][Math]::Round($width * 1.25)
-            $scaledHeight = [int][Math]::Round($height * 1.25)
-            $scaled = New-Object Drawing.Bitmap $scaledWidth, $scaledHeight
-            $scaledGraphics = [Drawing.Graphics]::FromImage($scaled)
-            try {
-                $scaledGraphics.InterpolationMode =
-                    [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-                $scaledGraphics.DrawImage(
-                    $bitmap,
-                    [Drawing.Rectangle]::new(
-                        0,
-                        0,
-                        $scaledWidth,
-                        $scaledHeight
-                    )
-                )
-                $scaled.Save(
-                    $physicalPath,
-                    [Drawing.Imaging.ImageFormat]::Png
-                )
-            }
-            finally {
-                $scaledGraphics.Dispose()
-                $scaled.Dispose()
-            }
-        }
     }
     finally {
         $graphics.Dispose()
@@ -336,7 +319,14 @@ try {
     $listView = [FilePromptAICaptureNative]::DescribeListView(
         $process.MainWindowHandle
     )
-    Write-Host "PASS | ui capture | mode=$Mode | ${width}x${height} | fullhd100=$FullHd100 | screen=$($primaryScreen.Bounds.Width)x$($primaryScreen.Bounds.Height) | working=$($primaryScreen.WorkingArea.Width)x$($primaryScreen.WorkingArea.Height) | list=$listView | $outputPath | physical125=$physicalPath"
+    $dpiGraphics = [Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
+    try {
+        $dpi = "{0}x{1}" -f [int]$dpiGraphics.DpiX, [int]$dpiGraphics.DpiY
+    }
+    finally {
+        $dpiGraphics.Dispose()
+    }
+    Write-Host "PASS | ui capture | mode=$Mode | ${width}x${height} | fullhd100=$FullHd100 | dpi=$dpi | screen=$($primaryScreen.Bounds.Width)x$($primaryScreen.Bounds.Height) | working=$($primaryScreen.WorkingArea.Width)x$($primaryScreen.WorkingArea.Height) | list=$listView | $outputPath"
 }
 finally {
     if (-not $process.HasExited) {

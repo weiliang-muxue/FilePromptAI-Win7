@@ -102,12 +102,18 @@ internal static class UiStateSmokeTest
             TestFailedFilePathRecovery(formType, form, dataRoot);
             ThrowIfUiThreadException();
             TestPathResolutionBoundaries(formType, form, dataRoot);
+            TestPathResolutionSingleFlight(formType, form, dataRoot);
             ThrowIfUiThreadException();
             TestWholeConversationExport(formType, form);
             TestSearchCharacterBudget(application, formType, form);
             TestExtensionsDialog(application, formType, form);
             TestSettingsDialogLayout(application);
             TestModelProfilesDialog(application, formType, form);
+            TestSettingsProfileTransaction(
+                application,
+                formType,
+                form,
+                dataRoot);
             TestRegenerationAndRetryState(application, formType, form);
             TestGenerationRetryWorkflows(application, formType, form);
             TestRetryInvalidation(application, formType, form, dataRoot);
@@ -2131,6 +2137,66 @@ internal static class UiStateSmokeTest
             EventArgs.Empty);
     }
 
+    private static void TestPathResolutionSingleFlight(
+        Type formType,
+        object form,
+        string dataRoot)
+    {
+        string valid = Path.Combine(dataRoot, "single-flight.txt");
+        File.WriteAllText(valid, "single flight", Encoding.UTF8);
+        IList inputItems = (IList)GetField(formType, form, "inputItems");
+        int before = inputItems.Count;
+        TaskCompletionSource<object> blocker =
+            new TaskCompletionSource<object>();
+        SetField(
+            formType,
+            form,
+            "pendingPathResolution",
+            blocker.Task);
+
+        Task blockedAdd = (Task)InvokePrivate(
+            formType,
+            form,
+            "AddFilesAsync",
+            (object)new string[] { valid });
+        PumpTask(
+            blockedAdd,
+            2000,
+            "A retry does not wait for an unfinished path probe");
+        AssertTrue(
+            inputItems.Count == before &&
+                ReferenceEquals(
+                    GetField(formType, form, "pendingPathResolution"),
+                    blocker.Task),
+            "An unfinished Windows path probe prevents a second worker");
+        object blockedResult = blockedAdd.GetType().GetProperty("Result")
+            .GetValue(blockedAdd, null);
+        AssertTrue(
+            (bool)blockedResult.GetType().GetProperty("TimedOut")
+                .GetValue(blockedResult, null),
+            "The single-flight path guard reports a retryable timeout");
+
+        blocker.SetResult(null);
+        Task resumedAdd = (Task)InvokePrivate(
+            formType,
+            form,
+            "AddFilesAsync",
+            (object)new string[] { valid });
+        PumpTask(
+            resumedAdd,
+            10000,
+            "Path input resumes after the old worker completes");
+        AssertTrue(
+            inputItems.Count == before + 1,
+            "A completed old path probe releases the single-flight guard");
+        InvokePrivate(
+            formType,
+            form,
+            "OnClearClick",
+            form,
+            EventArgs.Empty);
+    }
+
     private static void TestFailedFilePathRecovery(
         Type formType,
         object form,
@@ -2559,9 +2625,34 @@ internal static class UiStateSmokeTest
                 dialog.ClientSize == new Size(780, 600),
                 "Settings dialog keeps its 780x600 client area");
             AssertTrue(
-                dialog.AutoScaleMode == AutoScaleMode.None &&
+                dialog.AutoScaleMode == AutoScaleMode.Dpi &&
                     FitsCenteredFullHd(dialog),
-                "Settings dialog fits 1920x1080 at 96 DPI without scaling");
+                "Settings dialog uses DPI scaling and fits Full HD");
+
+            Size normalSettingsSize = dialog.Size;
+            Rectangle constrainedArea = new Rectangle(0, 0, 700, 500);
+            dialogType.GetMethod(
+                "ConstrainToWorkingArea",
+                BindingFlags.Instance | BindingFlags.NonPublic).Invoke(
+                    dialog,
+                    new object[] { constrainedArea });
+            dialog.PerformLayout();
+            Application.DoEvents();
+            Button constrainedSave = GetProperty(
+                dialog,
+                "SaveButton") as Button;
+            AssertTrue(
+                dialog.Bounds.Left >= constrainedArea.Left &&
+                    dialog.Bounds.Top >= constrainedArea.Top &&
+                    dialog.Bounds.Right <= constrainedArea.Right &&
+                    dialog.Bounds.Bottom <= constrainedArea.Bottom &&
+                    constrainedSave != null && constrainedSave.Visible &&
+                    constrainedSave.Bottom <= dialog.ClientSize.Height,
+                "Settings actions remain reachable in a constrained workspace");
+            dialog.Size = normalSettingsSize;
+            dialog.Location = new Point(80, 80);
+            dialog.PerformLayout();
+            Application.DoEvents();
 
             Button[] navigationButtons = GetField(
                 dialogType,
@@ -5244,6 +5335,26 @@ internal static class UiStateSmokeTest
         return result.ToString();
     }
 
+    private static bool ByteArraysEqual(byte[] left, byte[] right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+        if (left == null || right == null || left.Length != right.Length)
+        {
+            return false;
+        }
+        for (int index = 0; index < left.Length; index++)
+        {
+            if (left[index] != right[index])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static long CountUnicodeCharacters(string value)
     {
         long count = 0L;
@@ -5330,6 +5441,126 @@ internal static class UiStateSmokeTest
         catch (Exception exception)
         {
             return Unwrap(exception);
+        }
+    }
+
+    private static void TestSettingsProfileTransaction(
+        Assembly application,
+        Type formType,
+        object form,
+        string dataRoot)
+    {
+        Type settingsType = application.GetType(
+            "FilePromptAIWin7.AppSettings",
+            true);
+        Type profileType = application.GetType(
+            "FilePromptAIWin7.ModelProfile",
+            true);
+        string settingsPath = (string)settingsType.GetProperty(
+            "SettingsPath",
+            BindingFlags.Static | BindingFlags.Public).GetValue(null, null);
+        bool originalFileExists = File.Exists(settingsPath);
+        byte[] originalBytes = originalFileExists
+            ? File.ReadAllBytes(settingsPath)
+            : null;
+        TextBox endpoint = (TextBox)GetField(
+            formType,
+            form,
+            "endpointTextBox");
+        TextBox apiKey = (TextBox)GetField(
+            formType,
+            form,
+            "apiKeyTextBox");
+        ComboBox model = (ComboBox)GetField(
+            formType,
+            form,
+            "modelTextBox");
+        TextBox systemPrompt = (TextBox)GetField(
+            formType,
+            form,
+            "systemPromptTextBox");
+        string baselineEndpoint =
+            "http://127.0.0.1:18881/v1/chat/completions";
+        string baselineModel = "transaction-baseline";
+        string profileEndpoint =
+            "http://127.0.0.1:18882/v1/chat/completions";
+        string profileModel = "transaction-profile";
+        try
+        {
+            endpoint.Text = baselineEndpoint;
+            apiKey.Text = "baseline-key";
+            model.Text = baselineModel;
+            systemPrompt.Text = "baseline prompt";
+            AssertTrue(
+                (bool)InvokePrivate(formType, form, "SaveSettings"),
+                "Settings transaction fixture saves its baseline");
+            byte[] baselineBytes = File.ReadAllBytes(settingsPath);
+
+            object profile = Activator.CreateInstance(profileType, true);
+            SetProperty(profile, "Name", "transaction profile");
+            SetProperty(profile, "EndpointUrl", profileEndpoint);
+            SetProperty(profile, "ApiKey", "profile-key");
+            SetProperty(profile, "ModelName", profileModel);
+            SetProperty(profile, "SystemPrompt", "profile prompt");
+            SetField(
+                formType,
+                form,
+                "settingsDialogTransactionActive",
+                true);
+            AssertTrue(
+                (bool)InvokePrivate(
+                    formType,
+                    form,
+                    "ApplyModelProfile",
+                    profile),
+                "Applying a profile inside Settings remains a valid pending change");
+            AssertTrue(
+                ByteArraysEqual(baselineBytes, File.ReadAllBytes(settingsPath)),
+                "Applying a profile inside Settings does not write settings.xml");
+            object reloadedBaseline = settingsType.GetMethod(
+                "Load",
+                BindingFlags.Static | BindingFlags.Public).Invoke(null, null);
+            AssertTrue(
+                (string)GetProperty(reloadedBaseline, "EndpointUrl") ==
+                    baselineEndpoint &&
+                (string)GetProperty(reloadedBaseline, "ModelName") ==
+                    baselineModel,
+                "Cancelling the parent Settings dialog would reload the baseline");
+
+            SetField(
+                formType,
+                form,
+                "settingsDialogTransactionActive",
+                false);
+            AssertTrue(
+                (bool)InvokePrivate(formType, form, "SaveSettings"),
+                "Confirming the parent Settings dialog persists the profile");
+            object reloadedProfile = settingsType.GetMethod(
+                "Load",
+                BindingFlags.Static | BindingFlags.Public).Invoke(null, null);
+            AssertTrue(
+                (string)GetProperty(reloadedProfile, "EndpointUrl") ==
+                    profileEndpoint &&
+                (string)GetProperty(reloadedProfile, "ModelName") ==
+                    profileModel,
+                "Confirmed profile settings survive a reload");
+        }
+        finally
+        {
+            SetField(
+                formType,
+                form,
+                "settingsDialogTransactionActive",
+                false);
+            if (originalFileExists)
+            {
+                File.WriteAllBytes(settingsPath, originalBytes);
+            }
+            else if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+            InvokePrivate(formType, form, "LoadSavedSettings");
         }
     }
 

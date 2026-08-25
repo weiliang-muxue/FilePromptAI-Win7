@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
@@ -29,6 +30,7 @@ internal static class AcceptanceProgram
     private const string TrustedPayloadResourceName =
         "FilePromptAI.Acceptance.TrustedPayload.sha256";
     private const string VerifierRelativePath = "Verify-FilePromptAI.exe";
+    private const string ArchiveName = "FilePromptAI-Win7-Full-v1.17.zip";
     private const string WindowTitle =
         "FilePrompt AI  \u00b7  \u5185\u7f51\u6587\u4ef6\u95ee\u7b54\u5de5\u4f5c\u53f0";
 
@@ -49,6 +51,7 @@ internal static class AcceptanceProgram
         string nonce = Guid.NewGuid().ToString("N");
         string reportPath = string.Empty;
         string isolatedDataRoot = string.Empty;
+        VerifiedArchiveLease verifiedArchive = null;
         VerifiedPackageLease verifiedPackage = null;
         int exitCode = 0;
 
@@ -69,10 +72,11 @@ internal static class AcceptanceProgram
                 "FilePromptAI-Acceptance-Data-" + nonce,
                 true);
 
-            if (args.Length != 0)
+            if (args.Length != 2 ||
+                !string.Equals(args[0], "--archive", StringComparison.Ordinal))
             {
                 throw new AcceptanceFailure(
-                    "Usage: Verify-FilePromptAI.exe",
+                    "Usage: Verify-FilePromptAI.exe --archive <FilePromptAI-Win7-Full-v1.17.zip>",
                     string.Empty);
             }
 
@@ -91,17 +95,31 @@ internal static class AcceptanceProgram
                 ExitDisplay,
                 CheckDisplay,
                 ref exitCode);
+            CheckResult archive = RunCheck(
+                "archive.identity",
+                ExitPackage,
+                delegate
+                {
+                    verifiedArchive = CheckArchive(args[1], packageRoot);
+                    return verifiedArchive.Evidence;
+                },
+                ref exitCode);
             CheckResult package = RunCheck(
                 "package.checksums",
                 ExitPackage,
                 delegate
                 {
                     verifiedPackage = CheckPackage(packageRoot);
+                    AssertArchiveMatchesPackage(
+                        verifiedArchive,
+                        verifiedPackage);
                     return verifiedPackage.Evidence;
                 },
                 ref exitCode);
 
-            if (dotNet.Status == "pass" && package.Status == "pass")
+            if (dotNet.Status == "pass" &&
+                archive.Status == "pass" &&
+                package.Status == "pass")
             {
                 ApplicationRuntime runtime = null;
                 try
@@ -157,7 +175,9 @@ internal static class AcceptanceProgram
             {
                 string prerequisite = dotNet.Status != "pass"
                     ? "Requires .NET Framework 4.8."
-                    : "Requires a successful package checksum check.";
+                    : archive.Status != "pass"
+                        ? "Requires a successfully locked release ZIP."
+                        : "Requires a successful package checksum check.";
                 AddSkipped(
                     "files.extract",
                     prerequisite,
@@ -236,6 +256,7 @@ internal static class AcceptanceProgram
                 reportPath,
                 packageRoot,
                 isolatedDataRoot,
+                verifiedArchive,
                 verifiedPackage,
                 passed,
                 exitCode);
@@ -255,6 +276,7 @@ internal static class AcceptanceProgram
                     reportPath,
                     packageRoot,
                     isolatedDataRoot,
+                    verifiedArchive,
                     verifiedPackage,
                     false,
                     exitCode);
@@ -268,6 +290,10 @@ internal static class AcceptanceProgram
         if (verifiedPackage != null)
         {
             verifiedPackage.Dispose();
+        }
+        if (verifiedArchive != null)
+        {
+            verifiedArchive.Dispose();
         }
         PrintResults(passed, exitCode, reportPath);
         return exitCode & 255;
@@ -770,6 +796,87 @@ internal static class AcceptanceProgram
         return evidence;
     }
 
+    private static VerifiedArchiveLease CheckArchive(
+        string archivePath,
+        string packageRoot)
+    {
+        if (string.IsNullOrEmpty(archivePath))
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP path is required.",
+                string.Empty);
+        }
+
+        string fullPath = Path.GetFullPath(archivePath);
+        if (!string.Equals(
+            Path.GetFileName(fullPath),
+            ArchiveName,
+            StringComparison.Ordinal))
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP has a non-canonical name.",
+                fullPath);
+        }
+        if (!File.Exists(fullPath))
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP is missing.",
+                fullPath);
+        }
+        if (IsPathInsideRoot(fullPath, packageRoot))
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP must remain outside the extracted package.",
+                fullPath);
+        }
+
+        string parent = Path.GetDirectoryName(fullPath);
+        if (string.IsNullOrEmpty(parent))
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP parent is invalid.",
+                fullPath);
+        }
+        AssertNoReparsePointInAncestors(parent);
+        FileInfo item = new FileInfo(fullPath);
+        if ((item.Attributes &
+            (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP is not a regular file.",
+                fullPath);
+        }
+
+        FileStream stream = new FileStream(
+            fullPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read);
+        try
+        {
+            if (stream.Length <= 0)
+            {
+                throw new AcceptanceFailure(
+                    "The original release ZIP is empty.",
+                    fullPath);
+            }
+            string sha256 = ComputeSha256(stream);
+            ZipManifestIdentity manifest = ReadArchiveManifestIdentity(stream);
+            return new VerifiedArchiveLease(
+                fullPath,
+                sha256,
+                stream.Length,
+                manifest.Sha256,
+                manifest.EntryCount,
+                stream);
+        }
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
+    }
+
     private static VerifiedPackageLease CheckPackage(string packageRoot)
     {
         VerifiedPackageLease lease = new VerifiedPackageLease(packageRoot);
@@ -1003,6 +1110,30 @@ internal static class AcceptanceProgram
         }
     }
 
+    private static void AssertArchiveMatchesPackage(
+        VerifiedArchiveLease archive,
+        VerifiedPackageLease package)
+    {
+        if (archive == null || package == null ||
+            !archive.HasVerifiedIdentity ||
+            !package.HasVerifiedManifestIdentity ||
+            !string.Equals(
+                archive.ManifestSha256,
+                package.ManifestSha256,
+                StringComparison.Ordinal) ||
+            archive.ManifestEntryCount != package.ManifestEntryCount)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP and extracted package have different manifest identities.",
+                archive == null
+                    ? string.Empty
+                    : "archiveManifestSha256=" + archive.ManifestSha256 +
+                        "; archiveManifestEntries=" +
+                        archive.ManifestEntryCount.ToString(
+                            CultureInfo.InvariantCulture));
+        }
+    }
+
     private static Dictionary<string, string> ReadTrustedPayloadEntries()
     {
         Dictionary<string, string> entries =
@@ -1226,6 +1357,347 @@ internal static class AcceptanceProgram
             }
         }
         return lines.ToArray();
+    }
+
+    private static ZipManifestIdentity ReadArchiveManifestIdentity(Stream stream)
+    {
+        const string manifestName = "PACKAGE-CHECKSUMS-SHA256.txt";
+        const int maximumManifestLength = 4 * 1024 * 1024;
+        if (stream == null || !stream.CanRead || !stream.CanSeek ||
+            stream.Length < 22)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP is unreadable or truncated.",
+                string.Empty);
+        }
+
+        int tailLength = (int)Math.Min(stream.Length, 65535L + 22L);
+        byte[] tail = new byte[tailLength];
+        ReadExactlyAt(stream, stream.Length - tailLength, tail);
+        int endOffset = -1;
+        for (int index = tail.Length - 22; index >= 0; index--)
+        {
+            if (ReadUInt32(tail, index) == 0x06054B50U)
+            {
+                int commentLength = ReadUInt16(tail, index + 20);
+                if (index + 22 + commentLength == tail.Length)
+                {
+                    endOffset = index;
+                    break;
+                }
+            }
+        }
+        if (endOffset < 0 ||
+            ReadUInt16(tail, endOffset + 4) != 0 ||
+            ReadUInt16(tail, endOffset + 6) != 0)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP has an invalid end record.",
+                string.Empty);
+        }
+
+        int entryCount = ReadUInt16(tail, endOffset + 10);
+        if (entryCount <= 0 ||
+            ReadUInt16(tail, endOffset + 8) != entryCount)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP has an invalid central-directory entry count.",
+                string.Empty);
+        }
+        long centralSize = ReadUInt32(tail, endOffset + 12);
+        long centralOffset = ReadUInt32(tail, endOffset + 16);
+        long absoluteEndOffset = stream.Length - tailLength + endOffset;
+        if (centralSize <= 0 ||
+            centralOffset < 0 ||
+            centralOffset + centralSize != absoluteEndOffset ||
+            centralSize > Int32.MaxValue)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP uses an unsupported or inconsistent central directory.",
+                string.Empty);
+        }
+
+        byte[] central = new byte[(int)centralSize];
+        ReadExactlyAt(stream, centralOffset, central);
+        byte[] expectedName = Encoding.ASCII.GetBytes(manifestName);
+        ZipEntryLocation manifest = null;
+        int cursor = 0;
+        for (int index = 0; index < entryCount; index++)
+        {
+            if (cursor > central.Length - 46 ||
+                ReadUInt32(central, cursor) != 0x02014B50U)
+            {
+                throw new AcceptanceFailure(
+                    "The original release ZIP central directory is invalid.",
+                    "entry=" + index.ToString(CultureInfo.InvariantCulture));
+            }
+            int flags = ReadUInt16(central, cursor + 8);
+            int method = ReadUInt16(central, cursor + 10);
+            uint crc32 = ReadUInt32(central, cursor + 16);
+            long compressedSize = ReadUInt32(central, cursor + 20);
+            long uncompressedSize = ReadUInt32(central, cursor + 24);
+            int nameLength = ReadUInt16(central, cursor + 28);
+            int extraLength = ReadUInt16(central, cursor + 30);
+            int commentLength = ReadUInt16(central, cursor + 32);
+            int disk = ReadUInt16(central, cursor + 34);
+            long localOffset = ReadUInt32(central, cursor + 42);
+            long recordLength = 46L + nameLength + extraLength + commentLength;
+            if (nameLength <= 0 || recordLength > central.Length - cursor ||
+                disk != 0 || compressedSize == UInt32.MaxValue ||
+                uncompressedSize == UInt32.MaxValue ||
+                localOffset == UInt32.MaxValue)
+            {
+                throw new AcceptanceFailure(
+                    "The original release ZIP contains an unsupported central-directory entry.",
+                    "entry=" + index.ToString(CultureInfo.InvariantCulture));
+            }
+
+            if (BytesEqual(central, cursor + 46, nameLength, expectedName))
+            {
+                if (manifest != null ||
+                    (flags & 1) != 0 ||
+                    (method != 0 && method != 8) ||
+                    compressedSize < 0 ||
+                    compressedSize > maximumManifestLength ||
+                    uncompressedSize <= 0 ||
+                    uncompressedSize > maximumManifestLength)
+                {
+                    throw new AcceptanceFailure(
+                        "The original release ZIP manifest entry is duplicated, encrypted, or unsupported.",
+                        string.Empty);
+                }
+                manifest = new ZipEntryLocation(
+                    flags,
+                    method,
+                    crc32,
+                    compressedSize,
+                    uncompressedSize,
+                    localOffset,
+                    expectedName);
+            }
+            cursor += (int)recordLength;
+        }
+        if (cursor != central.Length || manifest == null)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP must contain exactly one root package checksum manifest.",
+                string.Empty);
+        }
+
+        byte[] header = new byte[30];
+        ReadExactlyAt(stream, manifest.LocalOffset, header);
+        int localNameLength = ReadUInt16(header, 26);
+        int localExtraLength = ReadUInt16(header, 28);
+        if (ReadUInt32(header, 0) != 0x04034B50U ||
+            ReadUInt16(header, 6) != manifest.Flags ||
+            ReadUInt16(header, 8) != manifest.Method ||
+            localNameLength != manifest.Name.Length)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP manifest local header is inconsistent.",
+                string.Empty);
+        }
+        byte[] localName = new byte[localNameLength];
+        ReadExactlyAt(stream, manifest.LocalOffset + 30, localName);
+        if (!BytesEqual(localName, 0, localName.Length, manifest.Name))
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP manifest local name is inconsistent.",
+                string.Empty);
+        }
+
+        long dataOffset = manifest.LocalOffset + 30L +
+            localNameLength + localExtraLength;
+        if (dataOffset < 0 ||
+            dataOffset + manifest.CompressedSize > centralOffset)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP manifest data range is invalid.",
+                string.Empty);
+        }
+        byte[] compressed = new byte[(int)manifest.CompressedSize];
+        ReadExactlyAt(stream, dataOffset, compressed);
+        byte[] bytes;
+        if (manifest.Method == 0)
+        {
+            bytes = compressed;
+        }
+        else
+        {
+            using (MemoryStream input = new MemoryStream(compressed, false))
+            using (DeflateStream inflater = new DeflateStream(
+                input,
+                CompressionMode.Decompress))
+            using (MemoryStream output = new MemoryStream())
+            {
+                byte[] buffer = new byte[8192];
+                int count;
+                while ((count = inflater.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    if (output.Length + count > maximumManifestLength)
+                    {
+                        throw new AcceptanceFailure(
+                            "The original release ZIP manifest exceeds its size limit.",
+                            string.Empty);
+                    }
+                    output.Write(buffer, 0, count);
+                }
+                bytes = output.ToArray();
+            }
+        }
+        if (bytes.Length != manifest.UncompressedSize ||
+            ComputeCrc32(bytes) != manifest.Crc32)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP manifest size or CRC-32 is invalid.",
+                string.Empty);
+        }
+        return GetManifestIdentity(bytes);
+    }
+
+    private static ZipManifestIdentity GetManifestIdentity(byte[] bytes)
+    {
+        if (bytes == null || bytes.Length <= 0 || bytes.Length > 4 * 1024 * 1024 ||
+            (bytes.Length >= 3 && bytes[0] == 0xEF &&
+                bytes[1] == 0xBB && bytes[2] == 0xBF))
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP manifest has invalid UTF-8 bytes.",
+                string.Empty);
+        }
+        string text;
+        try
+        {
+            text = new UTF8Encoding(false, true).GetString(bytes);
+        }
+        catch (DecoderFallbackException)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP manifest is not valid UTF-8.",
+                string.Empty);
+        }
+        if (!text.EndsWith("\r\n", StringComparison.Ordinal) ||
+            text.IndexOf("\r\n", StringComparison.Ordinal) < 0)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP manifest is not canonical CRLF text.",
+                string.Empty);
+        }
+        string body = text.Substring(0, text.Length - 2);
+        string[] lines = body.Split(new string[] { "\r\n" },
+            StringSplitOptions.None);
+        Dictionary<string, bool> paths = new Dictionary<string, bool>(
+            StringComparer.Ordinal);
+        for (int index = 0; index < lines.Length; index++)
+        {
+            string line = lines[index];
+            if (line.IndexOf('\r') >= 0 || line.IndexOf('\n') >= 0 ||
+                line.Length < 67 || line[64] != ' ' || line[65] != '*')
+            {
+                throw new AcceptanceFailure(
+                    "The original release ZIP manifest contains a non-canonical line.",
+                    "line=" + (index + 1).ToString(CultureInfo.InvariantCulture));
+            }
+            string hash = line.Substring(0, 64);
+            string path = line.Substring(66);
+            if (!IsUpperHexSha256(hash) ||
+                !IsSafeCanonicalRelativePath(path) ||
+                paths.ContainsKey(path))
+            {
+                throw new AcceptanceFailure(
+                    "The original release ZIP manifest contains an unsafe or duplicate path.",
+                    path);
+            }
+            paths.Add(path, true);
+        }
+        using (MemoryStream memory = new MemoryStream(bytes, false))
+        {
+            return new ZipManifestIdentity(
+                ComputeSha256(memory),
+                paths.Count);
+        }
+    }
+
+    private static void ReadExactlyAt(Stream stream, long position, byte[] bytes)
+    {
+        if (position < 0 || bytes == null || position > stream.Length - bytes.Length)
+        {
+            throw new AcceptanceFailure(
+                "The original release ZIP contains an invalid byte range.",
+                string.Empty);
+        }
+        stream.Position = position;
+        int offset = 0;
+        while (offset < bytes.Length)
+        {
+            int count = stream.Read(bytes, offset, bytes.Length - offset);
+            if (count <= 0)
+            {
+                throw new EndOfStreamException(
+                    "The original release ZIP ended unexpectedly.");
+            }
+            offset += count;
+        }
+        stream.Position = 0;
+    }
+
+    private static int ReadUInt16(byte[] bytes, int offset)
+    {
+        if (bytes == null || offset < 0 || offset > bytes.Length - 2)
+        {
+            throw new InvalidDataException("A ZIP UInt16 field is truncated.");
+        }
+        return bytes[offset] | (bytes[offset + 1] << 8);
+    }
+
+    private static uint ReadUInt32(byte[] bytes, int offset)
+    {
+        if (bytes == null || offset < 0 || offset > bytes.Length - 4)
+        {
+            throw new InvalidDataException("A ZIP UInt32 field is truncated.");
+        }
+        return (uint)(bytes[offset] |
+            (bytes[offset + 1] << 8) |
+            (bytes[offset + 2] << 16) |
+            (bytes[offset + 3] << 24));
+    }
+
+    private static bool BytesEqual(
+        byte[] bytes,
+        int offset,
+        int length,
+        byte[] expected)
+    {
+        if (bytes == null || expected == null ||
+            length != expected.Length || offset < 0 ||
+            offset > bytes.Length - length)
+        {
+            return false;
+        }
+        for (int index = 0; index < length; index++)
+        {
+            if (bytes[offset + index] != expected[index])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static uint ComputeCrc32(byte[] bytes)
+    {
+        uint value = UInt32.MaxValue;
+        for (int index = 0; index < bytes.Length; index++)
+        {
+            value ^= bytes[index];
+            for (int bit = 0; bit < 8; bit++)
+            {
+                value = (value & 1) != 0
+                    ? (value >> 1) ^ 0xEDB88320U
+                    : value >> 1;
+            }
+        }
+        return ~value;
     }
 
     private static string CheckFileExtraction(
@@ -1966,6 +2438,7 @@ internal static class AcceptanceProgram
         string reportPath,
         string packageRoot,
         string isolatedDataRoot,
+        VerifiedArchiveLease verifiedArchive,
         VerifiedPackageLease verifiedPackage,
         bool passed,
         int exitCode)
@@ -2000,13 +2473,22 @@ internal static class AcceptanceProgram
             writer.WriteStartElement("packageIdentity");
             if (passed)
             {
-                if (verifiedPackage == null ||
+                if (verifiedArchive == null ||
+                    !verifiedArchive.HasVerifiedIdentity ||
+                    verifiedPackage == null ||
                     !verifiedPackage.HasVerifiedManifestIdentity)
                 {
                     throw new InvalidOperationException(
-                        "A passing report requires a verified package manifest identity.");
+                        "A passing report requires verified archive and package identities.");
                 }
                 writer.WriteAttributeString("status", "verified");
+                writer.WriteAttributeString("archiveName", ArchiveName);
+                writer.WriteAttributeString(
+                    "archiveSha256",
+                    verifiedArchive.Sha256);
+                writer.WriteAttributeString(
+                    "archiveSize",
+                    verifiedArchive.Size.ToString(CultureInfo.InvariantCulture));
                 writer.WriteAttributeString(
                     "manifestName",
                     "PACKAGE-CHECKSUMS-SHA256.txt");
@@ -2125,6 +2607,116 @@ internal static class AcceptanceProgram
             actual = actual.InnerException;
         }
         return actual.GetType().FullName + ": " + actual.Message;
+    }
+
+    private sealed class VerifiedArchiveLease : IDisposable
+    {
+        private FileStream stream;
+
+        public string FullPath { get; private set; }
+        public string Sha256 { get; private set; }
+        public long Size { get; private set; }
+        public string ManifestSha256 { get; private set; }
+        public int ManifestEntryCount { get; private set; }
+
+        public bool HasVerifiedIdentity
+        {
+            get
+            {
+                return stream != null &&
+                    IsUpperHexSha256(Sha256) &&
+                    Size > 0 &&
+                    IsUpperHexSha256(ManifestSha256) &&
+                    ManifestEntryCount > 0;
+            }
+        }
+
+        public string Evidence
+        {
+            get
+            {
+                return "archive=" + FullPath +
+                    "; sha256=" + Sha256 +
+                    "; size=" + Size.ToString(CultureInfo.InvariantCulture) +
+                    "; locked=true";
+            }
+        }
+
+        public VerifiedArchiveLease(
+            string fullPath,
+            string sha256,
+            long size,
+            string manifestSha256,
+            int manifestEntryCount,
+            FileStream stream)
+        {
+            if (string.IsNullOrEmpty(fullPath) ||
+                !IsUpperHexSha256(sha256) ||
+                size <= 0 ||
+                !IsUpperHexSha256(manifestSha256) ||
+                manifestEntryCount <= 0 ||
+                stream == null)
+            {
+                throw new ArgumentException(
+                    "A verified archive lease requires a canonical identity.");
+            }
+            FullPath = fullPath;
+            Sha256 = sha256;
+            Size = size;
+            ManifestSha256 = manifestSha256;
+            ManifestEntryCount = manifestEntryCount;
+            this.stream = stream;
+        }
+
+        public void Dispose()
+        {
+            if (stream != null)
+            {
+                stream.Dispose();
+                stream = null;
+            }
+        }
+    }
+
+    private sealed class ZipManifestIdentity
+    {
+        public string Sha256 { get; private set; }
+        public int EntryCount { get; private set; }
+
+        public ZipManifestIdentity(string sha256, int entryCount)
+        {
+            Sha256 = sha256;
+            EntryCount = entryCount;
+        }
+    }
+
+    private sealed class ZipEntryLocation
+    {
+        public int Flags { get; private set; }
+        public int Method { get; private set; }
+        public uint Crc32 { get; private set; }
+        public long CompressedSize { get; private set; }
+        public long UncompressedSize { get; private set; }
+        public long LocalOffset { get; private set; }
+        public byte[] Name { get; private set; }
+
+        public ZipEntryLocation(
+            int flags,
+            int method,
+            uint crc32,
+            long compressedSize,
+            long uncompressedSize,
+            long localOffset,
+            byte[] name)
+        {
+            Flags = flags;
+            Method = method;
+            Crc32 = crc32;
+            CompressedSize = compressedSize;
+            UncompressedSize = uncompressedSize;
+            LocalOffset = localOffset;
+            Name = name;
+        }
     }
 
     private sealed class VerifiedPackageLease : IDisposable

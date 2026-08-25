@@ -60,7 +60,7 @@ function Invoke-Script {
             $Version
         )
         if ((Split-Path -Leaf $ScriptPath) -eq 'VerifyTaggedRelease.ps1') {
-            $arguments += @('-ProjectRoot', $Root)
+            $arguments += @('-ProjectRoot', (Join-Path $Root 'src'))
         }
         if (-not $OmitAcceptanceReport -and
             (Split-Path -Leaf $ScriptPath) -in @(
@@ -89,6 +89,8 @@ function Invoke-Script {
 function Write-AcceptanceFixtureReport {
     param(
         [string]$Path,
+        [string]$ArchiveHash,
+        [int64]$ArchiveSize,
         [string]$ManifestHash,
         [int]$ManifestEntryCount
     )
@@ -97,6 +99,7 @@ function Write-AcceptanceFixtureReport {
         'os.win7-sp1',
         'runtime.dotnet-4.8',
         'display.fullhd-100-percent',
+        'archive.identity',
         'package.checksums',
         'files.extract',
         'files.export',
@@ -132,6 +135,12 @@ function Write-AcceptanceFixtureReport {
         }
         $writer.WriteStartElement('packageIdentity')
         $writer.WriteAttributeString('status', 'verified')
+        $writer.WriteAttributeString('archiveName', $archiveName)
+        $writer.WriteAttributeString('archiveSha256', $ArchiveHash)
+        $writer.WriteAttributeString(
+            'archiveSize',
+            $ArchiveSize.ToString(
+                [Globalization.CultureInfo]::InvariantCulture))
         $writer.WriteAttributeString(
             'manifestName',
             'PACKAGE-CHECKSUMS-SHA256.txt')
@@ -229,11 +238,14 @@ function New-ReleaseFixture {
     )
 
     $root = Join-Path $temporaryRoot $Name
-    $fixtureTestRoot = Join-Path $root 'tests'
+    $sourceRoot = Join-Path $root 'src'
+    $distributionRoot = Join-Path $root 'exe'
+    $fixtureTestRoot = Join-Path $sourceRoot 'tests'
     $receiptRoot = Join-Path $fixtureTestRoot 'build-artifacts\release'
     New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $distributionRoot -Force | Out-Null
 
-    Copy-Item -LiteralPath $sourceSealScript -Destination $root
+    Copy-Item -LiteralPath $sourceSealScript -Destination $sourceRoot
     Copy-Item -LiteralPath $sourceHashVerifier -Destination $fixtureTestRoot
     Copy-Item -LiteralPath $sourceTagVerifier -Destination $fixtureTestRoot
     Copy-Item -LiteralPath $sourceAllSmokeTests -Destination $fixtureTestRoot
@@ -245,6 +257,7 @@ function New-ReleaseFixture {
         "Write-Host 'PASS | fixture suite'`r`n"
     $stubNames = @(
         'RunReleaseSha256SmokeTest.ps1',
+        'RunCandidatePromotionSmokeTest.ps1',
         'RunReleaseSealingSmokeTest.ps1',
         'RunApiSmokeTest.ps1',
         'RunApiHardeningSmokeTest.ps1',
@@ -279,7 +292,7 @@ function New-ReleaseFixture {
     }
 
     [IO.File]::WriteAllText(
-        (Join-Path $root 'build.ps1'),
+        (Join-Path $sourceRoot 'build.ps1'),
         $stubScript,
         $utf8NoBom)
     $packageStub = @'
@@ -310,65 +323,35 @@ $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
 Write-Host 'PASS | fixture package build'
 '@
     [IO.File]::WriteAllText(
-        (Join-Path $root 'build-offline-package.ps1'),
+        (Join-Path $sourceRoot 'build-offline-package.ps1'),
         $packageStub,
         $utf8NoBom)
 
     [IO.File]::WriteAllText(
-        (Join-Path $root '.gitattributes'),
-        "* text=auto`r`nRELEASE-SHA256.txt -text`r`n",
+        (Join-Path $sourceRoot '.gitattributes'),
+        "* text=auto`r`nRELEASE-SHA256.txt -text`r`nRELEASE-EVIDENCE.txt -text`r`n",
         $utf8NoBom)
     [IO.File]::WriteAllText(
-        (Join-Path $root '.gitignore'),
+        (Join-Path $sourceRoot '.gitignore'),
         "FilePromptAI-Win7-Full-v*.zip`r`n" +
-        "FilePromptAI-Win7-Full-v*.zip.sha256.txt`r`n" +
-        "tests/build-artifacts/`r`n" +
-        "FilePromptAI-offline-release-v*/`r`n",
+            "FilePromptAI-Win7-Full-v*.zip.sha256.txt`r`n" +
+            "tests/build-artifacts/`r`n" +
+            "FilePromptAI-offline-release-v*/`r`n",
         $utf8NoBom)
     [IO.File]::WriteAllText(
-        (Join-Path $root 'candidate.txt'),
+        (Join-Path $distributionRoot '.gitattributes'),
+        "*.zip filter=lfs diff=lfs merge=lfs -text`r`n" +
+            "ReleaseCandidate-v*.txt -text`r`n" +
+            "* text=auto`r`n",
+        $utf8NoBom)
+    [IO.File]::WriteAllText(
+        (Join-Path $sourceRoot 'candidate.txt'),
         "tested candidate`r`n",
         $utf8NoBom)
-
-    $archivePath = Join-Path $root $archiveName
-    $sidecarPath = "$archivePath.sha256.txt"
-    $fixtureStaging = Join-Path $root "FilePromptAI-offline-release-v$Version"
-    New-Item -ItemType Directory -Path $fixtureStaging | Out-Null
-    $fixturePayload = Join-Path $fixtureStaging 'payload.txt'
-    [IO.File]::WriteAllText(
-        $fixturePayload,
-        "fixture payload $Version`r`n",
-        $utf8NoBom)
-    $fixturePayloadHash = (
-        Get-FileHash -LiteralPath $fixturePayload -Algorithm SHA256
-    ).Hash
-    $fixtureManifestPath = Join-Path `
-        $fixtureStaging `
-        'PACKAGE-CHECKSUMS-SHA256.txt'
-    [IO.File]::WriteAllText(
-        $fixtureManifestPath,
-        "$fixturePayloadHash *payload.txt`r`n",
-        $utf8NoBom)
-    Compress-Archive `
-        -Path (Join-Path $fixtureStaging '*') `
-        -DestinationPath $archivePath `
-        -Force
-    $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
-    $manifestHash = (
-        Get-FileHash -LiteralPath $fixtureManifestPath -Algorithm SHA256
-    ).Hash
-    $manifestEntryCount = 1
-    $checksumLine = "$archiveHash *$archiveName`r`n"
-    [IO.File]::WriteAllText($sidecarPath, $checksumLine, $utf8NoBom)
-    $acceptanceReportPath = Join-Path $temporaryRoot "acceptance-$Name.xml"
-    Write-AcceptanceFixtureReport `
-        -Path $acceptanceReportPath `
-        -ManifestHash $manifestHash `
-        -ManifestEntryCount $manifestEntryCount
     if ($IncludeTrackedManifest) {
         [IO.File]::WriteAllText(
-            (Join-Path $root 'RELEASE-SHA256.txt'),
-            $checksumLine,
+            (Join-Path $sourceRoot 'RELEASE-SHA256.txt'),
+            "fixture pre-existing digest`r`n",
             $utf8NoBom)
     }
 
@@ -376,23 +359,95 @@ Write-Host 'PASS | fixture package build'
     Invoke-GitChecked -Root $root -GitArguments @('config', 'user.name', 'Release Test') | Out-Null
     Invoke-GitChecked -Root $root -GitArguments @('config', 'user.email', 'release-test@example.invalid') | Out-Null
     Invoke-GitChecked -Root $root -GitArguments @('config', 'core.autocrlf', 'true') | Out-Null
+    Invoke-GitChecked -Root $root -GitArguments @('lfs', 'install', '--local') | Out-Null
     Invoke-GitChecked -Root $root -GitArguments @('add', '--', '.') | Out-Null
-    Invoke-GitChecked -Root $root -GitArguments @('commit', '--quiet', '-m', 'candidate') | Out-Null
+    Invoke-GitChecked -Root $root -GitArguments @('commit', '--quiet', '-m', 'tested source candidate') | Out-Null
     $candidateCommit = Invoke-GitChecked -Root $root -GitArguments @('rev-parse', 'HEAD')
+
+    $suiteResult = Invoke-Script `
+        -ScriptPath (Join-Path $fixtureTestRoot 'RunAllSmokeTests.ps1') `
+        -Root $root
+    Assert-Accepted `
+        -Description 'The full-suite release receipt integration' `
+        -Result $suiteResult `
+        -OutputPattern '(?m)^RECEIPT \|'
+
+    $sourceArchivePath = Join-Path $sourceRoot $archiveName
+    $sourceSidecarPath = "$sourceArchivePath.sha256.txt"
+    $fixtureManifestPath = Join-Path `
+        (Join-Path $sourceRoot "FilePromptAI-offline-release-v$Version") `
+        'PACKAGE-CHECKSUMS-SHA256.txt'
+    $archiveHash = (Get-FileHash -LiteralPath $sourceArchivePath -Algorithm SHA256).Hash
+    $archiveSize = (Get-Item -LiteralPath $sourceArchivePath).Length
+    $manifestHash = (Get-FileHash -LiteralPath $fixtureManifestPath -Algorithm SHA256).Hash
+    $manifestEntryCount = 1
+
+    $archivePath = Join-Path $distributionRoot $archiveName
+    $sidecarPath = "$archivePath.sha256.txt"
+    $readmePath = Join-Path $distributionRoot 'README.txt'
+    $candidateEvidencePath = Join-Path $distributionRoot "ReleaseCandidate-v$Version.txt"
+    Copy-Item -LiteralPath $sourceArchivePath -Destination $archivePath
+    Copy-Item -LiteralPath $sourceSidecarPath -Destination $sidecarPath
+    [IO.File]::WriteAllText(
+        $readmePath,
+        "FilePromptAI tested candidate, not a sealed release.`r`n" +
+            "Windows 7 acceptance is not asserted.`r`n" +
+            "SHA-256: $archiveHash`r`n",
+        $utf8NoBom)
+
+    $receiptPath = Join-Path $receiptRoot "ReleaseCandidate-v$Version.txt"
+    $receiptHash = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash
+    $candidateEvidence =
+        "FilePromptAI-Candidate-Promotion: 1`r`n" +
+        "State: TESTED-CANDIDATE`r`n" +
+        "Version: $Version`r`n" +
+        "Candidate-Commit: $candidateCommit`r`n" +
+        "Archive-Name: $archiveName`r`n" +
+        "Archive-SHA256: $archiveHash`r`n" +
+        "Archive-Size: $archiveSize`r`n" +
+        "Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256.txt`r`n" +
+        "Package-Manifest-SHA256: $manifestHash`r`n" +
+        "Package-Manifest-Entry-Count: $manifestEntryCount`r`n" +
+        "Test-Receipt-SHA256: $receiptHash`r`n" +
+        "Promotion-Scope: CANDIDATE-ONLY`r`n" +
+        "Windows-7-Acceptance: NOT-ASSERTED`r`n"
+    [IO.File]::WriteAllText($candidateEvidencePath, $candidateEvidence, $utf8NoBom)
+
+    Invoke-GitChecked -Root $root -GitArguments @(
+        'add', '--',
+        "exe/$archiveName",
+        "exe/$archiveName.sha256.txt",
+        'exe/README.txt',
+        "exe/ReleaseCandidate-v$Version.txt") | Out-Null
+    Invoke-GitChecked -Root $root -GitArguments @(
+        'commit', '--quiet', '-m', 'promote tested candidate') | Out-Null
+    $promotionCommit = Invoke-GitChecked -Root $root -GitArguments @('rev-parse', 'HEAD')
+
+    $acceptanceReportPath = Join-Path $temporaryRoot "acceptance-$Name.xml"
+    Write-AcceptanceFixtureReport `
+        -Path $acceptanceReportPath `
+        -ArchiveHash $archiveHash `
+        -ArchiveSize $archiveSize `
+        -ManifestHash $manifestHash `
+        -ManifestEntryCount $manifestEntryCount
 
     return [pscustomobject]@{
         Root = $root
-        SealScript = Join-Path $root 'seal-release.ps1'
+        SourceRoot = $sourceRoot
+        SealScript = Join-Path $sourceRoot 'seal-release.ps1'
         TagVerifier = Join-Path $fixtureTestRoot 'VerifyTaggedRelease.ps1'
         AllSmokeTests = Join-Path $fixtureTestRoot 'RunAllSmokeTests.ps1'
         ArchivePath = $archivePath
         SidecarPath = $sidecarPath
-        ReceiptPath = Join-Path $receiptRoot "ReleaseCandidate-v$Version.txt"
+        ReceiptPath = $receiptPath
         Candidate = $candidateCommit
+        Promotion = $promotionCommit
         ArchiveHash = $archiveHash
+        ArchiveSize = $archiveSize
         ManifestHash = $manifestHash
         ManifestEntryCount = $manifestEntryCount
         AcceptanceReportPath = $acceptanceReportPath
+        SuiteResult = $suiteResult
     }
 }
 
@@ -424,23 +479,27 @@ function Complete-SealCommit {
 
     if ($ChangeAnotherFile) {
         [IO.File]::AppendAllText(
-            (Join-Path $Fixture.Root 'candidate.txt'),
+            (Join-Path $Fixture.SourceRoot 'candidate.txt'),
             "unexpected seal change`r`n",
             $utf8NoBom)
     }
-    Invoke-GitChecked -Root $Fixture.Root -GitArguments @('add', '--', '.') | Out-Null
+    Invoke-GitChecked -Root $Fixture.Root -GitArguments @(
+        'add', '--',
+        'src/RELEASE-SHA256.txt',
+        'src/RELEASE-EVIDENCE.txt') | Out-Null
+    if ($ChangeAnotherFile) {
+        Invoke-GitChecked -Root $Fixture.Root -GitArguments @(
+            'add', '--', 'src/candidate.txt') | Out-Null
+    }
     Invoke-GitChecked -Root $Fixture.Root -GitArguments @('commit', '--quiet', '-m', 'seal release') | Out-Null
 }
 
 New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
 try {
     $success = New-ReleaseFixture -Name 'success'
-    $suiteResult = Invoke-Script `
-        -ScriptPath $success.AllSmokeTests `
-        -Root $success.Root
     Assert-Accepted `
         -Description 'The full-suite release receipt integration' `
-        -Result $suiteResult `
+        -Result $success.SuiteResult `
         -OutputPattern '(?m)^RECEIPT \|'
     $sealResult = Invoke-Script -ScriptPath $success.SealScript -Root $success.Root
     Assert-Accepted `
@@ -479,7 +538,7 @@ try {
         $utf8NoBom)
     Update-AcceptanceFixtureSidecar -Path $success.AcceptanceReportPath
 
-    $manifestPath = Join-Path $success.Root 'RELEASE-SHA256.txt'
+    $manifestPath = Join-Path $success.SourceRoot 'RELEASE-SHA256.txt'
     $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
     if ($manifestBytes.Length -lt 2 -or
         $manifestBytes[$manifestBytes.Length - 2] -ne 0x0D -or
@@ -488,10 +547,10 @@ try {
     }
     $rawWorkingBlob = Invoke-GitChecked `
         -Root $success.Root `
-        -GitArguments @('hash-object', '--no-filters', '--', 'RELEASE-SHA256.txt')
+        -GitArguments @('hash-object', '--no-filters', '--', 'src/RELEASE-SHA256.txt')
     $tagBlob = Invoke-GitChecked `
         -Root $success.Root `
-        -GitArguments @('rev-parse', "v$Version`:RELEASE-SHA256.txt")
+        -GitArguments @('rev-parse', "v$Version`:src/RELEASE-SHA256.txt")
     if ($rawWorkingBlob -ne $tagBlob) {
         throw 'core.autocrlf=true changed the tagged release manifest bytes.'
     }
@@ -619,12 +678,12 @@ try {
     $staged = New-ReleaseFixture -Name 'staged-old-digest'
     Write-ReleaseFixtureReceipt -Fixture $staged
     [IO.File]::WriteAllText(
-        (Join-Path $staged.Root 'RELEASE-SHA256.txt'),
+        (Join-Path $staged.SourceRoot 'RELEASE-SHA256.txt'),
         (('0' * 64) + " *$archiveName`r`n"),
         $utf8NoBom)
     Invoke-GitChecked `
         -Root $staged.Root `
-        -GitArguments @('add', '--', 'RELEASE-SHA256.txt') | Out-Null
+        -GitArguments @('add', '--', 'src/RELEASE-SHA256.txt') | Out-Null
     Assert-Rejected `
         -Description 'A staged old release digest' `
         -Result (Invoke-Script -ScriptPath $staged.SealScript -Root $staged.Root) `
@@ -633,15 +692,15 @@ try {
     $staleReceipt = New-ReleaseFixture -Name 'stale-receipt'
     Write-ReleaseFixtureReceipt -Fixture $staleReceipt
     [IO.File]::AppendAllText(
-        (Join-Path $staleReceipt.Root 'candidate.txt'),
+        (Join-Path $staleReceipt.SourceRoot 'candidate.txt'),
         "new candidate`r`n",
         $utf8NoBom)
-    Invoke-GitChecked -Root $staleReceipt.Root -GitArguments @('add', '--', 'candidate.txt') | Out-Null
+    Invoke-GitChecked -Root $staleReceipt.Root -GitArguments @('add', '--', 'src/candidate.txt') | Out-Null
     Invoke-GitChecked -Root $staleReceipt.Root -GitArguments @('commit', '--quiet', '-m', 'new candidate') | Out-Null
     Assert-Rejected `
-        -Description 'A receipt for an older HEAD' `
+        -Description 'A commit added after the promotion commit' `
         -Result (Invoke-Script -ScriptPath $staleReceipt.SealScript -Root $staleReceipt.Root) `
-        -OutputPattern 'receipt does not match HEAD'
+        -OutputPattern 'promotion commit parent is not the tested source candidate'
 
     $changedZip = New-ReleaseFixture -Name 'changed-zip'
     Write-ReleaseFixtureReceipt -Fixture $changedZip
@@ -654,7 +713,7 @@ try {
     Assert-Rejected `
         -Description 'A changed self-consistent ZIP and sidecar' `
         -Result (Invoke-Script -ScriptPath $changedZip.SealScript -Root $changedZip.Root) `
-        -OutputPattern 'no longer matches.*receipt'
+        -OutputPattern 'clean promotion commit'
 
     $lightweight = New-ReleaseFixture -Name 'lightweight-tag'
     Write-ReleaseFixtureReceipt -Fixture $lightweight
@@ -686,10 +745,10 @@ try {
 
     $missingDigest = New-ReleaseFixture -Name 'missing-digest' -IncludeTrackedManifest
     Write-ReleaseFixtureReceipt -Fixture $missingDigest
-    Remove-Item -LiteralPath (Join-Path $missingDigest.Root 'RELEASE-SHA256.txt') -Force
+    Remove-Item -LiteralPath (Join-Path $missingDigest.SourceRoot 'RELEASE-SHA256.txt') -Force
     Invoke-GitChecked `
         -Root $missingDigest.Root `
-        -GitArguments @('add', '--update', '--', 'RELEASE-SHA256.txt') | Out-Null
+        -GitArguments @('add', '--update', '--', 'src/RELEASE-SHA256.txt') | Out-Null
     Invoke-GitChecked `
         -Root $missingDigest.Root `
         -GitArguments @('commit', '--quiet', '-m', 'remove digest') | Out-Null
@@ -699,7 +758,7 @@ try {
     Assert-Rejected `
         -Description 'A release tag missing the digest' `
         -Result (Invoke-Script -ScriptPath $missingDigest.TagVerifier -Root $missingDigest.Root) `
-        -OutputPattern 'missing from the release tag'
+        -OutputPattern 'change exactly RELEASE-SHA256.txt and RELEASE-EVIDENCE.txt'
 }
 finally {
     $resolvedTemporary = [IO.Path]::GetFullPath($temporaryRoot)

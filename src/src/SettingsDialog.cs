@@ -74,12 +74,13 @@ namespace FilePromptAIWin7
             MinimizeBox = false;
             MaximizeBox = false;
             ShowInTaskbar = false;
+            AutoScaleDimensions = new SizeF(96F, 96F);
+            AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(780, 600);
-            MinimumSize = new Size(780, 600);
+            MinimumSize = new Size(640, 440);
             Font = new Font("Microsoft YaHei", 9F, FontStyle.Regular);
             BackColor = UiTheme.WindowBackground;
             ForeColor = UiTheme.TextPrimary;
-            AutoScaleMode = AutoScaleMode.None;
             KeyPreview = true;
 
             TableLayoutPanel root = new TableLayoutPanel();
@@ -136,6 +137,37 @@ namespace FilePromptAIWin7
             Shown += delegate { FocusPreparedControl(); };
             SetSendShortcutMode("Both");
             SelectPage(0);
+        }
+
+        protected override void OnShown(EventArgs args)
+        {
+            base.OnShown(args);
+            ConstrainToWorkingArea(Screen.FromControl(this).WorkingArea);
+        }
+
+        private void ConstrainToWorkingArea(Rectangle workingArea)
+        {
+            if (workingArea.Width <= 0 || workingArea.Height <= 0)
+            {
+                return;
+            }
+
+            const int margin = 16;
+            int maximumWidth = Math.Max(1, workingArea.Width - margin * 2);
+            int maximumHeight = Math.Max(1, workingArea.Height - margin * 2);
+            MinimumSize = new Size(
+                Math.Min(MinimumSize.Width, maximumWidth),
+                Math.Min(MinimumSize.Height, maximumHeight));
+            Size = new Size(
+                Math.Min(Math.Max(Width, MinimumSize.Width), maximumWidth),
+                Math.Min(Math.Max(Height, MinimumSize.Height), maximumHeight));
+            Location = new Point(
+                Math.Max(
+                    workingArea.Left + margin,
+                    Math.Min(Left, workingArea.Right - margin - Width)),
+                Math.Max(
+                    workingArea.Top + margin,
+                    Math.Min(Top, workingArea.Bottom - margin - Height)));
         }
 
         public void SetSendShortcutMode(string mode)
@@ -749,13 +781,17 @@ namespace FilePromptAIWin7
         {
             Panel page = new Panel();
             page.BackColor = UiTheme.PanelBackground;
+            page.AutoScroll = true;
             return page;
         }
 
         private static TableLayoutPanel CreatePageLayout(int rowCount)
         {
             TableLayoutPanel layout = new TableLayoutPanel();
-            layout.Dock = DockStyle.Fill;
+            layout.Dock = DockStyle.Top;
+            layout.AutoSize = true;
+            layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            layout.GrowStyle = TableLayoutPanelGrowStyle.FixedSize;
             layout.ColumnCount = 2;
             layout.RowCount = rowCount;
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 122F));
@@ -767,7 +803,7 @@ namespace FilePromptAIWin7
                 layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38F));
             }
 
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
             return layout;
         }
 
