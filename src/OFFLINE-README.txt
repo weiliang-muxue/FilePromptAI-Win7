@@ -5,9 +5,11 @@ FilePrompt AI for Windows 7 离线完整版
 --------
 
 当前唯一维护版本为 FilePrompt AI v1.17。版本号或包名本身不表示已经正式发布：只有
-annotated v1.17 标签中的 RELEASE-SHA256.txt、同一 ZIP 的成功测试 receipt，以及规定
-环境中的 Windows 7 PASS XML 和 sidecar 全部通过封存与标签后复核时，该 ZIP 才是
-正式发布包；缺少任一项时均按候选包处理。界面采用左侧会话导航、右侧会话
+annotated v1.17 标签中的 RELEASE-SHA256.txt 和 RELEASE-EVIDENCE.txt、同一 ZIP 的
+成功测试 receipt，以及规定环境中的 Windows 7 PASS XML（验收时另附同名校验文件）
+全部通过封存与标签后复核时，该 ZIP 才是正式发布包；缺少任一项时均按候选包处理。仓库 exe 目录只保留
+FilePromptAI-Win7-Full-v1.17.zip；该 ZIP 由仓库根 .gitattributes 配置 Git LFS 跟踪，
+不附带任何摘要副本、说明或其他文件。界面采用左侧会话导航、右侧会话
 记录和底部消息编辑器布局；模型、技能/MCP、会话和维护选项统一收进左侧
 “设置”窗口，不占用主工作区。附件列表收进底部消息编辑器，通过“+ 添加”选择文件、
 粘贴内容或打开路径窗口，有资料时才展开；新回复只更新本轮内容，不会清空并重画已有历史。源码仓库与离线包
@@ -17,11 +19,16 @@ annotated v1.17 标签中的 RELEASE-SHA256.txt、同一 ZIP 的成功测试 rec
 --------
 
 1. 在解压或运行任何文件前先判断包状态。已通过正式发布门禁的包应从可信 annotated
-   v1.17 标签内的 src\RELEASE-SHA256.txt 取得固定摘要；其他包必须按候选包处理，
-   并从可信候选提交中的 exe\README.txt 独立取得候选摘要。再用 certutil -hashfile
-   FilePromptAI-Win7-Full-v1.17.zip SHA256 核对整个 ZIP，两个摘要必须完全相同。
-2. ZIP 旁的 .zip.sha256.txt 只是便利副本；若二者来自同一下载位置，它不能独立
-   证明 ZIP 未被替换。正式 RELEASE-SHA256.txt 刻意不放进 ZIP，以免摘要自引用。
+   v1.17 标签内的 src\RELEASE-SHA256.txt 取得固定摘要。其他包必须按候选包处理：
+   构建工作树可读取被 Git 忽略的
+   src\tests\build-artifacts\release\ReleaseCandidate-v1.17.txt；可信候选提交可读取
+   exe/FilePromptAI-Win7-Full-v1.17.zip 的 Git LFS oid sha256；管理员也可通过可信通道
+   单独提供预期摘要。再运行 Get-FileHash：
+
+   (Get-FileHash .\FilePromptAI-Win7-Full-v1.17.zip -Algorithm SHA256).Hash
+
+   预期摘要必须与计算结果完全相同；仅对当前文件重新计算摘要不能替代可信来源。
+2. 正式 RELEASE-SHA256.txt 刻意不放进 ZIP，以免摘要自引用。
 3. 校验成功后把 ZIP 完整解压到同一个目录，不要在压缩包中直接运行，也不要只复制
    其中某个 EXE（包括启动器、卸载器或 app\FilePromptAI.exe）。
 4. 在解压根目录双击“Start-FilePromptAI.exe”。
@@ -167,22 +174,25 @@ Windows 7 一键验收
 
 验收程序不访问公网、不修改注册表、不请求管理员权限，也不使用现有用户会话。
 运行前必须先按“使用方法”判断包状态：正式包从可信 Git 标签取得固定摘要，其他包从
-可信候选提交取得独立候选摘要。包内清单不能单独证明
-Verify-FilePromptAI.exe 自身未被替换。
+可信本地 receipt、可信提交的 LFS oid 或管理员提供的可信摘要取得候选身份。包内清单
+不能单独证明 Verify-FilePromptAI.exe 自身未被替换。
 它先验证 --archive 指向的 ZIP 与 PACKAGE-CHECKSUMS-SHA256.txt 的身份，再校验解压目录
-中的精确文件集合和每个文件的 SHA-256；
-只有包校验通过才会从解压根目录运行 Start-FilePromptAI.exe，由启动器启动真实
-app\FilePromptAI.exe。随后用独立临时数据目录
-检查窗口启动，以 127.0.0.1 回环服务验证无 API Key 的主动 /models 发现和流式
-Chat Completions，并调用真实程序检查 TXT、PDF、DOCX、PNG 解析以及 DOCX、PDF、
-PPTX、XLSX、CSV、XMind 导出。整个过程不连接外部模型服务。
+中的精确文件集合和每个文件的 SHA-256。启动检查从解压根目录运行真实
+Start-FilePromptAI.exe，由启动器拉起独立的 app\FilePromptAI.exe 主进程，检查窗口、
+进程映像、响应和正常退出。UI 功能旅程在隔离验收进程中加载同一包内程序集，使用
+独立临时数据目录和 127.0.0.1 回环服务验证设置、Enter/按钮发送、两轮上下文、路径文本
+附件、已注册 WinForms/OLE 的 FileDrop 处理器所接收的 PNG 图片附件、持久化，以及
+13 个生产导出处理器和生成文件内容；测试不执行真实 Explorer 鼠标拖动，并注入隔离
+保存路径而不自动操作系统“另存为”窗口。整个过程不连接
+外部模型服务。
 
-XML schema 2 报告和同名 .sha256.txt 默认写到 %TEMP%；如果该目录位于发布包内，
+XML schema 3 报告和同名 .sha256.txt 默认写到 %TEMP%；如果该目录位于发布包内，
 则写到 %LocalAppData%\FilePromptAI-Acceptance\AcceptanceReports，绝不会向发布目录
 添加报告。只有总 PASS 报告才会记录已锁定验证的 PACKAGE-CHECKSUMS-SHA256.txt
 原始字节 SHA-256 和条目数；失败报告只标记 unverified，不能用于正式发布封存。
-发布维护者必须同时保留 XML 和 sidecar，封存及标签复核会把该身份与最终测试 receipt
-及 ZIP 内同一清单进行严格比对。
+发布维护者必须同时保留 XML 和同名报告 SHA-256 校验文件。正式封存仍在 src 生成
+RELEASE-SHA256.txt 和 RELEASE-EVIDENCE.txt，并把本地 receipt、最终 ZIP identity 与
+Windows 7 PASS 报告直接绑定；它不依赖 exe 中的任何附加文件。
 
 只有 Windows 7 SP1、.NET Framework 4.8、1920×1080@96 DPI 和全部检查同时通过时，
 程序才输出总 PASS 并返回退出码 0。退出码按位表示失败：1=系统、

@@ -159,7 +159,7 @@ internal static class AcceptanceProgram
                     exitCode |= ExitInternal | ExitApi | ExitFiles;
                 }
 
-                RunCheck(
+                CheckResult launch = RunCheck(
                     "application.launch",
                     ExitLaunch,
                     delegate
@@ -170,6 +170,31 @@ internal static class AcceptanceProgram
                             verifiedPackage);
                     },
                     ref exitCode);
+                if (launch.Status == "pass")
+                {
+                    RunCheck(
+                        "application.ui-journey",
+                        ExitLaunch | ExitApi | ExitFiles,
+                        delegate
+                        {
+                            verifiedPackage.AssertIntact();
+                            string evidence = PackagedUiJourney.Run(
+                                verifiedPackage.GetVerifiedPath(
+                                    @"app\FilePromptAI.exe"),
+                                isolatedDataRoot);
+                            verifiedPackage.AssertIntact();
+                            return evidence;
+                        },
+                        ref exitCode);
+                }
+                else
+                {
+                    AddSkipped(
+                        "application.ui-journey",
+                        "Requires the packaged application to launch through the root launcher.",
+                        ExitLaunch | ExitApi | ExitFiles,
+                        ref exitCode);
+                }
             }
             else
             {
@@ -202,6 +227,11 @@ internal static class AcceptanceProgram
                     "application.launch",
                     prerequisite,
                     ExitLaunch,
+                    ref exitCode);
+                AddSkipped(
+                    "application.ui-journey",
+                    prerequisite,
+                    ExitLaunch | ExitApi | ExitFiles,
                     ref exitCode);
             }
 
@@ -2252,39 +2282,52 @@ internal static class AcceptanceProgram
         VerifiedPackageLease verifiedPackage)
     {
         verifiedPackage.AssertIntact();
+        string launcherPath = verifiedPackage.GetVerifiedPath(
+            @"Start-FilePromptAI.exe");
         string applicationPath = verifiedPackage.GetVerifiedPath(
             @"app\FilePromptAI.exe");
 
         AssertSafeOutputTarget(isolatedDataRoot, packageRoot, true);
         Directory.CreateDirectory(isolatedDataRoot);
         AssertSafeOutputTarget(isolatedDataRoot, packageRoot, true);
+        List<int> existingApplicationProcessIds =
+            GetProcessIds(Path.GetFileNameWithoutExtension(applicationPath));
+        Process launcher = null;
         Process process = null;
         bool forcedTermination = false;
         try
         {
             ProcessStartInfo start = new ProcessStartInfo();
-            start.FileName = applicationPath;
-            start.WorkingDirectory = Path.GetDirectoryName(applicationPath);
+            start.FileName = launcherPath;
+            start.WorkingDirectory = packageRoot;
             start.UseShellExecute = false;
             start.CreateNoWindow = false;
             start.EnvironmentVariables["FILEPROMPTAI_DATA_ROOT"] =
                 isolatedDataRoot;
             verifiedPackage.AssertIntact();
-            process = Process.Start(start);
-            if (process == null)
+            launcher = Process.Start(start);
+            if (launcher == null)
             {
                 throw new AcceptanceFailure(
-                    "Process.Start returned no application process.",
-                    applicationPath);
+                    "Process.Start returned no launcher process.",
+                    launcherPath);
             }
 
-            try
+            if (!launcher.WaitForExit(10000))
             {
-                process.WaitForInputIdle(10000);
+                throw new AcceptanceFailure(
+                    "The root launcher did not exit within 10 seconds.",
+                    "launcherPid=" + launcher.Id.ToString(
+                        CultureInfo.InvariantCulture));
             }
-            catch (InvalidOperationException)
+            if (launcher.ExitCode != 0)
             {
-                // The polling below provides the authoritative window check.
+                throw new AcceptanceFailure(
+                    "The root launcher returned a failure exit code.",
+                    "launcherPid=" + launcher.Id.ToString(
+                        CultureInfo.InvariantCulture) +
+                        "; exitCode=" + launcher.ExitCode.ToString(
+                            CultureInfo.InvariantCulture));
             }
 
             Stopwatch wait = Stopwatch.StartNew();
@@ -2293,6 +2336,17 @@ internal static class AcceptanceProgram
             bool responding = false;
             while (wait.ElapsedMilliseconds < 15000)
             {
+                if (process == null)
+                {
+                    process = FindNewApplicationProcess(
+                        applicationPath,
+                        existingApplicationProcessIds);
+                    if (process == null)
+                    {
+                        Thread.Sleep(100);
+                        continue;
+                    }
+                }
                 process.Refresh();
                 if (process.HasExited)
                 {
@@ -2326,6 +2380,19 @@ internal static class AcceptanceProgram
                         "; responding=" + responding);
             }
 
+            string launchedImage = GetProcessImagePath(process);
+            if (!string.Equals(
+                    launchedImage,
+                    applicationPath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new AcceptanceFailure(
+                    "The root launcher opened an unexpected executable.",
+                    "expected=" + applicationPath + "; actual=" + launchedImage);
+            }
+            verifiedPackage.AssertSameIdentity(@"Start-FilePromptAI.exe");
+            verifiedPackage.AssertSameIdentity(@"app\FilePromptAI.exe");
+
             NativeMethods.Rect clientRect;
             if (!NativeMethods.GetClientRect(window, out clientRect) ||
                 clientRect.Right <= clientRect.Left ||
@@ -2338,7 +2405,16 @@ internal static class AcceptanceProgram
 
             int width = clientRect.Right - clientRect.Left;
             int height = clientRect.Bottom - clientRect.Top;
-            NativeMethods.PostMessage(window, NativeMethods.WmClose, IntPtr.Zero, IntPtr.Zero);
+            if (!NativeMethods.PostMessage(
+                    window,
+                    NativeMethods.WmClose,
+                    IntPtr.Zero,
+                    IntPtr.Zero))
+            {
+                throw new AcceptanceFailure(
+                    "WM_CLOSE could not be posted to the FilePromptAI window.",
+                    "pid=" + process.Id.ToString(CultureInfo.InvariantCulture));
+            }
             if (!process.WaitForExit(5000))
             {
                 forcedTermination = true;
@@ -2353,8 +2429,23 @@ internal static class AcceptanceProgram
                     "pid=" + process.Id.ToString(CultureInfo.InvariantCulture) +
                         "; title=" + title + "; forcedTermination=true");
             }
+            if (process.ExitCode != 0)
+            {
+                throw new AcceptanceFailure(
+                    "FilePromptAI returned a failure exit code after normal close.",
+                    "pid=" + process.Id.ToString(CultureInfo.InvariantCulture) +
+                        "; exitCode=" + process.ExitCode.ToString(
+                            CultureInfo.InvariantCulture));
+            }
+            verifiedPackage.AssertIntact();
 
-            return "pid=" + process.Id.ToString(CultureInfo.InvariantCulture) +
+            return "launcherPid=" + launcher.Id.ToString(
+                    CultureInfo.InvariantCulture) +
+                "; launcherExitCode=" + launcher.ExitCode.ToString(
+                    CultureInfo.InvariantCulture) +
+                "; applicationPid=" + process.Id.ToString(
+                    CultureInfo.InvariantCulture) +
+                "; applicationPath=" + launchedImage +
                 "; title=" + title +
                 "; responsive=true; client=" +
                 width.ToString(CultureInfo.InvariantCulture) + "x" +
@@ -2381,7 +2472,99 @@ internal static class AcceptanceProgram
                 }
                 process.Dispose();
             }
+            if (launcher != null)
+            {
+                try
+                {
+                    if (!launcher.HasExited)
+                    {
+                        launcher.Kill();
+                        launcher.WaitForExit(5000);
+                    }
+                }
+                catch
+                {
+                    // The report still records the original launcher failure.
+                }
+                launcher.Dispose();
+            }
         }
+    }
+
+    private static List<int> GetProcessIds(string processName)
+    {
+        List<int> processIds = new List<int>();
+        Process[] processes = Process.GetProcessesByName(processName);
+        for (int index = 0; index < processes.Length; index++)
+        {
+            try
+            {
+                processIds.Add(processes[index].Id);
+            }
+            finally
+            {
+                processes[index].Dispose();
+            }
+        }
+        return processIds;
+    }
+
+    private static Process FindNewApplicationProcess(
+        string expectedApplicationPath,
+        List<int> existingProcessIds)
+    {
+        string processName = Path.GetFileNameWithoutExtension(
+            expectedApplicationPath);
+        Process[] candidates = Process.GetProcessesByName(processName);
+        for (int index = 0; index < candidates.Length; index++)
+        {
+            Process candidate = candidates[index];
+            bool keep = false;
+            try
+            {
+                if (existingProcessIds.Contains(candidate.Id) || candidate.HasExited)
+                {
+                    continue;
+                }
+                string imagePath = GetProcessImagePath(candidate);
+                if (string.Equals(
+                        imagePath,
+                        expectedApplicationPath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    keep = true;
+                    return candidate;
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                // A candidate may disappear while the launcher is starting.
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // Retry while the new process is still initializing.
+            }
+            finally
+            {
+                if (!keep)
+                {
+                    candidate.Dispose();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static string GetProcessImagePath(Process process)
+    {
+        string imagePath = process.MainModule.FileName;
+        if (string.IsNullOrEmpty(imagePath))
+        {
+            throw new AcceptanceFailure(
+                "The launched process image path is unavailable.",
+                "pid=" + process.Id.ToString(CultureInfo.InvariantCulture));
+        }
+        return Path.GetFullPath(imagePath);
     }
 
     private static string DeleteAcceptanceData(
@@ -2452,7 +2635,7 @@ internal static class AcceptanceProgram
         {
             writer.WriteStartDocument();
             writer.WriteStartElement("filePromptAiAcceptance");
-            writer.WriteAttributeString("schemaVersion", "2");
+            writer.WriteAttributeString("schemaVersion", "3");
             writer.WriteAttributeString("result", passed ? "pass" : "fail");
             writer.WriteAttributeString(
                 "exitCode",

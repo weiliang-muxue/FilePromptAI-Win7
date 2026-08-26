@@ -5,8 +5,9 @@
 ## 版本与发布状态
 
 当前唯一维护版本为 **v1.17**。版本号或包名本身不表示已经正式发布：只有 annotated
-`v1.17` 标签中的 `RELEASE-SHA256.txt`、同一 ZIP 的成功测试 receipt，以及规定环境中的
-Windows 7 PASS XML 和 sidecar 全部通过封存与标签后复核时，该 ZIP 才是正式发布包；
+`v1.17` 标签中的 `RELEASE-SHA256.txt` 和 `RELEASE-EVIDENCE.txt`、同一 ZIP 的成功测试
+receipt，以及规定环境中的 Windows 7 PASS XML（验收时另附同名校验文件）全部通过
+封存与标签后复核时，该 ZIP 才是正式发布包；
 缺少任一项时均按候选包处理。这是仓库和离线安装包的唯一维护版本；界面采用左侧会话导航、
 右侧会话记录和底部消息编辑器布局；模型、技能/MCP、会话和维护选项
 统一收进左侧“设置”窗口，不占用主工作区。
@@ -14,11 +15,11 @@ Windows 7 PASS XML 和 sidecar 全部通过封存与标签后复核时，该 ZIP
 有资料时才展开；发送新消息时只追加和更新本轮内容，不再清空并重画已有历史。
 左侧会话支持置顶、当前/已归档视图，并可从最新模型回复创建独立分支；分支复制
 此前上下文，原会话保持不变。
-打包脚本会在项目根目录生成 `FilePromptAI-Win7-Full-v1.17.zip` 及其 SHA-256
-校验 sidecar。便利 sidecar 不决定发布状态；通过上述门禁后，固定摘要另存于对应 Git
-标签跟踪的 `RELEASE-SHA256.txt`。源码和构建脚本均保留在
-仓库中，便于内网环境审计、
-重建和离线分发。
+最终仓库的 `exe` 目录只保留 `FilePromptAI-Win7-Full-v1.17.zip`。该 ZIP 由仓库根目录
+`.gitattributes` 配置 Git LFS 跟踪，不附带任何摘要副本、说明或其他文件。
+通过正式发布门禁后，固定摘要和证据保存在对应 Git 标签跟踪的
+`src/RELEASE-SHA256.txt` 与 `src/RELEASE-EVIDENCE.txt`。源码和构建脚本均保留在仓库中，
+便于内网环境审计、重建和离线分发。
 
 ## 当前功能
 
@@ -211,21 +212,24 @@ HTTP URL 或请求头。工具返回内容只有在本次调用获准并执行�
 ## Windows 7 离线完整版
 
 优先使用 `FilePromptAI-Win7-Full-v1.17.zip`。在解压或运行其中任何程序前，先按本节开头
-的门禁证据判断包状态。已封存的正式包应从可信 annotated `v1.17` 标签取得固定摘要；
-未满足正式发布门禁的包必须按候选包处理，并从可信候选提交中的 `exe/README.txt`
-独立取得候选摘要。随后核对 ZIP：
+的门禁证据判断包状态。已封存的正式包应从可信 annotated `v1.17` 标签取得固定摘要。
+未满足正式发布门禁的包必须按候选包处理：构建工作树中可从可信的本地测试 receipt
+取得 `Archive-SHA256`；可信候选提交中可读取该 ZIP 的 Git LFS `oid sha256`；也可由
+管理员通过可信通道取得预期摘要，再用 `Get-FileHash` 手工核对。随后核对 ZIP：
 
 ```powershell
 # 正式包
 git show v1.17:src/RELEASE-SHA256.txt
-# 候选包
-git show <可信候选提交>:exe/README.txt
-certutil -hashfile .\FilePromptAI-Win7-Full-v1.17.zip SHA256
+# 本地已测试候选的 receipt（该目录被 Git 忽略）
+Get-Content .\src\tests\build-artifacts\release\ReleaseCandidate-v1.17.txt
+# 可信候选提交中的 LFS 指针，其 oid sha256 即 ZIP 内容摘要
+git show <可信候选提交>:exe/FilePromptAI-Win7-Full-v1.17.zip
+# 对实际取得的 ZIP 重新计算
+(Get-FileHash .\exe\FilePromptAI-Win7-Full-v1.17.zip -Algorithm SHA256).Hash
 ```
 
-只能使用与包状态相符的摘要来源，列出的摘要必须与计算结果完全相同。随 ZIP 生成的
-`.zip.sha256.txt` 只是便利副本，若它与 ZIP
-来自同一下载位置，不能独立证明 ZIP 未被替换。`RELEASE-SHA256.txt` 刻意不放进
+只能使用与包状态相符的可信摘要来源，预期摘要必须与实际计算结果完全相同。单独重新
+计算摘要只能确认当前文件身份，不能替代可信来源。`RELEASE-SHA256.txt` 刻意不放进
 ZIP，避免摘要自引用；它也为包内 `Verify-FilePromptAI.exe` 提供外部身份锚点。
 
 校验成功后把 ZIP 完整解压到同一个目录，不要在压缩包内运行，也不要只复制其中某个
@@ -276,14 +280,17 @@ ZIP，不能只复制卸载器。验证通过后也不会递归删除发布目�
 
 验收程序不访问公网、不修改注册表、不请求管理员权限，也不使用用户现有会话数据。
 运行前必须先按上一节判断包状态：正式包从可信 Git 标签取得固定摘要，其他包从可信
-候选提交取得独立候选摘要。包内清单不能单独证明验收程序
-自身未被替换。
-它会把原始 ZIP 身份与解压载荷进行比对，校验精确包清单，再从解压根目录运行
-`Start-FilePromptAI.exe`，由启动器启动真实 `app\FilePromptAI.exe`。随后使用独立临时
-数据目录，并通过 127.0.0.1
-回环服务验证无 API Key 的主动 `/models` 发现及流式 Chat Completions；TXT、PDF、
-DOCX、PNG 解析和 DOCX、PDF、PPTX、XLSX、CSV、XMind 导出也直接调用包内真实程序。
-XML schema 2 报告和同名 `.sha256.txt` 写到 `%TEMP%`；如果该目录位于发布包内，则
+本地 receipt、可信提交的 LFS oid 或管理员提供的可信摘要取得候选身份。包内清单不能
+单独证明验收程序自身未被替换。
+它会把原始 ZIP 身份与解压载荷进行比对并校验精确包清单。启动检查从解压根目录运行
+真实 `Start-FilePromptAI.exe`，由启动器拉起独立的 `app\FilePromptAI.exe` 主进程，检查
+窗口、进程映像、响应和正常退出。UI 功能旅程则在隔离验收进程中加载同一包内程序集，
+使用独立临时数据目录和 127.0.0.1 回环服务验证设置、Enter/按钮发送、两轮上下文、
+路径文本附件、已注册 WinForms/OLE 的 FileDrop 处理器所接收的 PNG 图片附件、持久化，
+以及 13 个生产导出
+处理器和生成文件内容；测试注入隔离保存路径，不自动操作系统“另存为”窗口。整个过程
+不连接外部模型服务。
+XML schema 3 报告和同名 `.sha256.txt` 写到 `%TEMP%`；如果该目录位于发布包内，则
 改写到 `%LocalAppData%\FilePromptAI-Acceptance\AcceptanceReports`，不会改变包内文件
 集合。只有总结果为 `PASS` 的报告才会以 `packageIdentity status="verified"` 记录已经锁定
 并验证的 `PACKAGE-CHECKSUMS-SHA256.txt` 原始字节 SHA-256 和条目数；失败报告只写
@@ -328,9 +335,10 @@ PASS。
 
 先提交待发布源码为 `C`，确认整个工作树和索引均为空，再以发布候选模式运行完整测试。
 只有全部测试和离线包验证成功后，脚本才会在被 Git 忽略的
-`tests\build-artifacts\release` 中写入 schema 2 receipt，把 `C`、最终 ZIP 的名称、
-SHA-256，以及 staging/ZIP 中同一份包清单的原始字节 SHA-256 和条目数绑定。ZIP 大小
-由晋升脚本从这份 SHA-256 已绑定的原字节文件读取并写入候选证据：
+仓库的 `src/tests/build-artifacts/release`（当前 `src` 工作目录下为
+`tests\build-artifacts\release`）中写入 schema 2 receipt，把 `C`、最终 ZIP 的名称、
+SHA-256，以及 staging/ZIP 中同一份包清单的原始字节 SHA-256 和条目数绑定。receipt
+只作为构建工作树中的本地门禁输入，不提交到 Git，也不复制到 `exe`：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1 `
@@ -344,25 +352,21 @@ powershell -ExecutionPolicy Bypass -File .\promote-release-candidate.ps1 `
     -Version 1.17
 ```
 
-脚本逐字节复制 receipt 绑定的 ZIP 和 sidecar 到 `exe`，再生成候选说明与候选证据。
-`C` 必须已经删除 `exe` 中所有旧版本 ZIP、sidecar 和候选证据；晋升脚本会在写入前
-拒绝任何旧版或未授权条目，并在写入后复核目录精确只含 `.gitattributes` 和当前四项，
-不会把额外删除混入 `P`。四项写入后，脚本还会从最终 `exe` ZIP 运行固定的完整安装
-用户旅程；只有最终路径的清单、启动器、两轮上下文、路径附件、导出、重启恢复和
-应用内卸载检查全部通过，晋升事务才会提交。该旅程失败时四项交付文件会恢复为晋升前
-的原字节状态，不能留下“源码候选已测试但 `exe` 仍不可用”的半成品。
-随后创建 `C` 的直接子提交 `P`；`P` 必须只修改以下四个路径，不能夹带源码或正式
-发布结论：
+脚本逐字节复制 receipt 绑定的 ZIP 到 `exe`。`C` 必须已经删除 `exe` 中全部旧包和其他
+条目；晋升脚本会在写入前后复核目录精确只含当前 ZIP，不会把额外删除混入 `P`。
+写入后，脚本还会从最终 `exe` ZIP 运行固定的安装用户旅程；真实根启动器和独立主进程
+负责启动检查，隔离测试进程加载同一包内程序集完成两轮上下文、路径文本和 FileDrop 处理器
+图片附件、13 个导出处理器、重启恢复和应用内卸载检查。旅程失败时单个 ZIP 会恢复为
+晋升前的原字节状态，不能留下
+“源码候选已测试但 `exe` 仍不可用”的半成品。随后创建 `C` 的直接子提交 `P`；`P`
+必须只修改以下一个路径，不能夹带源码或正式发布结论：
 
 ```text
 exe/FilePromptAI-Win7-Full-v1.17.zip
-exe/FilePromptAI-Win7-Full-v1.17.zip.sha256.txt
-exe/README.txt
-exe/ReleaseCandidate-v1.17.txt
 ```
 
-其中 ZIP 由 Git LFS 跟踪；晋升不允许重压缩或重建它。`P` 仍只是已测试候选，不表示
-Windows 7 已通过。
+该 ZIP 由仓库根目录 `.gitattributes` 通过 Git LFS 跟踪；晋升不允许重压缩或重建它。
+`P` 仍只是已测试候选，不表示 Windows 7 已通过。
 
 将 `P` 中的同一字节 ZIP 原样带到规定环境，在 Windows 7 SP1、.NET Framework 4.8、
 1920×1080@96 DPI 机器上解压到独立目录，同时把原始 ZIP 留在解压目录之外，然后运行：
@@ -372,9 +376,9 @@ Windows 7 已通过。
     'D:\Transfer\FilePromptAI-Win7-Full-v1.17.zip'
 ```
 
-只有验收器输出总 `PASS` 时，才同时保留 XML 和同名 sidecar；Windows 10/11 的诊断报告
-不能替代该证据。回到仍位于 `P` 且保留本地 receipt 的构建工作树，把报告路径作为必填
-参数运行封存：
+只有验收器输出总 `PASS` 时，才保留 XML 和同名报告 SHA-256 校验文件；Windows 10/11
+的诊断报告不能替代该证据。回到仍位于 `P` 且保留本地 receipt 的构建工作树，把 XML
+报告路径作为必填参数运行封存：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\seal-release.ps1 `
@@ -382,11 +386,11 @@ powershell -ExecutionPolicy Bypass -File .\seal-release.ps1 `
     -AcceptanceReportPath 'D:\Acceptance\FilePromptAI-Acceptance-....xml'
 ```
 
-封存要求 `HEAD` 是 `P`、`P` 的唯一父提交是 receipt 中的 `C`、`C`→`P` 恰好只有上述
-四个路径，且索引为空。除封存脚本将要写入的两个文件外，工作树必须干净；`exe` 中
-ZIP、sidecar 和候选证据也必须仍与 receipt 完全一致。脚本以禁止 DTD 和外部实体的 XML
-读取器验证报告 sidecar、schema、总 `PASS`/退出码 0、v1.17 verifier、全部必需检查唯一
-且为 `pass`，并要求报告、receipt、候选证据及 ZIP 内清单的身份完全一致。
+封存要求 `HEAD` 是 `P`、`P` 的唯一父提交是 receipt 中的 `C`、`C`→`P` 恰好只改变
+上述单个 ZIP 路径，且索引为空。除封存脚本将要写入的两个文件外，工作树必须干净；
+`exe` 必须精确只含与 receipt 一致的 ZIP。脚本以禁止 DTD 和外部实体的 XML 读取器验证
+报告及其同名校验文件、schema、总 `PASS`/退出码 0、v1.17 verifier 和全部必需检查，
+并把 receipt、ZIP identity 与 Windows 7 报告直接绑定，不依赖 `exe` 中的任何附加文件。
 
 封存脚本只生成以下两个正式证据文件。只提交这两个文件，创建 `P` 的直接子提交 `S`：
 
@@ -409,10 +413,10 @@ powershell -ExecutionPolicy Bypass `
     -AcceptanceReportPath 'D:\Acceptance\FilePromptAI-Acceptance-....xml'
 ```
 
-验证脚本要求标签指向 `S`，复核 `C`→`P` 的四路径 promotion commit 和 `P`→`S` 的
-两文件 seal commit，并按原始字节确认标签中的 CRLF 摘要、本地 ZIP、sidecar、receipt、
-候选证据与所提供 Windows 7 PASS 报告的身份一致。只有该命令实际通过后，才可发布或
-推送标签与资产；文档和候选文件本身不能证明已经通过。
+验证脚本要求标签指向 `S`，复核 `C`→`P` 的单 ZIP promotion commit 和 `P`→`S` 的
+两文件 seal commit，并确认标签中的 CRLF 摘要、正式证据、Git LFS oid、本地 ZIP、
+本地 receipt 与所提供 Windows 7 PASS 报告身份一致。只有该命令实际通过后，才可发布
+或推送标签与资产；文档本身不能证明已经通过。
 
 ## 测试
 
@@ -422,14 +426,17 @@ powershell -ExecutionPolicy Bypass `
 powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1
 ```
 
-套件会安全解压本次刚生成的 ZIP，逐项核对精确文件集合和每个 SHA-256，运行根目录
-启动器与卸载器自检；随后从解压根目录运行 `Start-FilePromptAI.exe`，由它启动真实
-`app\FilePromptAI.exe`，再验证主窗口响应、
-单实例门禁、正常退出和关闭持久化，再通过真实 WinForms 消息循环深测设置保存、
-Enter/按钮发送、两轮上下文、路径附件、导出入口，以及应用内卸载器路径和
-`--from-app` PID。它不会使用 `exe` 目录中先前晋升的 ZIP 代替本次构建产物。
-晋升脚本会在事务提交前另行对最终 `exe` 路径重复这条真实用户旅程；这两个门禁分别
-保证新构建产物本身可用，以及用户实际取得的晋升字节可用。
+套件会安全解压本次刚生成的 ZIP，逐项核对精确文件集合和每个 SHA-256，并运行根目录
+启动器与卸载器自检。启动检查从解压根目录运行真实 `Start-FilePromptAI.exe`，由它启动
+独立的 `app\FilePromptAI.exe` 主进程，再验证主窗口响应、单实例门禁、正常退出和关闭
+持久化；UI 功能旅程在隔离验收进程中加载同一包内程序集，通过真实 WinForms 消息循环
+深测设置保存、Enter/按钮发送、两轮上下文、路径文本附件、FileDrop 处理器接收 PNG 图片
+附件、13 个生产导出处理器及其文件内容，以及应用内卸载器路径和 `--from-app` PID；
+自动旅程不执行真实 Explorer 鼠标拖动，也不操作系统文件选择器和“另存为”窗口。它不
+会使用 `exe` 目录中先前晋升
+的 ZIP 代替本次构建产物。晋升
+脚本会在事务提交前另行对最终 `exe` 路径重复相同层次的检查；这两个门禁分别保证新构建
+产物本身可用，以及用户实际取得的晋升字节可用。
 
 界面截图测试单独运行 `tests\CaptureUiSmokeTest.ps1`，支持正常窗口和最小窗口。
 截图进程会声明 system-DPI-aware，使窗口边界和截图使用同一物理坐标空间；该脚本

@@ -377,6 +377,7 @@ function Invoke-CheckedProcess {
         -RedirectStandardOutput $stdoutPath `
         -RedirectStandardError $stderrPath `
         -PassThru
+    $nativeProcessHandle = $process.Handle
     if (-not $process.WaitForExit($TimeoutMilliseconds)) {
         try {
             $process.Kill()
@@ -391,7 +392,14 @@ function Invoke-CheckedProcess {
     # reading ExitCode. Without both calls Windows PowerShell may return null.
     $process.WaitForExit()
     $process.Refresh()
-    $exitCode = [int]$process.ExitCode
+    [uint32]$nativeExitCode = 0
+    if (-not [FilePromptAIInstalledJourneyNativeMethods]::GetExitCodeProcess(
+            $nativeProcessHandle,
+            [ref]$nativeExitCode)) {
+        $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Unable to read the $Name exit code (Win32 $nativeError)."
+    }
+    $exitCode = [uint64]$nativeExitCode
     $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
         Get-Content -LiteralPath $stdoutPath -Raw
     }
@@ -974,7 +982,8 @@ try {
         "/reference:$(Join-Path $frameworkRoot 'System.Core.dll')",
         "/reference:$(Join-Path $frameworkRoot 'System.Drawing.dll')",
         "/reference:$(Join-Path $frameworkRoot 'System.Windows.Forms.dll')",
-        (Join-Path $testRoot 'InstalledUserJourneySmokeTest.cs')
+        (Join-Path $testRoot 'InstalledUserJourneySmokeTest.cs'),
+        (Join-Path $projectRoot 'acceptance\PackagedUiJourney.cs')
     )
     & $compiler $arguments
     if ($LASTEXITCODE -ne 0) {

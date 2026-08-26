@@ -2,9 +2,10 @@
 
 本文档按常见桌面 AI 客户端能力核对 FilePrompt AI v1.17 源码。它描述产品能力和明确
 边界，不替代测试报告、目标 Windows 7 验收报告或发布包 SHA-256 证明。只有 annotated
-`v1.17` 标签中的正式摘要、同一 ZIP 的成功测试 receipt、规定环境中的 Windows 7 PASS
-XML 和 sidecar 全部通过封存与标签后复核时，该 ZIP 才是正式发布包；否则均按候选处理。
-发布证据链为 `C`（源码候选）→ `P`（四路径原字节晋升）→ `S`（两文件 PASS 证据封存）；
+`v1.17` 标签中的正式摘要和证据、同一 ZIP 的成功测试 receipt、规定环境中的 Windows 7
+PASS XML（验收时另附同名校验文件）全部通过封存与标签后复核时，该 ZIP 才是正式
+发布包；否则均按候选处理。
+发布证据链为 `C`（源码候选）→ `P`（单 ZIP 原字节晋升）→ `S`（两文件 PASS 证据封存）；
 本矩阵描述实现与门禁，不声称当前仓库已经取得 Windows 7 PASS。
 
 ## 状态说明
@@ -81,9 +82,9 @@ XML 和 sidecar 全部通过封存与标签后复核时，该 ZIP 才是正式�
 | 模型与模型列表直连 | v1.17 补齐项 | `src/ModelClient.cs` 明确 `UseProxy = false`；`tests/NetworkReliabilitySmokeTest.cs` 使用拒绝型系统代理验证请求仍直达用户端点。HTTP MCP 同样在 `src/McpRuntime.cs` 禁用系统代理。 | 不提供应用内代理配置；需要代理才能访问的服务不属于 v1.17 支持路径。 |
 | 无遥测、更新器和隐式辅助网络 | 已实现 | 当前源码没有遥测、崩溃上报、更新检查或辅助服务客户端；安装和启动不下载依赖。 | 生成时连接用户填写的模型 URL；启用 HTTP MCP 时还会连接用户填写的 MCP URL，因此“离线安装”不等于“生成时零网络”。 |
 | 离线依赖与 Windows 7 启动 | 已实现 | `build-offline-package.ps1` 打包固定校验的 .NET Framework 4.8 离线安装器和托管 DLL；bootstrapper 只使用离线/缓存信任检查。 | Windows 7 SP1 仍可能需要管理员预装 SHA-2、服务堆栈、TLS/根证书和字体等系统先决条件。 |
-| 包完整性与可验证发布证据 | v1.17 补齐项 | `C` 的 schema 2 receipt 绑定测试产物；完整套件安全解压刚构建的 ZIP，核对精确文件集和全部清单哈希，运行启动器/卸载器自检，再从解压根目录运行 `Start-FilePromptAI.exe`，由它启动真实 `app\FilePromptAI.exe` 以验证窗口、单实例和正常退出，随后完成真实消息循环用户旅程；`promote-release-candidate.ps1` 要求 `C` 已淘汰旧资产并复核 `exe` 精确清单，把同一字节 ZIP 写入最终路径后再次运行真实安装旅程，任何失败都回滚四项交付文件，全部通过才形成只含当前版本路径的直接子提交 `P`。 | `P` 仍是候选，只有 Win7 PASS 报告实际存在并通过 `S` 的封存及标签后复核才可称正式发布；sidecar 不是数字签名。 |
+| 包完整性与可验证发布证据 | v1.17 补齐项 | `C` 的 schema 2 receipt 绑定测试产物，并仅保留在 Git 忽略的 `src/tests/build-artifacts/release`；完整套件安全解压刚构建的 ZIP，核对精确文件集和全部清单哈希。`promote-release-candidate.ps1` 要求 `C` 已淘汰旧资产，把 receipt 绑定的同一字节 ZIP 写入 `exe/FilePromptAI-Win7-Full-v1.17.zip`，复核 `exe` 精确只含该 ZIP并再次运行安装旅程，任何失败都回滚单个 ZIP；`C`→`P` 只改变该路径，ZIP 由仓库根 `.gitattributes` 通过 Git LFS 跟踪。正式封存生成 `src/RELEASE-SHA256.txt` 和 `src/RELEASE-EVIDENCE.txt`，直接绑定 receipt、ZIP identity 与 Win7 报告。 | `P` 仍是候选，只有 Win7 PASS 报告实际存在并通过 `S` 的封存及标签后复核才可称正式发布；`exe` 不包含任何摘要副本、说明或其他文件。 |
 | 两阶段校验与可恢复卸载 | v1.17 补齐项 | 完整解压后，可运行发布根目录卸载器，或依次选择“设置”→“维护”→“卸载程序...”；根卸载器读取 `PACKAGE-CHECKSUMS-SHA256.txt` 后，在任何删除前锁定并复核全部载荷及清单；用户数据删除同样先锁定和复核整棵目录，任一文件占用、重解析点或身份变化均零删除；自定义测试数据根会在界面与 worker 两层强制保留。提交删除时根卸载器最后处理；极少见的文件系统提交/回滚异常会准确报告部分删除并写入恢复标记，允许再次运行完成清理。 | 必须完整解压 ZIP，不能把卸载器单独复制到完整解压目录之外运行；额外文件不会递归删除，用户数据默认保留。 |
-| 目标 Windows 7 一键验收 | v1.17 补齐项 | `acceptance/Program.cs` 要求 `Verify-FilePromptAI.exe --archive <zip>`，同时锁定解压载荷和位于其外部的原始 ZIP，校验精确包集合，再以隔离数据目录和回环端点测试真实客户端；schema 2 PASS 才记录验证身份。 | `--archive` 不可省略，ZIP 必须保持规范文件名且位于解压目录外；总 PASS 必须来自 Windows 7 SP1、.NET 4.8、1920x1080、96 DPI，Windows 10/11 报告不能替代。 |
+| 目标 Windows 7 一键验收 | v1.17 补齐项 | `acceptance/Program.cs` 要求 `Verify-FilePromptAI.exe --archive <zip>`，同时锁定解压载荷和位于其外部的原始 ZIP并校验精确包集合。启动检查通过真实根启动器拉起独立主进程，验证窗口、进程映像、响应和正常退出；UI 功能旅程在隔离验收进程中加载同一包内程序集，以隔离数据目录和回环端点完成设置、双轮对话、路径文本及已注册 WinForms/OLE 的 FileDrop 处理器所接收的 PNG 图片附件、持久化、13 个生产导出处理器与文件内容和布局检查；schema 3 PASS 才记录验证身份。 | `--archive` 不可省略，ZIP 必须保持规范文件名且位于解压目录外；自动旅程不执行真实 Explorer 鼠标拖动，也不操作系统文件选择器或“另存为”窗口；总 PASS 必须来自 Windows 7 SP1、.NET 4.8、1920x1080、96 DPI，Windows 10/11 报告不能替代。 |
 | System-DPI-aware 布局与真实显示门禁 | v1.17 补齐项 | `app.manifest` 声明 system-DPI-aware，主窗口、设置和路径窗口使用 `AutoScaleMode.Dpi`；验收器及 `tests/DisplayEnvironmentProbe.cs` 在 DPI-aware 进程中核对屏幕指标、当前显示模式和 `GetDeviceCaps` 的 96×96 DPI，截图进程也启用 DPI awareness 以避免坐标虚拟化。 | 固定发布门禁只覆盖真实 1920×1080@96 DPI；截图缩放不能作为 125% 实机证据。 |
 | 自动更新与后台遥测 | 有意排除 | 发布包没有自动更新器、遥测客户端或后台服务。 | 新版本由管理员离线取得、校验并部署。 |
 
@@ -97,8 +98,8 @@ XML 和 sidecar 全部通过封存与标签后复核时，该 ZIP 才是正式�
 3. 模型、模型列表及 HTTP MCP 不使用 Windows 系统代理，并以拒绝型代理回归证明直连行为。
 4. 离线技能和 MCP 支持从用户显式选择的单个本地 UTF-8 文件导入；技能接受 `SKILL.md`、JSON 或文本，MCP 接受 JSON，文件上限均为 2 MiB；导入不扫描目录、不执行脚本、不联网，MCP 导入项默认停用。
 5. 附件提取依赖按批准的 NPOI 文件名加载，避免通配加载应用目录中的同名前缀 DLL；见 `FileContentExtractor.LoadNpoiAssemblies`。
-6. 离线包加入独立 `Verify-FilePromptAI.exe`，锁定并校验已验证载荷后再启动或反射加载真实客户端，输出 schema 2 XML 报告及 SHA-256 sidecar；只有 PASS 报告记录有效包清单身份。
-7. 发布拓扑固定为 `C`→`P`→`S`：`C` 是 receipt 绑定的源码候选并已删除旧版交付资产；晋升前后都复核 `exe` 精确清单；`P` 是其直接子提交且只含 ZIP、sidecar、`exe/README.txt`、`exe/ReleaseCandidate-v1.17.txt` 四个当前版本路径；待取得匹配的 Win7 PASS XML/sidecar 后，`S` 是 `P` 的直接子提交且只含 `src/RELEASE-SHA256.txt`、`src/RELEASE-EVIDENCE.txt` 两个文件。
+6. 离线包加入独立 `Verify-FilePromptAI.exe`，锁定并校验载荷后，通过真实根启动器和独立主进程完成启动检查，再由隔离验收进程加载同一包内程序集完成 UI 功能旅程；它输出 schema 3 XML 报告及同名 SHA-256 校验文件，只有 PASS 报告记录有效包清单身份。
+7. 发布拓扑固定为 `C`→`P`→`S`：`C` 是 receipt 绑定的源码候选并已删除旧版交付资产；receipt 只保留在 Git 忽略的 `src/tests/build-artifacts/release`；晋升前后都复核 `exe` 精确只含 `FilePromptAI-Win7-Full-v1.17.zip`；`P` 是 `C` 的直接子提交且只改变这一 ZIP 路径，该 ZIP 由仓库根 `.gitattributes` 通过 Git LFS 跟踪；待取得匹配的 Win7 PASS XML 后，`S` 是 `P` 的直接子提交且只含 `src/RELEASE-SHA256.txt`、`src/RELEASE-EVIDENCE.txt` 两个文件，正式证据直接绑定 receipt、ZIP identity 和 Win7 报告，不依赖 `exe` 中任何附加文件。
 8. 完整解压后，可运行根目录卸载器，或依次选择“设置”→“维护”→“卸载程序...”进入；卸载先锁定并验证完整精确文件集合，任何检查失败均在删除前停止；缺清单提示实际检查目录并要求重新完整解压，不能只复制卸载器，发布目录额外文件和默认用户数据保持不变。
 9. 流式响应增加自定义网关代表性兼容报文矩阵：支持 event-name-only Responses 文本事件、
    `delta.text`、文本部件数组和 NDJSON；思考、工具参数、输入回显及加密字段不作为正文，

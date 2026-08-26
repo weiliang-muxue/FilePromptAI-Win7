@@ -127,6 +127,9 @@ namespace FilePromptAIWin7
         private bool retryAvailable;
         private bool retryRegeneration;
         private bool uninstallCheckOnlyForTests = false;
+        private int uninstallSourceProcessIdForTests = 0;
+        private readonly Queue<string> exportPathsForTests =
+            new Queue<string>();
         private bool settingsDialogTransactionActive;
         private int settingsDialogTransactionSequence;
         private int activeSettingsDialogTransactionId;
@@ -3217,8 +3220,8 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            string appDirectory =
-                Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory);
+            string appDirectory = Path.GetFullPath(
+                Path.GetDirectoryName(typeof(MainForm).Assembly.Location));
             string packageRoot = Directory.GetParent(
                 appDirectory.TrimEnd(Path.DirectorySeparatorChar,
                     Path.AltDirectorySeparatorChar)).FullName;
@@ -3251,10 +3254,13 @@ namespace FilePromptAIWin7
                     Environment.GetEnvironmentVariable(
                         "FILEPROMPTAI_DATA_ROOT",
                         EnvironmentVariableTarget.Process);
-                int currentProcessId;
-                using (Process currentProcess = Process.GetCurrentProcess())
+                int currentProcessId = uninstallSourceProcessIdForTests;
+                if (currentProcessId <= 0)
                 {
-                    currentProcessId = currentProcess.Id;
+                    using (Process currentProcess = Process.GetCurrentProcess())
+                    {
+                        currentProcessId = currentProcess.Id;
+                    }
                 }
                 ProcessStartInfo startInfo = new ProcessStartInfo();
                 startInfo.FileName = uninstallerPath;
@@ -7097,7 +7103,8 @@ namespace FilePromptAIWin7
                     ? "FilePromptAI会话_"
                     : "FilePromptAI回复_") +
                     DateTime.Now.ToString("yyyyMMdd_HHmmss") + extension;
-                if (dialog.ShowDialog(this) != DialogResult.OK)
+                string exportPath = SelectExportPath(dialog);
+                if (string.IsNullOrEmpty(exportPath))
                 {
                     return;
                 }
@@ -7105,7 +7112,7 @@ namespace FilePromptAIWin7
                 try
                 {
                     AtomicFile.WriteAllText(
-                        dialog.FileName,
+                        exportPath,
                         output,
                         new UTF8Encoding(true));
                     SetStatus((entireConversation ? "整个会话" : "最新回复") +
@@ -7142,7 +7149,8 @@ namespace FilePromptAIWin7
                     ? "FilePromptAI会话_"
                     : "FilePromptAI回复_") +
                     DateTime.Now.ToString("yyyyMMdd_HHmmss") + extension;
-                if (dialog.ShowDialog(this) != DialogResult.OK)
+                string exportPath = SelectExportPath(dialog);
+                if (string.IsNullOrEmpty(exportPath))
                 {
                     return;
                 }
@@ -7151,11 +7159,11 @@ namespace FilePromptAIWin7
                 {
                     if (pdf)
                     {
-                        PdfExporter.Export(content, dialog.FileName);
+                        PdfExporter.Export(content, exportPath);
                     }
                     else
                     {
-                        DocxExporter.Export(content, dialog.FileName);
+                        DocxExporter.Export(content, exportPath);
                     }
 
                     SetStatus((pdf ? "PDF" : "Word") + " 已导出");
@@ -7188,14 +7196,15 @@ namespace FilePromptAIWin7
                     ? "FilePromptAI\u4f1a\u8bdd_"
                     : "FilePromptAI\u56de\u590d_") +
                     DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".pptx";
-                if (dialog.ShowDialog(this) != DialogResult.OK)
+                string exportPath = SelectExportPath(dialog);
+                if (string.IsNullOrEmpty(exportPath))
                 {
                     return;
                 }
 
                 try
                 {
-                    PptxExporter.Export(content, dialog.FileName);
+                    PptxExporter.Export(content, exportPath);
                     SetStatus("PowerPoint \u5df2\u5bfc\u51fa");
                 }
                 catch (Exception exception)
@@ -7226,14 +7235,15 @@ namespace FilePromptAIWin7
                     ? "FilePromptAI\u4f1a\u8bdd_"
                     : "FilePromptAI\u56de\u590d_") +
                     DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".xmind";
-                if (dialog.ShowDialog(this) != DialogResult.OK)
+                string exportPath = SelectExportPath(dialog);
+                if (string.IsNullOrEmpty(exportPath))
                 {
                     return;
                 }
 
                 try
                 {
-                    XMindExporter.Export(content, dialog.FileName);
+                    XMindExporter.Export(content, exportPath);
                     SetStatus("XMind \u601d\u7ef4\u5bfc\u56fe\u5df2\u5bfc\u51fa");
                 }
                 catch (Exception exception)
@@ -7272,7 +7282,8 @@ namespace FilePromptAIWin7
                 dialog.AddExtension = true;
                 dialog.FileName = "FilePromptAI表格_" +
                     DateTime.Now.ToString("yyyyMMdd_HHmmss") + extension;
-                if (dialog.ShowDialog(this) != DialogResult.OK)
+                string exportPath = SelectExportPath(dialog);
+                if (string.IsNullOrEmpty(exportPath))
                 {
                     return;
                 }
@@ -7281,11 +7292,11 @@ namespace FilePromptAIWin7
                 {
                     if (xlsx)
                     {
-                        XlsxExporter.Export(document, dialog.FileName);
+                        XlsxExporter.Export(document, exportPath);
                     }
                     else
                     {
-                        CsvExporter.Export(document, dialog.FileName);
+                        CsvExporter.Export(document, exportPath);
                     }
 
                     SetStatus(xlsx ? "Excel 工作簿已导出" : "CSV 已导出");
@@ -7295,6 +7306,18 @@ namespace FilePromptAIWin7
                     ShowSaveError(exception);
                 }
             }
+        }
+
+        private string SelectExportPath(SaveFileDialog dialog)
+        {
+            if (exportPathsForTests.Count > 0)
+            {
+                return exportPathsForTests.Dequeue();
+            }
+
+            return dialog.ShowDialog(this) == DialogResult.OK
+                ? dialog.FileName
+                : null;
         }
 
         private string BuildConversationMarkdown()

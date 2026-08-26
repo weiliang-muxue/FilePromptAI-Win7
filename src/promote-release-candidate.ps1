@@ -24,14 +24,9 @@ $SourceRoot = [IO.Path]::GetFullPath($SourceRoot).TrimEnd('\')
 $DestinationRoot = [IO.Path]::GetFullPath($DestinationRoot).TrimEnd('\')
 $archiveName = "FilePromptAI-Win7-Full-v$Version.zip"
 $sourceArchive = Join-Path $SourceRoot $archiveName
-$sourceSidecar = "$sourceArchive.sha256.txt"
 $receiptPath = Join-Path $SourceRoot (
     "tests\build-artifacts\release\ReleaseCandidate-v$Version.txt")
-$evidenceName = "ReleaseCandidate-v$Version.txt"
 $destinationArchive = Join-Path $DestinationRoot $archiveName
-$destinationSidecar = "$destinationArchive.sha256.txt"
-$destinationReadme = Join-Path $DestinationRoot 'README.txt'
-$destinationEvidence = Join-Path $DestinationRoot $evidenceName
 $evidenceHelper = Join-Path $SourceRoot 'tests\ReleaseAcceptanceEvidence.ps1'
 $installedJourneyScript = Join-Path $SourceRoot (
     'tests\RunInstalledUserJourneySmokeTest.ps1')
@@ -282,20 +277,17 @@ function Read-PromotionJournal {
             [Globalization.NumberStyles]::None,
             [Globalization.CultureInfo]::InvariantCulture,
             [ref]$replacedCount) -or
-        $replacedCount -lt 0 -or $replacedCount -gt 4) {
+        $replacedCount -lt 0 -or $replacedCount -gt 1) {
         throw "Promotion recovery journal replacement count is invalid; evidence was preserved: $TransactionRoot"
     }
-    $expectedNames = @(
-        $archiveName,
-        "$archiveName.sha256.txt",
-        'README.txt',
-        $evidenceName)
+    $expectedNames = @($archiveName)
     $nodes = @($root.ChildNodes | Where-Object { $_.NodeType -eq [Xml.XmlNodeType]::Element })
-    if ($nodes.Count -ne 4 -or $root.ChildNodes.Count -ne 4) {
+    if ($nodes.Count -ne $expectedNames.Count -or
+        $root.ChildNodes.Count -ne $expectedNames.Count) {
         throw "Promotion recovery journal item count is invalid; evidence was preserved: $TransactionRoot"
     }
     $items = @()
-    for ($index = 0; $index -lt 4; $index++) {
+    for ($index = 0; $index -lt $expectedNames.Count; $index++) {
         $node = $nodes[$index]
         $name = $expectedNames[$index]
         $target = Join-Path $DestinationRoot $name
@@ -609,11 +601,7 @@ function Invoke-PromotionStartupRecovery {
         $safePreJournalNames = New-Object `
             'System.Collections.Generic.Dictionary[string,bool]' `
             ([StringComparer]::OrdinalIgnoreCase)
-        foreach ($name in @(
-                "$archiveName.new",
-                "$archiveName.sha256.txt.new",
-                'README.txt.new',
-                "$evidenceName.new")) {
+        foreach ($name in @("$archiveName.new")) {
             $safePreJournalNames[$name] = $true
         }
         foreach ($artifact in $transactionEntries) {
@@ -643,12 +631,7 @@ function Assert-DeliveryInventory {
     $allowedNames = New-Object `
         'System.Collections.Generic.Dictionary[string,bool]' `
         ([StringComparer]::Ordinal)
-    foreach ($name in @(
-            '.gitattributes',
-            $archiveName,
-            "$archiveName.sha256.txt",
-            'README.txt',
-            $evidenceName)) {
+    foreach ($name in @($archiveName)) {
         $allowedNames[$name] = $true
     }
     $transientNames = New-Object `
@@ -680,10 +663,6 @@ function Assert-DeliveryInventory {
         }
     }
 
-    if (-not (Test-Path -LiteralPath (
-            Join-Path $DestinationRoot '.gitattributes') -PathType Leaf)) {
-        throw 'The candidate delivery directory is missing .gitattributes.'
-    }
     if ($RequireComplete -and $actualNames.Count -ne $allowedNames.Count) {
         $missing = @($allowedNames.Keys | Where-Object {
             -not (Test-Path -LiteralPath (
@@ -977,8 +956,16 @@ function Install-PromotionTransaction {
 if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
     throw "The source project directory is missing: $SourceRoot"
 }
-if (-not (Test-Path -LiteralPath $DestinationRoot -PathType Container)) {
-    throw "The candidate delivery directory is missing: $DestinationRoot"
+if (Test-Path -LiteralPath $DestinationRoot) {
+    if (-not (Test-Path -LiteralPath $DestinationRoot -PathType Container)) {
+        throw "The candidate delivery path is not a directory: $DestinationRoot"
+    }
+}
+else {
+    Assert-NoReparseAncestor `
+        -Path $DestinationRoot `
+        -Description 'Candidate delivery directory'
+    New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
 }
 Assert-NoReparseAncestor -Path $SourceRoot -Description 'Source project directory'
 Assert-NoReparseAncestor -Path $DestinationRoot -Description 'Candidate delivery directory'
@@ -1050,7 +1037,6 @@ if ($recoveredPromotion -and $stopAfterRecoveryForTests) {
 
 foreach ($required in @(
         $sourceArchive,
-        $sourceSidecar,
         $receiptPath,
         $evidenceHelper,
         $installedJourneyScript,
@@ -1117,11 +1103,7 @@ if ($LASTEXITCODE -ne 0 -or
     -not $lfsFilter.EndsWith(': filter: lfs', [StringComparison]::Ordinal)) {
     throw 'The promoted ZIP path must be tracked through Git LFS.'
 }
-foreach ($trackablePath in @(
-        $destinationArchive,
-        $destinationSidecar,
-        $destinationReadme,
-        $destinationEvidence)) {
+foreach ($trackablePath in @($destinationArchive)) {
     $gitPath = [IO.Path]::GetFullPath($trackablePath).Substring(
         $gitRootPrefix.Length).Replace('\', '/')
     & git -C $gitRoot check-ignore -q -- $gitPath
@@ -1141,41 +1123,6 @@ if ($sourceIdentity.ArchiveSha256 -cne $receipt.Hash -or
     throw 'The source ZIP identity does not match the successful test receipt.'
 }
 $archiveSize = (Get-Item -LiteralPath $sourceArchive).Length
-$expectedSidecar = "$($receipt.Hash) *$archiveName`r`n"
-$sourceSidecarLength = (Get-Item -LiteralPath $sourceSidecar).Length
-if ($sourceSidecarLength -le 0 -or $sourceSidecarLength -gt 1024) {
-    throw 'The source ZIP sidecar has an invalid size.'
-}
-$sourceSidecarBytes = [IO.File]::ReadAllBytes($sourceSidecar)
-if ($strictUtf8.GetString($sourceSidecarBytes) -cne $expectedSidecar) {
-    throw 'The source ZIP sidecar is not the canonical tested checksum record.'
-}
-
-$receiptHash = Get-FilePromptSha256Hex -Bytes $receipt.Bytes
-$readmeText =
-    "FilePrompt AI for Windows 7 - v$Version tested candidate`r`n" +
-    "========================================================`r`n`r`n" +
-    "This directory contains a tested candidate, not a sealed release.`r`n" +
-    "Archive: $archiveName`r`n" +
-    "SHA-256: $($receipt.Hash)`r`n" +
-    "Candidate commit: $($receipt.Candidate)`r`n" +
-    "Candidate evidence: $evidenceName`r`n`r`n" +
-    "Windows 7 acceptance is not asserted by this promotion. Formal release`r`n" +
-    "still requires the acceptance, sealing, and annotated-tag gates.`r`n"
-$evidenceText =
-    "FilePromptAI-Candidate-Promotion: 1`r`n" +
-    "State: TESTED-CANDIDATE`r`n" +
-    "Version: $Version`r`n" +
-    "Candidate-Commit: $($receipt.Candidate)`r`n" +
-    "Archive-Name: $archiveName`r`n" +
-    "Archive-SHA256: $($receipt.Hash)`r`n" +
-    "Archive-Size: $archiveSize`r`n" +
-    "Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256.txt`r`n" +
-    "Package-Manifest-SHA256: $($receipt.ManifestHash)`r`n" +
-    "Package-Manifest-Entry-Count: $($receipt.ManifestCount)`r`n" +
-    "Test-Receipt-SHA256: $receiptHash`r`n" +
-    "Promotion-Scope: CANDIDATE-ONLY`r`n" +
-    "Windows-7-Acceptance: NOT-ASSERTED`r`n"
 
 $transactionId = [Guid]::NewGuid().ToString('N')
 $transactionRoot = [IO.Path]::GetFullPath((Join-Path (
@@ -1202,48 +1149,11 @@ $items = @(
         Existed = $false
         OldHash = 'NONE'
         NewHash = ''
-    },
-    [pscustomobject]@{
-        Name = "$archiveName.sha256.txt"
-        Target = $destinationSidecar
-        Staged = Join-Path $transactionRoot "$archiveName.sha256.txt.new"
-        Backup = Join-Path $transactionRoot "$archiveName.sha256.txt.bak"
-        Discard = Join-Path $transactionRoot "$archiveName.sha256.txt.discard"
-        Existed = $false
-        OldHash = 'NONE'
-        NewHash = ''
-    },
-    [pscustomobject]@{
-        Name = 'README.txt'
-        Target = $destinationReadme
-        Staged = Join-Path $transactionRoot 'README.txt.new'
-        Backup = Join-Path $transactionRoot 'README.txt.bak'
-        Discard = Join-Path $transactionRoot 'README.txt.discard'
-        Existed = $false
-        OldHash = 'NONE'
-        NewHash = ''
-    },
-    [pscustomobject]@{
-        Name = $evidenceName
-        Target = $destinationEvidence
-        Staged = Join-Path $transactionRoot "$evidenceName.new"
-        Backup = Join-Path $transactionRoot "$evidenceName.bak"
-        Discard = Join-Path $transactionRoot "$evidenceName.discard"
-        Existed = $false
-        OldHash = 'NONE'
-        NewHash = ''
     }
 )
 $transactionStarted = $false
 try {
     Copy-AtomicFile -Source $sourceArchive -Destination $items[0].Staged
-    Write-AtomicBytes -Path $items[1].Staged -Bytes $sourceSidecarBytes
-    Write-AtomicBytes `
-        -Path $items[2].Staged `
-        -Bytes $utf8NoBom.GetBytes($readmeText)
-    Write-AtomicBytes `
-        -Path $items[3].Staged `
-        -Bytes $utf8NoBom.GetBytes($evidenceText)
 
     $sourceIdentityAfterCopy = Read-FilePromptReleaseArchiveIdentity `
         -ArchivePath $sourceArchive
@@ -1259,13 +1169,6 @@ try {
         (Get-Item -LiteralPath $items[0].Staged).Length -ne $archiveSize) {
         throw 'The staged ZIP differs from the successfully tested source ZIP.'
     }
-    $stagedSidecarBytes = [IO.File]::ReadAllBytes($items[1].Staged)
-    if ($sourceSidecarBytes.Length -ne $stagedSidecarBytes.Length -or
-        (Get-FilePromptSha256Hex -Bytes $sourceSidecarBytes) -cne
-            (Get-FilePromptSha256Hex -Bytes $stagedSidecarBytes)) {
-        throw 'The staged sidecar differs from the tested sidecar.'
-    }
-
     foreach ($item in $items) {
         $item.Existed = Test-Path -LiteralPath $item.Target -PathType Leaf
         $item.OldHash = if ($item.Existed) {
@@ -1285,18 +1188,6 @@ try {
             $destinationIdentity.ManifestEntryCount -ne $receipt.ManifestCount -or
             (Get-Item -LiteralPath $destinationArchive).Length -ne $archiveSize) {
             throw 'The promoted ZIP differs from the successfully tested source ZIP.'
-        }
-        $installedSidecar = [IO.File]::ReadAllBytes($destinationSidecar)
-        if ($sourceSidecarBytes.Length -ne $installedSidecar.Length -or
-            (Get-FilePromptSha256Hex -Bytes $sourceSidecarBytes) -cne
-                (Get-FilePromptSha256Hex -Bytes $installedSidecar)) {
-            throw 'The promoted sidecar differs from the tested sidecar.'
-        }
-        if ([IO.File]::ReadAllText($destinationReadme, $strictUtf8) -cne
-                $readmeText -or
-            [IO.File]::ReadAllText($destinationEvidence, $strictUtf8) -cne
-                $evidenceText) {
-            throw 'The promoted candidate metadata failed exact verification.'
         }
         Assert-DeliveryInventory -RequireComplete
 

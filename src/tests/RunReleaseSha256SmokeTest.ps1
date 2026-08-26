@@ -12,7 +12,6 @@ $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
 )
 $archiveName = "FilePromptAI-Win7-Full-v$Version.zip"
 $archivePath = Join-Path $temporaryRoot $archiveName
-$sidecarPath = "$archivePath.sha256.txt"
 $manifestPath = Join-Path $temporaryRoot 'RELEASE-SHA256.txt'
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
 
@@ -22,7 +21,6 @@ function Set-ValidFixture {
         [Text.Encoding]::ASCII.GetBytes('deterministic release fixture'))
     $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
     $line = "$hash *$archiveName`r`n"
-    [IO.File]::WriteAllText($sidecarPath, $line, $utf8NoBom)
     [IO.File]::WriteAllText($manifestPath, $line, $utf8NoBom)
     return $line
 }

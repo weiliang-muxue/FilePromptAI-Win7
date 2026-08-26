@@ -106,6 +106,7 @@ function Write-AcceptanceFixtureReport {
         'api.models',
         'api.chat-completions',
         'application.launch',
+        'application.ui-journey',
         'application.cleanup'
     )
     $settings = New-Object Xml.XmlWriterSettings
@@ -116,7 +117,7 @@ function Write-AcceptanceFixtureReport {
     try {
         $writer.WriteStartDocument()
         $writer.WriteStartElement('filePromptAiAcceptance')
-        $writer.WriteAttributeString('schemaVersion', '2')
+        $writer.WriteAttributeString('schemaVersion', '3')
         $writer.WriteAttributeString('result', 'pass')
         $writer.WriteAttributeString('exitCode', '0')
         $writer.WriteAttributeString(
@@ -259,6 +260,7 @@ function New-ReleaseFixture {
         'RunReleaseSha256SmokeTest.ps1',
         'RunCandidatePromotionSmokeTest.ps1',
         'RunReleaseSealingSmokeTest.ps1',
+        'RunDefenderScanGateSmokeTest.ps1',
         'RunApiSmokeTest.ps1',
         'RunApiHardeningSmokeTest.ps1',
         'RunNetworkReliabilitySmokeTest.ps1',
@@ -316,11 +318,6 @@ $payloadHash = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash
     "$payloadHash *payload.txt`r`n",
     $utf8NoBom)
 Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $path -Force
-$hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
-[IO.File]::WriteAllText(
-    "$path.sha256.txt",
-    "$hash *$name`r`n",
-    $utf8NoBom)
 Write-Host 'PASS | fixture package build'
 '@
     [IO.File]::WriteAllText(
@@ -335,16 +332,12 @@ Write-Host 'PASS | fixture package build'
     [IO.File]::WriteAllText(
         (Join-Path $sourceRoot '.gitignore'),
         "FilePromptAI-Win7-Full-v*.zip`r`n" +
-            "FilePromptAI-Win7-Full-v*.zip.sha256.txt`r`n" +
             "tests/build-artifacts/`r`n" +
             "FilePromptAI-offline-release-v*/`r`n",
         $utf8NoBom)
     [IO.File]::WriteAllText(
-        (Join-Path $distributionRoot '.gitattributes'),
-        "* text=auto`r`n" +
-            "*.zip filter=lfs diff=lfs merge=lfs -text`r`n" +
-            "*.zip.sha256.txt -text`r`n" +
-            "ReleaseCandidate-v*.txt -text`r`n",
+        (Join-Path $root '.gitattributes'),
+        "exe/*.zip filter=lfs diff=lfs merge=lfs -text`r`n",
         $utf8NoBom)
     [IO.File]::WriteAllText(
         (Join-Path $sourceRoot 'candidate.txt'),
@@ -375,7 +368,6 @@ Write-Host 'PASS | fixture package build'
         -OutputPattern '(?m)^RECEIPT \|'
 
     $sourceArchivePath = Join-Path $sourceRoot $archiveName
-    $sourceSidecarPath = "$sourceArchivePath.sha256.txt"
     $fixtureManifestPath = Join-Path `
         (Join-Path $sourceRoot "FilePromptAI-offline-release-v$Version") `
         'PACKAGE-CHECKSUMS-SHA256.txt'
@@ -385,42 +377,13 @@ Write-Host 'PASS | fixture package build'
     $manifestEntryCount = 1
 
     $archivePath = Join-Path $distributionRoot $archiveName
-    $sidecarPath = "$archivePath.sha256.txt"
-    $readmePath = Join-Path $distributionRoot 'README.txt'
-    $candidateEvidencePath = Join-Path $distributionRoot "ReleaseCandidate-v$Version.txt"
     Copy-Item -LiteralPath $sourceArchivePath -Destination $archivePath
-    Copy-Item -LiteralPath $sourceSidecarPath -Destination $sidecarPath
-    [IO.File]::WriteAllText(
-        $readmePath,
-        "FilePromptAI tested candidate, not a sealed release.`r`n" +
-            "Windows 7 acceptance is not asserted.`r`n" +
-            "SHA-256: $archiveHash`r`n",
-        $utf8NoBom)
 
     $receiptPath = Join-Path $receiptRoot "ReleaseCandidate-v$Version.txt"
-    $receiptHash = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash
-    $candidateEvidence =
-        "FilePromptAI-Candidate-Promotion: 1`r`n" +
-        "State: TESTED-CANDIDATE`r`n" +
-        "Version: $Version`r`n" +
-        "Candidate-Commit: $candidateCommit`r`n" +
-        "Archive-Name: $archiveName`r`n" +
-        "Archive-SHA256: $archiveHash`r`n" +
-        "Archive-Size: $archiveSize`r`n" +
-        "Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256.txt`r`n" +
-        "Package-Manifest-SHA256: $manifestHash`r`n" +
-        "Package-Manifest-Entry-Count: $manifestEntryCount`r`n" +
-        "Test-Receipt-SHA256: $receiptHash`r`n" +
-        "Promotion-Scope: CANDIDATE-ONLY`r`n" +
-        "Windows-7-Acceptance: NOT-ASSERTED`r`n"
-    [IO.File]::WriteAllText($candidateEvidencePath, $candidateEvidence, $utf8NoBom)
 
     Invoke-GitChecked -Root $root -GitArguments @(
         'add', '--',
-        "exe/$archiveName",
-        "exe/$archiveName.sha256.txt",
-        'exe/README.txt',
-        "exe/ReleaseCandidate-v$Version.txt") | Out-Null
+        "exe/$archiveName") | Out-Null
     Invoke-GitChecked -Root $root -GitArguments @(
         'commit', '--quiet', '-m', 'promote tested candidate') | Out-Null
     $promotionCommit = Invoke-GitChecked -Root $root -GitArguments @('rev-parse', 'HEAD')
@@ -440,7 +403,6 @@ Write-Host 'PASS | fixture package build'
         TagVerifier = Join-Path $fixtureTestRoot 'VerifyTaggedRelease.ps1'
         AllSmokeTests = Join-Path $fixtureTestRoot 'RunAllSmokeTests.ps1'
         ArchivePath = $archivePath
-        SidecarPath = $sidecarPath
         ReceiptPath = $receiptPath
         Candidate = $candidateCommit
         Promotion = $promotionCommit
@@ -519,28 +481,6 @@ try {
         -Description 'The annotated manifest-only release tag' `
         -Result $tagResult `
         -OutputPattern '(?m)^PASS \| annotated release tag \|'
-    $sidecarBytes = [IO.File]::ReadAllBytes($success.SidecarPath)
-    if ($sidecarBytes.Length -lt 2 -or
-        $sidecarBytes[$sidecarBytes.Length - 2] -ne 0x0D -or
-        $sidecarBytes[$sidecarBytes.Length - 1] -ne 0x0A) {
-        throw 'The tagged release sidecar working copy is not CRLF-terminated.'
-    }
-    $rawSidecarBlob = Invoke-GitChecked `
-        -Root $success.Root `
-        -GitArguments @(
-            'hash-object',
-            '--no-filters',
-            '--',
-            "exe/$archiveName.sha256.txt")
-    $tagSidecarBlob = Invoke-GitChecked `
-        -Root $success.Root `
-        -GitArguments @(
-            'rev-parse',
-            "v$Version`:exe/$archiveName.sha256.txt")
-    if ($rawSidecarBlob -cne $tagSidecarBlob) {
-        throw 'core.autocrlf=true changed the tagged release sidecar bytes.'
-    }
-
     $successAcceptanceText = [IO.File]::ReadAllText(
         $success.AcceptanceReportPath,
         (New-Object Text.UTF8Encoding($false, $true)))
@@ -649,10 +589,22 @@ try {
     Set-AcceptanceFixtureText `
         -Path $invalidEvidence.AcceptanceReportPath `
         -OriginalText $acceptanceText `
-        -OldValue 'id="application.cleanup" status="pass"' `
+        -OldValue 'schemaVersion="3"' `
+        -NewValue 'schemaVersion="2"'
+    Assert-Rejected `
+        -Description 'A legacy schema 2 acceptance report' `
+        -Result (Invoke-Script `
+            -ScriptPath $invalidEvidence.SealScript `
+            -Root $invalidEvidence.Root) `
+        -OutputPattern 'not a passing v1\.17'
+
+    Set-AcceptanceFixtureText `
+        -Path $invalidEvidence.AcceptanceReportPath `
+        -OriginalText $acceptanceText `
+        -OldValue 'id="application.ui-journey" status="pass"' `
         -NewValue 'id="application.launch" status="pass"'
     Assert-Rejected `
-        -Description 'A duplicated required acceptance check' `
+        -Description 'An acceptance report missing the full UI journey' `
         -Result (Invoke-Script `
             -ScriptPath $invalidEvidence.SealScript `
             -Root $invalidEvidence.Root) `
@@ -728,13 +680,8 @@ try {
     $changedZip = New-ReleaseFixture -Name 'changed-zip'
     Write-ReleaseFixtureReceipt -Fixture $changedZip
     [IO.File]::AppendAllText($changedZip.ArchivePath, 'changed', $utf8NoBom)
-    $changedHash = (Get-FileHash -LiteralPath $changedZip.ArchivePath -Algorithm SHA256).Hash
-    [IO.File]::WriteAllText(
-        $changedZip.SidecarPath,
-        "$changedHash *$archiveName`r`n",
-        $utf8NoBom)
     Assert-Rejected `
-        -Description 'A changed self-consistent ZIP and sidecar' `
+        -Description 'A changed ZIP' `
         -Result (Invoke-Script -ScriptPath $changedZip.SealScript -Root $changedZip.Root) `
         -OutputPattern 'clean promotion commit'
 

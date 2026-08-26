@@ -17,7 +17,6 @@ $buildScript = Join-Path $projectRoot 'build.ps1'
 $packageBuildScript = Join-Path $projectRoot 'build-offline-package.ps1'
 $archiveName = "FilePromptAI-Win7-Full-v$Version.zip"
 $archivePath = Join-Path $projectRoot $archiveName
-$sidecarPath = "$archivePath.sha256.txt"
 $stagingRoot = Join-Path $projectRoot "FilePromptAI-offline-release-v$Version"
 $releaseEvidenceScript = Join-Path $testRoot 'ReleaseAcceptanceEvidence.ps1'
 $receiptRelativePath = "tests/build-artifacts/release/ReleaseCandidate-v$Version.txt"
@@ -106,6 +105,7 @@ $scripts = @(
     'RunReleaseSha256SmokeTest.ps1',
     'RunCandidatePromotionSmokeTest.ps1',
     'RunReleaseSealingSmokeTest.ps1',
+    'RunDefenderScanGateSmokeTest.ps1',
     'RunApiSmokeTest.ps1',
     'RunApiHardeningSmokeTest.ps1',
     'RunNetworkReliabilitySmokeTest.ps1',
@@ -174,7 +174,7 @@ foreach ($name in $packageScripts) {
 if ($WriteReleaseReceipt) {
     Assert-CleanCandidate -ExpectedCommit $candidateCommit | Out-Null
     $stagingManifestPath = Join-Path $stagingRoot 'PACKAGE-CHECKSUMS-SHA256.txt'
-    foreach ($required in @($archivePath, $sidecarPath, $stagingManifestPath)) {
+    foreach ($required in @($archivePath, $stagingManifestPath)) {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
             throw "The tested release artifact is missing: $required"
         }
@@ -183,23 +183,6 @@ if ($WriteReleaseReceipt) {
     $archiveIdentity = Read-FilePromptReleaseArchiveIdentity `
         -ArchivePath $archivePath
     $archiveHash = $archiveIdentity.ArchiveSha256
-    $expectedSidecar = "$archiveHash *$archiveName`r`n"
-    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
-    $sidecarBytes = [IO.File]::ReadAllBytes($sidecarPath)
-    if ($sidecarBytes.Length -ge 3 -and
-        $sidecarBytes[0] -eq 0xEF -and
-        $sidecarBytes[1] -eq 0xBB -and
-        $sidecarBytes[2] -eq 0xBF) {
-        throw 'The tested release ZIP sidecar must be UTF-8 without BOM.'
-    }
-    $sidecarText = $strictUtf8.GetString($sidecarBytes)
-    if (-not [string]::Equals(
-        $sidecarText,
-        $expectedSidecar,
-        [StringComparison]::Ordinal)) {
-        throw 'The tested release ZIP sidecar is not canonical.'
-    }
-
     $stagingManifestIdentity = Read-FilePromptPackageManifestIdentity `
         -Path $stagingManifestPath
     if (-not [string]::Equals(

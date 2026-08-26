@@ -19,14 +19,13 @@ $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
 
 $archiveName = "FilePromptAI-Win7-Full-v$Version.zip"
 $archivePath = Join-Path $ProjectRoot $archiveName
-$sidecarPath = "$archivePath.sha256.txt"
 $manifestPath = if ([string]::IsNullOrWhiteSpace($ReleaseManifestPath)) {
     Join-Path $ProjectRoot 'RELEASE-SHA256.txt'
 }
 else {
     [IO.Path]::GetFullPath($ReleaseManifestPath)
 }
-foreach ($required in @($archivePath, $sidecarPath, $manifestPath)) {
+foreach ($required in @($archivePath, $manifestPath)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required release checksum artifact is missing: $required"
     }
@@ -35,21 +34,19 @@ foreach ($required in @($archivePath, $sidecarPath, $manifestPath)) {
 $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
 $expectedText = "$actualHash *$archiveName`r`n"
 $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
-foreach ($checksumPath in @($sidecarPath, $manifestPath)) {
-    $bytes = [IO.File]::ReadAllBytes($checksumPath)
-    if ($bytes.Length -ge 3 -and
-        $bytes[0] -eq 0xEF -and
-        $bytes[1] -eq 0xBB -and
-        $bytes[2] -eq 0xBF) {
-        throw "Release checksum files must be UTF-8 without BOM: $checksumPath"
-    }
-    $text = $strictUtf8.GetString($bytes)
-    if (-not [string]::Equals(
-        $text,
-        $expectedText,
-        [StringComparison]::Ordinal)) {
-        throw "Release checksum record is not the exact archive SHA-256 line: $checksumPath"
-    }
+$bytes = [IO.File]::ReadAllBytes($manifestPath)
+if ($bytes.Length -ge 3 -and
+    $bytes[0] -eq 0xEF -and
+    $bytes[1] -eq 0xBB -and
+    $bytes[2] -eq 0xBF) {
+    throw "The release checksum file must be UTF-8 without BOM: $manifestPath"
+}
+$text = $strictUtf8.GetString($bytes)
+if (-not [string]::Equals(
+    $text,
+    $expectedText,
+    [StringComparison]::Ordinal)) {
+    throw "The release checksum record is not the exact archive SHA-256 line: $manifestPath"
 }
 
 Write-Host "PASS | release SHA-256 | version=$Version | sha256=$actualHash"

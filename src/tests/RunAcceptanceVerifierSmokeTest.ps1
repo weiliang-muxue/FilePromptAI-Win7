@@ -132,6 +132,7 @@ foreach ($requiredPass in @(
     'api.models',
     'api.chat-completions',
     'application.launch',
+    'application.ui-journey',
     'application.cleanup'
 )) {
     if ($output -notmatch "(?m)^PASS \| $([regex]::Escape($requiredPass)) \|") {
@@ -156,9 +157,9 @@ if (-not (Test-Path -LiteralPath $checksumPath -PathType Leaf)) {
 }
 [xml]$document = Get-Content -LiteralPath $report.FullName -Raw -Encoding UTF8
 $root = $document.filePromptAiAcceptance
-if ($root.schemaVersion -ne '2' -or
+if ($root.schemaVersion -ne '3' -or
     $root.verifierVersion -ne '1.17.0.0') {
-    throw 'The acceptance report does not use the v1.17 schemaVersion=2 contract.'
+    throw 'The acceptance report does not use the v1.17 schemaVersion=3 contract.'
 }
 
 function Assert-FailedReportHasNoVerifiedIdentity {
@@ -186,7 +187,7 @@ function Assert-FailedReportHasNoVerifiedIdentity {
             -Encoding UTF8
         $failedRoot = $failedDocument.filePromptAiAcceptance
         $failedIdentity = $failedRoot.packageIdentity
-        if ($failedRoot.schemaVersion -ne '2' -or
+        if ($failedRoot.schemaVersion -ne '3' -or
             $failedRoot.result -ne 'fail' -or
             $failedIdentity.status -ne 'unverified' -or
             $failedIdentity.Attributes.Count -ne 1 -or
@@ -251,6 +252,7 @@ $requiredIds = @(
     'api.models',
     'api.chat-completions',
     'application.launch',
+    'application.ui-journey',
     'application.cleanup'
 )
 foreach ($identifier in $requiredIds) {
@@ -468,6 +470,7 @@ try {
         $tamperOutput -notmatch '(?m)^SKIP \| api\.models \|' -or
         $tamperOutput -notmatch '(?m)^SKIP \| api\.chat-completions \|' -or
         $tamperOutput -notmatch '(?m)^SKIP \| application\.launch \|' -or
+        $tamperOutput -notmatch '(?m)^SKIP \| application\.ui-journey \|' -or
         $tamperOutput -match '(?m)^(PASS|FAIL|ERROR) \| application\.launch \|') {
         throw "A tampered package was not safely gated. exitCode=$tamperExitCode`n$tamperOutput"
     }
@@ -505,6 +508,7 @@ try {
         $recalculatedOutput -notmatch '(?m)^FAIL \| package\.checksums \|' -or
         $recalculatedOutput -notmatch 'embedded trusted payload set' -or
         $recalculatedOutput -notmatch '(?m)^SKIP \| application\.launch \|' -or
+        $recalculatedOutput -notmatch '(?m)^SKIP \| application\.ui-journey \|' -or
         $recalculatedOutput -match '(?m)^(PASS|FAIL|ERROR) \| application\.launch \|') {
         throw "A modified payload with a recalculated manifest bypassed the trusted set. exitCode=$recalculatedExitCode`n$recalculatedOutput"
     }

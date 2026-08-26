@@ -105,9 +105,6 @@ if ($LASTEXITCODE -ne 0) {
     throw 'The tagged release verifier requires a Git worktree.'
 }
 $archivePath = Join-Path $gitRoot "exe\$archiveName"
-$sidecarPath = "$archivePath.sha256.txt"
-$gitSidecarPath = "exe/$archiveName.sha256.txt"
-$candidateEvidencePath = Join-Path $gitRoot "exe\ReleaseCandidate-v$Version.txt"
 $gitProjectPath = Get-GitRelativeProjectPath -GitRoot $gitRoot
 $gitManifestPath = if ([string]::IsNullOrEmpty($gitProjectPath)) {
     'RELEASE-SHA256.txt'
@@ -193,7 +190,6 @@ if ($LASTEXITCODE -ne 0 -or $tagEvidenceBlob -ne $workingEvidenceBlob) {
     throw 'The tagged formal release evidence differs byte-for-byte from the working copy.'
 }
 $formalEvidence = Read-FilePromptFormalReleaseEvidence -Path $formalEvidencePath
-$candidateEvidence = Read-FilePromptCandidatePromotionEvidence -Path $candidateEvidencePath
 if (-not [string]::Equals($formalEvidence.Version, $Version, [StringComparison]::Ordinal) -or
     -not [string]::Equals($formalEvidence.Candidate, $receipt.Candidate, [StringComparison]::OrdinalIgnoreCase) -or
     -not [string]::Equals($formalEvidence.Promotion, $promotionCommit, [StringComparison]::OrdinalIgnoreCase) -or
@@ -203,8 +199,7 @@ if (-not [string]::Equals($formalEvidence.Version, $Version, [StringComparison]:
     -not [string]::Equals($formalEvidence.ManifestHash, $receipt.ManifestHash, [StringComparison]::Ordinal) -or
     $formalEvidence.ManifestEntryCount -ne $receipt.ManifestEntryCount -or
     -not [string]::Equals($formalEvidence.ReceiptHash, $receipt.Sha256, [StringComparison]::Ordinal) -or
-    -not [string]::Equals($formalEvidence.ReportHash, $acceptance.ReportSha256, [StringComparison]::Ordinal) -or
-    -not [string]::Equals($formalEvidence.PromotionEvidenceHash, $candidateEvidence.Sha256, [StringComparison]::Ordinal)) {
+    -not [string]::Equals($formalEvidence.ReportHash, $acceptance.ReportSha256, [StringComparison]::Ordinal)) {
     throw 'The tagged formal release evidence does not match the receipt, promotion, artifact, and Win7 report.'
 }
 
@@ -218,10 +213,7 @@ if ($LASTEXITCODE -ne 0 -or $promotionParentFields.Count -ne 2 -or
     throw 'The promotion commit parent is not the tested source candidate.'
 }
 $expectedPromotionPaths = @(
-    "exe/$archiveName",
-    "exe/$archiveName.sha256.txt",
-    'exe/README.txt',
-    "exe/ReleaseCandidate-v$Version.txt"
+    "exe/$archiveName"
 )
 $promotionPaths = @(& git -C $gitRoot diff --name-only --no-renames $formalEvidence.Candidate $promotionCommit --)
 if ($LASTEXITCODE -ne 0 -or
@@ -247,38 +239,15 @@ if (-not [string]::Equals(
     throw 'The tagged release ZIP is not the canonical LFS pointer for the formal archive identity.'
 }
 
-foreach ($required in @($archivePath, $sidecarPath)) {
+foreach ($required in @($archivePath)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required release artifact is missing: $required"
     }
-}
-$tagSidecarBlob = (& git -C $gitRoot rev-parse "${tagName}:$gitSidecarPath" 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0) {
-    throw 'The release sidecar is missing from the release tag.'
-}
-$workingSidecarBlob = (& git -C $gitRoot hash-object --no-filters -- $gitSidecarPath 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $tagSidecarBlob -ne $workingSidecarBlob) {
-    throw 'The tagged release sidecar differs byte-for-byte from the working copy.'
 }
 $archiveIdentity = Read-FilePromptReleaseArchiveIdentity `
     -ArchivePath $archivePath
 $archiveHash = $archiveIdentity.ArchiveSha256
 $archiveSize = (Get-Item -LiteralPath $archivePath).Length
-$sidecarBytes = [IO.File]::ReadAllBytes($sidecarPath)
-if ($sidecarBytes.Length -ge 3 -and
-    $sidecarBytes[0] -eq 0xEF -and
-    $sidecarBytes[1] -eq 0xBB -and
-    $sidecarBytes[2] -eq 0xBF) {
-    throw 'The release sidecar must be UTF-8 without BOM.'
-}
-$sidecarText = $strictUtf8.GetString($sidecarBytes)
-$expectedSidecarText = "$archiveHash *$archiveName`r`n"
-if (-not [string]::Equals(
-        $sidecarText,
-        $expectedSidecarText,
-        [StringComparison]::Ordinal)) {
-    throw 'The release sidecar must be canonical UTF-8 without BOM and CRLF, and must contain the exact final ZIP SHA-256.'
-}
 if (-not [string]::Equals(
     $archiveHash,
     $receipt.Hash,

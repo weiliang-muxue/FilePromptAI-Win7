@@ -292,68 +292,6 @@ function Read-FilePromptReleaseReceipt {
     }
 }
 
-function Read-FilePromptCandidatePromotionEvidence {
-    param([string]$Path)
-
-    $bytes = Read-FilePromptLockedBytes `
-        -Path $Path `
-        -MaximumLength 16384 `
-        -Description 'The tracked candidate-promotion evidence'
-    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
-    try {
-        $text = $strictUtf8.GetString($bytes)
-    }
-    catch {
-        throw 'The candidate-promotion evidence is not valid UTF-8.'
-    }
-    $pattern = '\A' +
-        'FilePromptAI-Candidate-Promotion: 1\r\n' +
-        'State: TESTED-CANDIDATE\r\n' +
-        'Version: (?<Version>[0-9A-Za-z](?:[0-9A-Za-z._-]{0,30}[0-9A-Za-z])?)\r\n' +
-        'Candidate-Commit: (?<Candidate>[0-9a-f]{40}(?:[0-9a-f]{24})?)\r\n' +
-        'Archive-Name: (?<Archive>[0-9A-Za-z._-]+)\r\n' +
-        'Archive-SHA256: (?<Hash>[0-9A-F]{64})\r\n' +
-        'Archive-Size: (?<Size>[1-9][0-9]{0,18})\r\n' +
-        'Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256\.txt\r\n' +
-        'Package-Manifest-SHA256: (?<ManifestHash>[0-9A-F]{64})\r\n' +
-        'Package-Manifest-Entry-Count: (?<ManifestEntryCount>[1-9][0-9]{0,8})\r\n' +
-        'Test-Receipt-SHA256: (?<ReceiptHash>[0-9A-F]{64})\r\n' +
-        'Promotion-Scope: CANDIDATE-ONLY\r\n' +
-        'Windows-7-Acceptance: NOT-ASSERTED\r\n\z'
-    $match = [Text.RegularExpressions.Regex]::Match(
-        $text,
-        $pattern,
-        [Text.RegularExpressions.RegexOptions]::CultureInvariant)
-    if (-not $match.Success) {
-        throw 'The candidate-promotion evidence has an invalid or non-canonical format.'
-    }
-    $size = [int64]0
-    $entryCount = 0
-    if (-not [int64]::TryParse(
-            $match.Groups['Size'].Value,
-            [Globalization.NumberStyles]::None,
-            [Globalization.CultureInfo]::InvariantCulture,
-            [ref]$size) -or
-        -not [int]::TryParse(
-            $match.Groups['ManifestEntryCount'].Value,
-            [Globalization.NumberStyles]::None,
-            [Globalization.CultureInfo]::InvariantCulture,
-            [ref]$entryCount)) {
-        throw 'The candidate-promotion evidence contains an invalid numeric field.'
-    }
-    return [pscustomobject]@{
-        Version = $match.Groups['Version'].Value
-        Candidate = $match.Groups['Candidate'].Value
-        Archive = $match.Groups['Archive'].Value
-        Hash = $match.Groups['Hash'].Value
-        Size = $size
-        ManifestHash = $match.Groups['ManifestHash'].Value
-        ManifestEntryCount = $entryCount
-        ReceiptHash = $match.Groups['ReceiptHash'].Value
-        Sha256 = Get-FilePromptSha256Hex -Bytes $bytes
-    }
-}
-
 function Read-FilePromptFormalReleaseEvidence {
     param([string]$Path)
 
@@ -380,7 +318,6 @@ function Read-FilePromptFormalReleaseEvidence {
         'Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256\.txt\r\n' +
         'Package-Manifest-SHA256: (?<ManifestHash>[0-9A-F]{64})\r\n' +
         'Package-Manifest-Entry-Count: (?<ManifestEntryCount>[1-9][0-9]{0,8})\r\n' +
-        'Candidate-Promotion-Evidence-SHA256: (?<PromotionEvidenceHash>[0-9A-F]{64})\r\n' +
         'Test-Receipt-SHA256: (?<ReceiptHash>[0-9A-F]{64})\r\n' +
         'Windows-7-Acceptance-Report-SHA256: (?<ReportHash>[0-9A-F]{64})\r\n' +
         'Windows-7-Acceptance-Created-UTC: (?<CreatedUtc>[^\r\n]+)\r\n' +
@@ -423,7 +360,6 @@ function Read-FilePromptFormalReleaseEvidence {
         Size = $size
         ManifestHash = $match.Groups['ManifestHash'].Value
         ManifestEntryCount = $entryCount
-        PromotionEvidenceHash = $match.Groups['PromotionEvidenceHash'].Value
         ReceiptHash = $match.Groups['ReceiptHash'].Value
         ReportHash = $match.Groups['ReportHash'].Value
         CreatedUtc = $createdUtc
@@ -573,7 +509,7 @@ function Read-FilePromptAcceptanceEvidence {
         -Element $root `
         -Names @('schemaVersion', 'result', 'exitCode', 'createdUtc', 'verifierVersion') `
         -Description 'The Windows 7 acceptance XML root'
-    if ($root.GetAttribute('schemaVersion') -ne '2' -or
+    if ($root.GetAttribute('schemaVersion') -ne '3' -or
         $root.GetAttribute('result') -ne 'pass' -or
         $root.GetAttribute('exitCode') -ne '0' -or
         $root.GetAttribute('verifierVersion') -ne '1.17.0.0') {
@@ -689,6 +625,7 @@ function Read-FilePromptAcceptanceEvidence {
         'api.models',
         'api.chat-completions',
         'application.launch',
+        'application.ui-journey',
         'application.cleanup'
     )
     $checkElements = @(

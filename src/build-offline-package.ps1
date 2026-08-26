@@ -102,6 +102,7 @@ Assert-FileExists -Path (Join-Path $uninstallerRoot 'AssemblyInfo.cs') -Descript
 Assert-FileExists -Path (Join-Path $uninstallerRoot 'uninstaller.manifest') -Description 'uninstaller manifest'
 Assert-FileExists -Path (Join-Path $uninstallerRoot 'Uninstall-FilePromptAI.exe.config') -Description 'uninstaller configuration'
 Assert-FileExists -Path (Join-Path $acceptanceRoot 'Program.cs') -Description 'acceptance verifier source'
+Assert-FileExists -Path (Join-Path $acceptanceRoot 'PackagedUiJourney.cs') -Description 'packaged UI acceptance journey source'
 Assert-FileExists -Path (Join-Path $acceptanceRoot 'AssemblyInfo.cs') -Description 'acceptance verifier metadata'
 Assert-FileExists -Path (Join-Path $acceptanceRoot 'acceptance.manifest') -Description 'acceptance verifier manifest'
 Assert-FileExists -Path (Join-Path $acceptanceRoot 'Verify-FilePromptAI.exe.config') -Description 'acceptance verifier configuration'
@@ -281,8 +282,11 @@ $acceptanceCompilerArguments = @(
     "/win32manifest:$(Join-Path $acceptanceRoot 'acceptance.manifest')",
     "/resource:$trustedPayloadManifestPath,$acceptanceTrustedResourceName",
     "/reference:$(Join-Path $referenceRoot 'System.dll')",
+    "/reference:$(Join-Path $referenceRoot 'System.Drawing.dll')",
+    "/reference:$(Join-Path $referenceRoot 'System.Windows.Forms.dll')",
     "/reference:$(Join-Path $referenceRoot 'System.Xml.dll')",
     (Join-Path $acceptanceRoot 'AssemblyInfo.cs'),
+    (Join-Path $acceptanceRoot 'PackagedUiJourney.cs'),
     (Join-Path $acceptanceRoot 'Program.cs')
 )
 

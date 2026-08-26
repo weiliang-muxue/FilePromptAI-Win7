@@ -110,13 +110,8 @@ if ($gitExitCode -ne 0) {
 $gitProjectPath = Get-GitRelativeProjectPath -GitRoot $gitRoot
 $distributionRoot = Join-Path $gitRoot 'exe'
 $archivePath = Join-Path $distributionRoot $archiveName
-$sidecarPath = "$archivePath.sha256.txt"
-$candidateEvidenceName = "ReleaseCandidate-v$Version.txt"
-$candidateEvidencePath = Join-Path $distributionRoot $candidateEvidenceName
 foreach ($required in @(
     $archivePath,
-    $sidecarPath,
-    $candidateEvidencePath,
     $verifyScript)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required release artifact is missing: $required"
@@ -141,9 +136,6 @@ else {
     "$gitProjectPath/RELEASE-EVIDENCE.txt"
 }
 $gitArchivePath = "exe/$archiveName"
-$gitSidecarPath = "$gitArchivePath.sha256.txt"
-$gitCandidateEvidencePath = "exe/$candidateEvidenceName"
-$gitReadmePath = 'exe/README.txt'
 
 & git -C $gitRoot check-ignore -q -- $gitReceiptPath
 if ($LASTEXITCODE -ne 0) {
@@ -189,20 +181,15 @@ if ($parentFields.Count -ne 2 -or
 }
 $promotionPaths = @(& git -C $gitRoot diff --name-only --no-renames $receipt.Candidate $headCommit --)
 $expectedPromotionPaths = @(
-    $gitArchivePath,
-    $gitSidecarPath,
-    $gitReadmePath,
-    $gitCandidateEvidencePath
+    $gitArchivePath
 )
 if ($LASTEXITCODE -ne 0 -or
     @(Compare-Object `
         -ReferenceObject @($expectedPromotionPaths | Sort-Object) `
         -DifferenceObject @($promotionPaths | Sort-Object) `
         -CaseSensitive).Count -ne 0) {
-    throw 'The promotion commit must change exactly the four authorized exe release paths.'
+    throw 'The promotion commit must change exactly the authorized exe ZIP path.'
 }
-$candidateEvidence = Read-FilePromptCandidatePromotionEvidence `
-    -Path $candidateEvidencePath
 
 # No index entry may differ from HEAD. In particular, an old staged digest
 # must never survive while the working copy is replaced with the new digest.
@@ -267,25 +254,7 @@ if ($acceptance.ArchiveSize -ne $archiveSize -or
         [StringComparison]::Ordinal)) {
     throw 'The Windows 7 acceptance report does not identify the exact promoted release ZIP.'
 }
-if (-not [string]::Equals($candidateEvidence.Version, $Version, [StringComparison]::Ordinal) -or
-    -not [string]::Equals($candidateEvidence.Candidate, $receipt.Candidate, [StringComparison]::OrdinalIgnoreCase) -or
-    -not [string]::Equals($candidateEvidence.Archive, $archiveName, [StringComparison]::Ordinal) -or
-    -not [string]::Equals($candidateEvidence.Hash, $archiveHash, [StringComparison]::Ordinal) -or
-    $candidateEvidence.Size -ne $archiveSize -or
-    -not [string]::Equals($candidateEvidence.ManifestHash, $receipt.ManifestHash, [StringComparison]::Ordinal) -or
-    $candidateEvidence.ManifestEntryCount -ne $receipt.ManifestEntryCount -or
-    -not [string]::Equals($candidateEvidence.ReceiptHash, $receipt.Sha256, [StringComparison]::Ordinal)) {
-    throw 'The tracked candidate-promotion evidence does not match the tested promoted artifact.'
-}
 $expectedText = "$archiveHash *$archiveName`r`n"
-$sidecarBytes = [IO.File]::ReadAllBytes($sidecarPath)
-$sidecarText = $strictUtf8.GetString($sidecarBytes)
-if (-not [string]::Equals(
-    $sidecarText,
-    $expectedText,
-    [StringComparison]::Ordinal)) {
-    throw 'The generated ZIP sidecar is not the exact SHA-256 record recorded by the successful test run.'
-}
 $formalEvidenceText =
     "FilePromptAI-Release-Evidence: 1`r`n" +
     "State: FORMAL-RELEASE`r`n" +
@@ -298,7 +267,6 @@ $formalEvidenceText =
     "Package-Manifest-Name: PACKAGE-CHECKSUMS-SHA256.txt`r`n" +
     "Package-Manifest-SHA256: $($receipt.ManifestHash)`r`n" +
     "Package-Manifest-Entry-Count: $($receipt.ManifestEntryCount)`r`n" +
-    "Candidate-Promotion-Evidence-SHA256: $($candidateEvidence.Sha256)`r`n" +
     "Test-Receipt-SHA256: $($receipt.Sha256)`r`n" +
     "Windows-7-Acceptance-Report-SHA256: $($acceptance.ReportSha256)`r`n" +
     "Windows-7-Acceptance-Created-UTC: $($acceptance.CreatedUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture))`r`n" +
