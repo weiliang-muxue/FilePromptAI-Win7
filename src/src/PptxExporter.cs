@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
-using System.Security;
+using System.Globalization;
 using System.Text;
 
 namespace FilePromptAIWin7
@@ -13,6 +13,9 @@ namespace FilePromptAIWin7
     {
         private const long SlideWidth = 12192000L;
         private const long SlideHeight = 6858000L;
+        private const int MaxBodyLinesPerSlide = 10;
+        private const int MaxBodyLineWidth = 88;
+        private const int MaxTitleLineWidth = 48;
         private const string PresentationNamespace =
             "http://schemas.openxmlformats.org/presentationml/2006/main";
         private const string DrawingNamespace =
@@ -96,6 +99,8 @@ namespace FilePromptAIWin7
         {
             List<SlideModel> result = new List<SlideModel>();
             SlideModel current = new SlideModel("FilePrompt AI 输出");
+            string sectionTitle = current.Title;
+            int sectionPage = 1;
             bool titleConsumed = false;
 
             if (document.Blocks != null)
@@ -118,16 +123,33 @@ namespace FilePromptAIWin7
                             string.IsNullOrWhiteSpace(block.Text)
                                 ? "内容"
                                 : block.Text.Trim());
+                        sectionTitle = current.Title;
+                        sectionPage = 1;
                         titleConsumed = true;
                         continue;
                     }
 
-                    AppendBlockLines(current.Lines, block);
-                    if (current.Lines.Count >= 10)
+                    IList<string> blockLines = GetBlockLines(block);
+                    foreach (string blockLine in blockLines)
                     {
-                        result.Add(current);
-                        current = new SlideModel("继续");
-                        titleConsumed = true;
+                        IList<string> wrappedLines = WrapLine(
+                            blockLine,
+                            MaxBodyLineWidth);
+                        foreach (string wrappedLine in wrappedLines)
+                        {
+                            if (current.Lines.Count >= MaxBodyLinesPerSlide)
+                            {
+                                result.Add(current);
+                                sectionPage++;
+                                current = new SlideModel(
+                                    BuildContinuationTitle(
+                                        sectionTitle,
+                                        sectionPage));
+                                titleConsumed = true;
+                            }
+
+                            current.Lines.Add(wrappedLine);
+                        }
                     }
                 }
             }
@@ -149,8 +171,9 @@ namespace FilePromptAIWin7
             return result;
         }
 
-        private static void AppendBlockLines(IList<string> lines, MarkdownBlock block)
+        private static IList<string> GetBlockLines(MarkdownBlock block)
         {
+            List<string> lines = new List<string>();
             if (block.Kind == MarkdownBlockKind.List)
             {
                 if (block.Items != null)
@@ -163,7 +186,7 @@ namespace FilePromptAIWin7
                         lines.Add(prefix + NormalizeLine(block.Items[index]));
                     }
                 }
-                return;
+                return lines;
             }
 
             if (block.Kind == MarkdownBlockKind.Table && block.Table != null)
@@ -185,7 +208,7 @@ namespace FilePromptAIWin7
                     }
                     lines.Add(line.ToString());
                 }
-                return;
+                return lines;
             }
 
             string text = NormalizeLine(block.Text);
@@ -205,17 +228,210 @@ namespace FilePromptAIWin7
                     lines.Add(NormalizeLine(part));
                 }
             }
+
+            return lines;
         }
 
         private static string NormalizeLine(string value)
         {
             string text = (value ?? string.Empty).Replace('\r', ' ').Replace('\n', ' ');
-            text = text.Trim();
-            if (text.Length > 155)
+            return text.Trim();
+        }
+
+        private static IList<string> WrapLine(
+            string value,
+            int maximumWidth)
+        {
+            List<string> result = new List<string>();
+            string text = value ?? string.Empty;
+            if (text.Length == 0)
             {
-                text = text.Substring(0, 152) + "...";
+                result.Add(string.Empty);
+                return result;
             }
-            return text;
+
+            IList<string> elements = GetTextElements(text);
+            int start = 0;
+            while (start < elements.Count)
+            {
+                int width = 0;
+                int end = start;
+                while (end < elements.Count)
+                {
+                    int elementWidth = GetTextElementWidth(elements[end]);
+                    if (end > start &&
+                        width + elementWidth > maximumWidth)
+                    {
+                        break;
+                    }
+
+                    width += elementWidth;
+                    end++;
+                }
+
+                if (end < elements.Count)
+                {
+                    int minimumNaturalBreak = start +
+                        ((end - start) * 2 / 3);
+                    for (int index = end - 1;
+                        index >= minimumNaturalBreak;
+                        index--)
+                    {
+                        if (IsNaturalLineBreak(elements[index]))
+                        {
+                            end = index + 1;
+                            break;
+                        }
+                    }
+                }
+
+                result.Add(JoinTextElements(elements, start, end));
+                start = end;
+            }
+
+            return result;
+        }
+
+        private static IList<string> GetTextElements(string text)
+        {
+            List<string> result = new List<string>();
+            TextElementEnumerator enumerator =
+                StringInfo.GetTextElementEnumerator(text ?? string.Empty);
+            while (enumerator.MoveNext())
+            {
+                string element = enumerator.GetTextElement();
+                if (result.Count > 0 &&
+                    (StartsWithJoiner(element) ||
+                        EndsWithJoiner(result[result.Count - 1]) ||
+                        IsEmojiModifier(element) ||
+                        (IsRegionalIndicator(element) &&
+                            IsRegionalIndicator(
+                                result[result.Count - 1]))))
+                {
+                    result[result.Count - 1] += element;
+                }
+                else
+                {
+                    result.Add(element);
+                }
+            }
+
+            return result;
+        }
+
+        private static bool IsEmojiModifier(string value)
+        {
+            int scalar;
+            return TryGetSingleUnicodeScalar(value, out scalar) &&
+                scalar >= 0x1F3FB && scalar <= 0x1F3FF;
+        }
+
+        private static bool IsRegionalIndicator(string value)
+        {
+            int scalar;
+            return TryGetSingleUnicodeScalar(value, out scalar) &&
+                scalar >= 0x1F1E6 && scalar <= 0x1F1FF;
+        }
+
+        private static bool TryGetSingleUnicodeScalar(
+            string value,
+            out int scalar)
+        {
+            scalar = 0;
+            if (string.IsNullOrEmpty(value))
+            {
+                return false;
+            }
+
+            if (value.Length == 1 && !char.IsSurrogate(value[0]))
+            {
+                scalar = value[0];
+                return true;
+            }
+
+            if (value.Length == 2 &&
+                char.IsHighSurrogate(value[0]) &&
+                char.IsLowSurrogate(value[1]))
+            {
+                scalar = char.ConvertToUtf32(value[0], value[1]);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool StartsWithJoiner(string value)
+        {
+            return !string.IsNullOrEmpty(value) && value[0] == '\u200D';
+        }
+
+        private static bool EndsWithJoiner(string value)
+        {
+            return !string.IsNullOrEmpty(value) &&
+                value[value.Length - 1] == '\u200D';
+        }
+
+        private static int GetTextElementWidth(string element)
+        {
+            if (string.IsNullOrEmpty(element))
+            {
+                return 0;
+            }
+
+            if (element[0] == '\t')
+            {
+                return 4;
+            }
+
+            return element[0] <= 0x7F ? 1 : 2;
+        }
+
+        private static string JoinTextElements(
+            IList<string> elements,
+            int start,
+            int end)
+        {
+            StringBuilder text = new StringBuilder();
+            for (int index = start; index < end; index++)
+            {
+                text.Append(elements[index]);
+            }
+
+            return text.ToString();
+        }
+
+        private static bool IsNaturalLineBreak(string element)
+        {
+            if (string.IsNullOrEmpty(element))
+            {
+                return false;
+            }
+
+            char value = element[element.Length - 1];
+            return char.IsWhiteSpace(value) ||
+                value == ',' || value == '.' || value == ';' ||
+                value == ':' || value == '!' || value == '?' ||
+                value == ')' || value == ']' || value == '}' ||
+                value == '，' || value == '。' || value == '；' ||
+                value == '：' || value == '！' || value == '？' ||
+                value == '、' || value == '）' || value == '】';
+        }
+
+        private static string BuildContinuationTitle(
+            string title,
+            int pageNumber)
+        {
+            return (string.IsNullOrWhiteSpace(title) ? "内容" : title) +
+                "（续 " + pageNumber.ToString() + "）";
+        }
+
+        private static string WrapTitle(string title)
+        {
+            return string.Join(
+                "\n",
+                new List<string>(WrapLine(
+                    title,
+                    MaxTitleLineWidth)).ToArray());
         }
 
         private static void AddTextEntry(ZipArchive archive, string name, string value)
@@ -230,7 +446,63 @@ namespace FilePromptAIWin7
 
         private static string Xml(string value)
         {
-            return SecurityElement.Escape(value ?? string.Empty) ?? string.Empty;
+            string text = value ?? string.Empty;
+            StringBuilder result = new StringBuilder(text.Length + 16);
+            for (int index = 0; index < text.Length; index++)
+            {
+                char current = text[index];
+                if (char.IsHighSurrogate(current))
+                {
+                    if (index + 1 < text.Length &&
+                        char.IsLowSurrogate(text[index + 1]))
+                    {
+                        result.Append(current);
+                        result.Append(text[++index]);
+                    }
+                    else
+                    {
+                        result.Append('\uFFFD');
+                    }
+
+                    continue;
+                }
+
+                if (char.IsLowSurrogate(current) ||
+                    current == '\uFFFE' ||
+                    current == '\uFFFF' ||
+                    (current < '\u0020' &&
+                        current != '\t' &&
+                        current != '\r' &&
+                        current != '\n'))
+                {
+                    result.Append('\uFFFD');
+                    continue;
+                }
+
+                switch (current)
+                {
+                    case '&':
+                        result.Append("&amp;");
+                        break;
+                    case '<':
+                        result.Append("&lt;");
+                        break;
+                    case '>':
+                        result.Append("&gt;");
+                        break;
+                    case '"':
+                        result.Append("&quot;");
+                        break;
+                    case '\'':
+                        result.Append("&apos;");
+                        break;
+                    default:
+                        result.Append(current);
+                        break;
+                }
+            }
+
+            return result.ToString();
         }
 
         private static string BuildContentTypes(int count)
@@ -297,7 +569,7 @@ namespace FilePromptAIWin7
         private static string BuildSlideMaster()
         {
             return "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
-                "<p:sldMaster xmlns:a=\"" + DrawingNamespace + "\" xmlns:r=\"" + RelationshipsNamespace + "\" xmlns:p=\"" + PresentationNamespace + "\"><p:cSld name=\"FilePrompt AI\"><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:sldLayoutIdLst><p:sldLayoutId id=\"1\" r:id=\"rId1\"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>";
+                "<p:sldMaster xmlns:a=\"" + DrawingNamespace + "\" xmlns:r=\"" + RelationshipsNamespace + "\" xmlns:p=\"" + PresentationNamespace + "\"><p:cSld name=\"FilePrompt AI\"><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:sldLayoutIdLst><p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>";
         }
 
         private static string BuildSlideMasterRelationships()
@@ -330,16 +602,21 @@ namespace FilePromptAIWin7
             xml.Append("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>");
             xml.Append("<p:sld xmlns:a=\"").Append(DrawingNamespace).Append("\" xmlns:r=\"").Append(RelationshipsNamespace).Append("\" xmlns:p=\"").Append(PresentationNamespace).Append("\"><p:cSld><p:spTree>");
             xml.Append("<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>");
-            AppendTextShape(xml, 2, "标题", 500000, 300000, 11200000, 900000, slide.Title, 30, "1F2937", true);
-            AppendTextShape(xml, 3, "正文", 700000, 1350000, 10800000, 4700000, string.Join("\n", slide.Lines), 18, "263238", false);
-            AppendTextShape(xml, 4, "页码", 10500000, 6250000, 1200000, 350000, number.ToString(), 11, "64748B", false);
+            AppendTextShape(xml, 2, "标题", 500000, 240000, 11200000, 1150000, WrapTitle(slide.Title), 30, "1F2937", true, true);
+            AppendTextShape(xml, 3, "正文", 700000, 1550000, 10800000, 4450000, string.Join("\n", slide.Lines), 18, "263238", false, false);
+            AppendTextShape(xml, 4, "页码", 10500000, 6250000, 1200000, 350000, number.ToString(), 11, "64748B", false, false);
             xml.Append("</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>");
             return xml.ToString();
         }
 
-        private static void AppendTextShape(StringBuilder xml, int id, string name, long x, long y, long cx, long cy, string text, int size, string color, bool bold)
+        private static void AppendTextShape(StringBuilder xml, int id, string name, long x, long y, long cx, long cy, string text, int size, string color, bool bold, bool autoFit)
         {
-            xml.Append("<p:sp><p:nvSpPr><p:cNvPr id=\"").Append(id.ToString()).Append("\" name=\"").Append(Xml(name)).Append("\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"").Append(x.ToString()).Append("\" y=\"").Append(y.ToString()).Append("\"/><a:ext cx=\"").Append(cx.ToString()).Append("\" cy=\"").Append(cy.ToString()).Append("\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/>");
+            xml.Append("<p:sp><p:nvSpPr><p:cNvPr id=\"").Append(id.ToString()).Append("\" name=\"").Append(Xml(name)).Append("\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"").Append(x.ToString()).Append("\" y=\"").Append(y.ToString()).Append("\"/><a:ext cx=\"").Append(cx.ToString()).Append("\" cy=\"").Append(cy.ToString()).Append("\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" anchor=\"t\">");
+            if (autoFit)
+            {
+                xml.Append("<a:normAutofit/>");
+            }
+            xml.Append("</a:bodyPr><a:lstStyle/>");
             string[] paragraphs = (text ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n').Split(new[] { '\n' }, StringSplitOptions.None);
             foreach (string paragraph in paragraphs)
             {
@@ -348,7 +625,7 @@ namespace FilePromptAIWin7
                 {
                     xml.Append(" b=\"1\"");
                 }
-                xml.Append("><a:solidFill><a:srgbClr val=\"").Append(color).Append("\"/></a:solidFill><a:latin typeface=\"Microsoft YaHei\"/><a:ea typeface=\"Microsoft YaHei\"/></a:rPr><a:t>").Append(Xml(paragraph)).Append("</a:t></a:r><a:endParaRPr lang=\"zh-CN\"/></a:p>");
+                xml.Append("><a:solidFill><a:srgbClr val=\"").Append(color).Append("\"/></a:solidFill><a:latin typeface=\"Microsoft YaHei\"/><a:ea typeface=\"Microsoft YaHei\"/></a:rPr><a:t xml:space=\"preserve\">").Append(Xml(paragraph)).Append("</a:t></a:r><a:endParaRPr lang=\"zh-CN\"/></a:p>");
             }
             xml.Append("</p:txBody></p:sp>");
         }
@@ -356,7 +633,37 @@ namespace FilePromptAIWin7
         private static string BuildTheme()
         {
             return "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
-                "<a:theme xmlns:a=\"" + DrawingNamespace + "\" name=\"FilePrompt AI\"><a:themeElements><a:clrScheme name=\"FilePrompt AI\"><a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"1F2937\"/></a:dk2><a:lt2><a:srgbClr val=\"F8FAFC\"/></a:lt2><a:accent1><a:srgbClr val=\"0F766E\"/></a:accent1><a:accent2><a:srgbClr val=\"2563EB\"/></a:accent2><a:accent3><a:srgbClr val=\"D97706\"/></a:accent3><a:accent4><a:srgbClr val=\"DC2626\"/></a:accent4><a:accent5><a:srgbClr val=\"7C3AED\"/></a:accent5><a:accent6><a:srgbClr val=\"0891B2\"/></a:accent6><a:hlink><a:srgbClr val=\"0563C1\"/></a:hlink><a:folHlink><a:srgbClr val=\"954F72\"/></a:folHlink></a:clrScheme><a:fontScheme name=\"FilePrompt AI\"><a:majorFont><a:latin typeface=\"Microsoft YaHei\"/></a:majorFont><a:minorFont><a:latin typeface=\"Microsoft YaHei\"/></a:minorFont></a:fontScheme><a:fmtScheme name=\"FilePrompt AI\"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>";
+                "<a:theme xmlns:a=\"" + DrawingNamespace + "\" name=\"FilePrompt AI\"><a:themeElements><a:clrScheme name=\"FilePrompt AI\"><a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"1F2937\"/></a:dk2><a:lt2><a:srgbClr val=\"F8FAFC\"/></a:lt2><a:accent1><a:srgbClr val=\"0F766E\"/></a:accent1><a:accent2><a:srgbClr val=\"2563EB\"/></a:accent2><a:accent3><a:srgbClr val=\"D97706\"/></a:accent3><a:accent4><a:srgbClr val=\"DC2626\"/></a:accent4><a:accent5><a:srgbClr val=\"7C3AED\"/></a:accent5><a:accent6><a:srgbClr val=\"0891B2\"/></a:accent6><a:hlink><a:srgbClr val=\"0563C1\"/></a:hlink><a:folHlink><a:srgbClr val=\"954F72\"/></a:folHlink></a:clrScheme>" +
+                "<a:fontScheme name=\"FilePrompt AI\"><a:majorFont><a:latin typeface=\"Microsoft YaHei\"/><a:ea typeface=\"Microsoft YaHei\"/><a:cs typeface=\"Microsoft YaHei\"/></a:majorFont><a:minorFont><a:latin typeface=\"Microsoft YaHei\"/><a:ea typeface=\"Microsoft YaHei\"/><a:cs typeface=\"Microsoft YaHei\"/></a:minorFont></a:fontScheme>" +
+                "<a:fmtScheme name=\"FilePrompt AI\">" +
+                "<a:fillStyleLst>" +
+                BuildSolidThemeFill() +
+                BuildSolidThemeFill() +
+                BuildSolidThemeFill() +
+                "</a:fillStyleLst>" +
+                "<a:lnStyleLst>" +
+                BuildThemeLine("6350") +
+                BuildThemeLine("12700") +
+                BuildThemeLine("19050") +
+                "</a:lnStyleLst>" +
+                "<a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>" +
+                "<a:bgFillStyleLst>" +
+                BuildSolidThemeFill() +
+                BuildSolidThemeFill() +
+                BuildSolidThemeFill() +
+                "</a:bgFillStyleLst>" +
+                "</a:fmtScheme></a:themeElements></a:theme>";
+        }
+
+        private static string BuildSolidThemeFill()
+        {
+            return "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>";
+        }
+
+        private static string BuildThemeLine(string width)
+        {
+            return "<a:ln w=\"" + width +
+                "\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:prstDash val=\"solid\"/><a:miter lim=\"800000\"/></a:ln>";
         }
 
         private static string BuildCoreProperties()

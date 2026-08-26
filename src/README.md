@@ -70,8 +70,8 @@ Windows 7 PASS XML 和 sidecar 全部通过封存与标签后复核时，该 ZIP
 - 当前轮的文字描述、技能提示和提取文件正文也共同遵守 48,000 字符预算；
   文件正文超出时保留开头并加入明确截断标记，避免模型返回上下文超限错误。
 - 可搜索会话标题和近期内容；会话切换时保留当前运行期内尚未发送的草稿。
-- 可在“设置”→“模型连接”中独立测试 URL、Key、模型连接，不写入会话；
-  验证失败时会定位到对应输入项。
+- 可在“设置”→“模型连接”中独立测试 URL、Key、模型连接或主动获取模型列表，
+  不写入会话，也不会提前写入 `settings.xml`；验证失败时会定位到对应输入项。
 - “设置”窗口按一次打开/保存形成事务：在其中应用模型配置只更新待保存值，只有
   保存并关闭父窗口才写入 `settings.xml`；取消会恢复打开前的连接、生成参数和快捷键。
   模型配置列表本身仍由“模型配置”窗口单独保存。
@@ -99,7 +99,8 @@ Windows 7 PASS XML 和 sidecar 全部通过封存与标签后复核时，该 ZIP
   无法安全读取，程序不会把它标记为损坏或尝试移动，而是进入粘性只读保护且绝不覆盖原文件。
 - 关闭程序时若仍有未发送文字、已添加资料或运行中的任务，会默认阻止误退出并要求确认。
 - 对异常 Office XML、极端 Excel 列号和 CSV 公式内容进行安全限制与转义。
-- 完整离线包包含独立卸载器；左侧“设置”→“维护”也可启动卸载。
+- 完整离线包包含根目录卸载器；完整解压后，可直接运行该卸载器，也可通过左侧
+  “设置”→“维护”→“卸载程序...”启动卸载。
 
 ## 固定接口格式
 
@@ -227,8 +228,8 @@ certutil -hashfile .\FilePromptAI-Win7-Full-v1.17.zip SHA256
 来自同一下载位置，不能独立证明 ZIP 未被替换。`RELEASE-SHA256.txt` 刻意不放进
 ZIP，避免摘要自引用；它也为包内 `Verify-FilePromptAI.exe` 提供外部身份锚点。
 
-校验成功后完整解压并运行
-`Start-FilePromptAI.exe`，启动器会检测 .NET Framework 4.8；缺少时会调用包内
+校验成功后把 ZIP 完整解压到同一个目录，不要在压缩包内运行，也不要只复制其中某个
+EXE；然后从解压根目录运行 `Start-FilePromptAI.exe`。启动器会检测 .NET Framework 4.8；缺少时会调用包内
 经过微软数字签名的官方完整离线安装程序。安装过程不下载文件，也不需要访问
 互联网。不要只复制 `app` 目录中的 EXE。
 
@@ -241,10 +242,17 @@ XLS/XLSX 和图片处理所需的 33 个托管 DLL；安装和启动不会联网
 Chat Completions 兼容端点。用户主动启用的 stdio MCP 及其运行环境不属于客户端
 运行 ZIP，仍需按“离线技能与 MCP”一节由管理员另行准备。
 
-卸载时运行 `Uninstall-FilePromptAI.exe`，或在左侧“设置”→“维护”中选择
-“卸载程序...”。卸载器只删除校验清单内且内容未被修改的程序文件，
-不会递归删除发布目录中的额外文件。用户配置和会话默认保留，只有明确勾选并
-再次确认后才删除。
+卸载时运行完整解压目录根部的 `Uninstall-FilePromptAI.exe`，或依次选择左侧
+“设置”→“维护”→“卸载程序...”。卸载器会先锁定并校验清单列出的全部程序文件；文件缺失、
+被修改、被占用或路径身份异常等预检失败会在删除前停止，不删除程序文件或用户数据。
+缺少 `PACKAGE-CHECKSUMS-SHA256.txt` 时，错误窗口会列出实际检查目录；应重新完整解压
+ZIP，不能只复制卸载器。验证通过后也不会递归删除发布目录中的额外文件。用户配置和
+会话默认保留，只有明确勾选并再次确认后才删除。若 Windows 文件系统在提交删除或
+撤销删除标记时发生极少见异常，卸载器会明确报告可能的部分删除，尽量保留根卸载器并
+写入恢复标记；再次运行即可清理剩余文件，恢复信息损坏时则重新完整解压原 ZIP 后重试。
+删除用户数据前会先锁定和复核整棵数据目录；任一文件占用、路径身份或重解析点检查
+失败时不会先删掉其他文件。若受控测试进程设置了 `FILEPROMPTAI_DATA_ROOT` 且它不等于
+默认目录，界面和后台 worker 都会拒绝删除用户数据，并保留默认目录与覆盖目录。
 
 正常运行时，程序数据固定保存在当前用户的
 `%LocalAppData%\FilePromptAI-Win7`，不会搜索、读取或迁移其他数据目录。
@@ -270,8 +278,9 @@ Chat Completions 兼容端点。用户主动启用的 stdio MCP 及其运行环�
 运行前必须先按上一节判断包状态：正式包从可信 Git 标签取得固定摘要，其他包从可信
 候选提交取得独立候选摘要。包内清单不能单独证明验收程序
 自身未被替换。
-它会把原始 ZIP 身份与解压载荷进行比对，校验精确包清单，使用独立临时数据目录启动
-真实客户端，并通过 127.0.0.1
+它会把原始 ZIP 身份与解压载荷进行比对，校验精确包清单，再从解压根目录运行
+`Start-FilePromptAI.exe`，由启动器启动真实 `app\FilePromptAI.exe`。随后使用独立临时
+数据目录，并通过 127.0.0.1
 回环服务验证无 API Key 的主动 `/models` 发现及流式 Chat Completions；TXT、PDF、
 DOCX、PNG 解析和 DOCX、PDF、PPTX、XLSX、CSV、XMind 导出也直接调用包内真实程序。
 XML schema 2 报告和同名 `.sha256.txt` 写到 `%TEMP%`；如果该目录位于发布包内，则
@@ -320,7 +329,8 @@ PASS。
 先提交待发布源码为 `C`，确认整个工作树和索引均为空，再以发布候选模式运行完整测试。
 只有全部测试和离线包验证成功后，脚本才会在被 Git 忽略的
 `tests\build-artifacts\release` 中写入 schema 2 receipt，把 `C`、最终 ZIP 的名称、
-SHA-256、大小，以及 staging/ZIP 中同一份包清单的原始字节 SHA-256 和条目数绑定：
+SHA-256，以及 staging/ZIP 中同一份包清单的原始字节 SHA-256 和条目数绑定。ZIP 大小
+由晋升脚本从这份 SHA-256 已绑定的原字节文件读取并写入候选证据：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1 `
@@ -335,6 +345,12 @@ powershell -ExecutionPolicy Bypass -File .\promote-release-candidate.ps1 `
 ```
 
 脚本逐字节复制 receipt 绑定的 ZIP 和 sidecar 到 `exe`，再生成候选说明与候选证据。
+`C` 必须已经删除 `exe` 中所有旧版本 ZIP、sidecar 和候选证据；晋升脚本会在写入前
+拒绝任何旧版或未授权条目，并在写入后复核目录精确只含 `.gitattributes` 和当前四项，
+不会把额外删除混入 `P`。四项写入后，脚本还会从最终 `exe` ZIP 运行固定的完整安装
+用户旅程；只有最终路径的清单、启动器、两轮上下文、路径附件、导出、重启恢复和
+应用内卸载检查全部通过，晋升事务才会提交。该旅程失败时四项交付文件会恢复为晋升前
+的原字节状态，不能留下“源码候选已测试但 `exe` 仍不可用”的半成品。
 随后创建 `C` 的直接子提交 `P`；`P` 必须只修改以下四个路径，不能夹带源码或正式
 发布结论：
 
@@ -406,6 +422,15 @@ powershell -ExecutionPolicy Bypass `
 powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1
 ```
 
+套件会安全解压本次刚生成的 ZIP，逐项核对精确文件集合和每个 SHA-256，运行根目录
+启动器与卸载器自检；随后从解压根目录运行 `Start-FilePromptAI.exe`，由它启动真实
+`app\FilePromptAI.exe`，再验证主窗口响应、
+单实例门禁、正常退出和关闭持久化，再通过真实 WinForms 消息循环深测设置保存、
+Enter/按钮发送、两轮上下文、路径附件、导出入口，以及应用内卸载器路径和
+`--from-app` PID。它不会使用 `exe` 目录中先前晋升的 ZIP 代替本次构建产物。
+晋升脚本会在事务提交前另行对最终 `exe` 路径重复这条真实用户旅程；这两个门禁分别
+保证新构建产物本身可用，以及用户实际取得的晋升字节可用。
+
 界面截图测试单独运行 `tests\CaptureUiSmokeTest.ps1`，支持正常窗口和最小窗口。
 截图进程会声明 system-DPI-aware，使窗口边界和截图使用同一物理坐标空间；该脚本
 不提供或声称 125% 实机验收。发布前在 1920×1080、100% 缩放的主屏上运行
@@ -414,3 +439,14 @@ powershell -ExecutionPolicy Bypass -File .\tests\RunAllSmokeTests.ps1
 `tests\CaptureExtensionsUiSmokeTest.ps1 -Mode Settings`、`-Mode Skills` 和
 `-Mode Mcp` 留存截图；发布验收时三条命令均加 `-FullHd100`，脚本同样会拒绝
 非 1920×1080 或非 96 DPI 的环境。
+
+构建机发布前使用仓库内固定脚本执行 Microsoft Defender 自定义扫描，避免把临时长
+`powershell -Command` 或 `pwsh -Command` 审计命令误判成 ClickFix。扫描脚本不清除历史
+检测、不设置排除项，只比较本次扫描前后的 DetectionID；任一新增检测都会失败：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\ScanReleaseWithDefender.ps1 `
+    -ScanPath '..\exe', '..\src', 'D:\已解压候选包'
+```
+
+发布记录必须同时写明 Defender 签名版本、扫描路径、历史检测数量和新增检测数量。

@@ -53,6 +53,8 @@ namespace FilePromptAIWin7
 
         public Button SaveButton { get; private set; }
 
+        public Button CancelActionButton { get; private set; }
+
         public ComboBox SendShortcutComboBox { get; private set; }
 
         public Label ContextSummaryLabel { get; private set; }
@@ -122,10 +124,10 @@ namespace FilePromptAIWin7
             SaveButton.BackColor = UiTheme.Accent;
             SaveButton.ForeColor = Color.White;
             SaveButton.FlatAppearance.BorderSize = 0;
-            Button cancelButton = CreateButton("取消", 82);
-            cancelButton.DialogResult = DialogResult.Cancel;
+            CancelActionButton = CreateButton("取消", 82);
+            CancelActionButton.DialogResult = DialogResult.Cancel;
             actions.Controls.Add(SaveButton);
-            actions.Controls.Add(cancelButton);
+            actions.Controls.Add(CancelActionButton);
 
             root.Controls.Add(body, 0, 0);
             root.Controls.Add(validationLabel, 0, 1);
@@ -133,7 +135,7 @@ namespace FilePromptAIWin7
             Controls.Add(root);
 
             AcceptButton = SaveButton;
-            CancelButton = cancelButton;
+            CancelButton = CancelActionButton;
             Shown += delegate { FocusPreparedControl(); };
             SetSendShortcutMode("Both");
             SelectPage(0);
@@ -265,6 +267,21 @@ namespace FilePromptAIWin7
                 ? reason ?? string.Empty
                 : string.Empty;
             SetValidationMessage(string.Empty);
+        }
+
+        public void SetConnectionActionInProgress(bool inProgress)
+        {
+            if (SaveButton != null)
+            {
+                SaveButton.Enabled = !inProgress &&
+                    string.IsNullOrWhiteSpace(
+                        settingsWriteProtectionMessage);
+            }
+
+            if (CancelActionButton != null)
+            {
+                CancelActionButton.Enabled = !inProgress;
+            }
         }
 
         private void SetValidationMessage(string value)

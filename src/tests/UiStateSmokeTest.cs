@@ -47,6 +47,23 @@ internal static class UiStateSmokeTest
         IntPtr wordParameter,
         IntPtr longParameter);
 
+    private delegate bool EnumWindowCallback(
+        IntPtr windowHandle,
+        IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumChildWindows(
+        IntPtr parentHandle,
+        EnumWindowCallback callback,
+        IntPtr parameter);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(
+        IntPtr windowHandle,
+        StringBuilder value,
+        int maximum);
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -56,6 +73,9 @@ internal static class UiStateSmokeTest
         string previousRoot = Environment.GetEnvironmentVariable(
             "FILEPROMPTAI_DATA_ROOT");
         object form = null;
+        TestApplicationContext applicationContext = null;
+        Exception testFailure = null;
+        bool testRunCompleted = false;
         try
         {
             if (args.Length != 1)
@@ -86,48 +106,39 @@ internal static class UiStateSmokeTest
                 "FilePromptAIWin7.MainForm",
                 true);
             form = Activator.CreateInstance(formType, true);
+            Form window = (Form)form;
+            applicationContext = new TestApplicationContext();
+            EventHandler runTests = null;
+            runTests = delegate
+            {
+                Application.Idle -= runTests;
+                try
+                {
+                    RunTests(application, formType, form, dataRoot);
+                }
+                catch (Exception exception)
+                {
+                    testFailure = Unwrap(exception);
+                }
+                finally
+                {
+                    testRunCompleted = true;
+                    applicationContext.Stop();
+                }
+            };
+            window.Show();
+            Application.Idle += runTests;
+            Application.Run(applicationContext);
+            if (!testRunCompleted)
+            {
+                throw new InvalidOperationException(
+                    "The WinForms UI message loop ended before tests ran.");
+            }
+            if (testFailure != null)
+            {
+                throw testFailure;
+            }
 
-            TestAnonymousConnectionSettings(formType, form);
-            TestWorkspaceLayoutAndIncrementalTranscript(formType, form);
-            TestCurrentTurnTextBudget(formType, form);
-            TestBinaryRetentionBudget(formType, form);
-            TestFileDropRegistration(formType, form);
-            ThrowIfUiThreadException();
-            TestMainKeyboardShortcuts(formType, form);
-            TestSendShortcutConfig(formType, form);
-            TestPromptActions(formType, form);
-            TestDragBusyGuard(formType, form, dataRoot);
-            TestPathInput(formType, form, dataRoot);
-            ThrowIfUiThreadException();
-            TestFailedFilePathRecovery(formType, form, dataRoot);
-            ThrowIfUiThreadException();
-            TestPathResolutionBoundaries(formType, form, dataRoot);
-            TestPathResolutionSingleFlight(formType, form, dataRoot);
-            ThrowIfUiThreadException();
-            TestWholeConversationExport(formType, form);
-            TestSearchCharacterBudget(application, formType, form);
-            TestExtensionsDialog(application, formType, form);
-            TestSettingsDialogLayout(application);
-            TestModelProfilesDialog(application, formType, form);
-            TestSettingsProfileTransaction(
-                application,
-                formType,
-                form,
-                dataRoot);
-            TestRegenerationAndRetryState(application, formType, form);
-            TestGenerationRetryWorkflows(application, formType, form);
-            TestRetryInvalidation(application, formType, form, dataRoot);
-            TestUninstallerEntry(formType, form);
-            TestMcpApprovalArguments(application, formType, form);
-            TestStdioStartupApproval(application, formType, form);
-            TestRejectedStdioStartupCancelsGeneration(
-                application,
-                formType,
-                form);
-            TestSessionManagement(formType, form);
-            TestDeleteSessionDraftTransaction(formType, form);
-            TestExitConfirmationState(formType, form);
-            ThrowIfUiThreadException();
             Console.WriteLine("PASS | UI state hardening");
             return 0;
         }
@@ -2459,6 +2470,157 @@ internal static class UiStateSmokeTest
         finally
         {
             readOnlyDialog.Dispose();
+        }
+    }
+
+    private static void RunTests(
+        Assembly application,
+        Type formType,
+        object form,
+        string dataRoot)
+    {
+        AssertTrue(
+            Application.MessageLoop &&
+                Thread.CurrentThread.GetApartmentState() ==
+                    ApartmentState.STA,
+            "UI tests run inside the production-style STA message loop");
+        TestDefaultSettingsPersistence(application, formType, dataRoot);
+        TestAnonymousConnectionSettings(formType, form);
+        TestWorkspaceLayoutAndIncrementalTranscript(formType, form);
+        TestCurrentTurnTextBudget(formType, form);
+        TestBinaryRetentionBudget(formType, form);
+        TestFileDropRegistration(formType, form);
+        ThrowIfUiThreadException();
+        TestMainKeyboardShortcuts(formType, form);
+        TestSendShortcutConfig(formType, form);
+        TestPromptActions(formType, form);
+        TestDragBusyGuard(formType, form, dataRoot);
+        TestPathInput(formType, form, dataRoot);
+        ThrowIfUiThreadException();
+        TestFailedFilePathRecovery(formType, form, dataRoot);
+        ThrowIfUiThreadException();
+        TestPathResolutionBoundaries(formType, form, dataRoot);
+        TestPathResolutionSingleFlight(formType, form, dataRoot);
+        ThrowIfUiThreadException();
+        TestWholeConversationExport(formType, form);
+        TestSearchCharacterBudget(application, formType, form);
+        TestExtensionsDialog(application, formType, form);
+        TestSettingsDialogLayout(application);
+        TestModelProfilesDialog(application, formType, form);
+        TestSettingsProfileTransaction(
+            application,
+            formType,
+            form,
+            dataRoot);
+        TestConnectionActionsRemainTransactional(
+            application,
+            formType,
+            form);
+        TestSettingsRollbackOnOwnerClose(application, formType);
+        TestRegenerationAndRetryState(application, formType, form);
+        TestGenerationRetryWorkflows(application, formType, form);
+        TestRetryInvalidation(application, formType, form, dataRoot);
+        TestUninstallerEntry(formType, form);
+        TestMcpApprovalArguments(application, formType, form);
+        TestStdioStartupApproval(application, formType, form);
+        TestRejectedStdioStartupCancelsGeneration(
+            application,
+            formType,
+            form);
+        TestSessionManagement(formType, form);
+        TestDeleteSessionDraftTransaction(formType, form);
+        TestExitConfirmationState(formType, form);
+        ThrowIfUiThreadException();
+    }
+
+    private static void TestDefaultSettingsPersistence(
+        Assembly application,
+        Type formType,
+        string dataRoot)
+    {
+        string previousRoot = Environment.GetEnvironmentVariable(
+            "FILEPROMPTAI_DATA_ROOT");
+        string persistenceRoot = Path.Combine(
+            dataRoot,
+            "default-settings-persistence");
+        string settingsPath = Path.Combine(persistenceRoot, "settings.xml");
+        Form blank = null;
+        Form changed = null;
+        try
+        {
+            Environment.SetEnvironmentVariable(
+                "FILEPROMPTAI_DATA_ROOT",
+                persistenceRoot);
+            blank = Activator.CreateInstance(formType, true) as Form;
+            AssertTrue(blank != null, "Blank settings close creates a real MainForm");
+            blank.Show();
+            Application.DoEvents();
+            SetField(formType, blank, "exitConfirmationGranted", true);
+            blank.Close();
+            Application.DoEvents();
+            AssertTrue(
+                blank.IsDisposed && !File.Exists(settingsPath),
+                "Blank first launch and normal close do not persist default settings");
+
+            changed = Activator.CreateInstance(formType, true) as Form;
+            AssertTrue(changed != null, "Changed settings close creates a real MainForm");
+            TextBox systemPrompt = GetField(
+                formType,
+                changed,
+                "systemPromptTextBox") as TextBox;
+            AssertTrue(
+                systemPrompt != null,
+                "Changed settings close uses the real system prompt control");
+            systemPrompt.Text = "persist this real settings change";
+            changed.Show();
+            Application.DoEvents();
+            SetField(formType, changed, "exitConfirmationGranted", true);
+            changed.Close();
+            Application.DoEvents();
+            AssertTrue(
+                changed.IsDisposed && File.Exists(settingsPath),
+                "A real settings change is persisted during normal close");
+
+            Type settingsType = application.GetType(
+                "FilePromptAIWin7.AppSettings",
+                true);
+            object reloaded = settingsType.GetMethod(
+                "Load",
+                BindingFlags.Static | BindingFlags.Public).Invoke(null, null);
+            AssertTrue(
+                (string)GetProperty(reloaded, "SystemPrompt") ==
+                    "persist this real settings change",
+                "The persisted settings change survives a reload");
+        }
+        finally
+        {
+            if (blank != null && !blank.IsDisposed)
+            {
+                SetField(formType, blank, "exitConfirmationGranted", true);
+                blank.Close();
+                blank.Dispose();
+            }
+            if (changed != null && !changed.IsDisposed)
+            {
+                SetField(formType, changed, "exitConfirmationGranted", true);
+                changed.Close();
+                changed.Dispose();
+            }
+            Environment.SetEnvironmentVariable(
+                "FILEPROMPTAI_DATA_ROOT",
+                previousRoot);
+            if (Directory.Exists(persistenceRoot))
+            {
+                Directory.Delete(persistenceRoot, true);
+            }
+        }
+    }
+
+    private sealed class TestApplicationContext : ApplicationContext
+    {
+        public void Stop()
+        {
+            ExitThread();
         }
     }
 
@@ -4922,6 +5084,35 @@ internal static class UiStateSmokeTest
         return timer;
     }
 
+    private static string ReadDialogText(string title)
+    {
+        IntPtr dialog = FindWindow(null, title);
+        if (dialog == IntPtr.Zero)
+        {
+            return string.Empty;
+        }
+
+        List<string> values = new List<string>();
+        EnumChildWindows(
+            dialog,
+            delegate(IntPtr child, IntPtr parameter)
+            {
+                StringBuilder value = new StringBuilder(2048);
+                if (GetWindowText(child, value, value.Capacity) > 0)
+                {
+                    string text = value.ToString().Trim();
+                    if (text.Length > 0 && !values.Contains(text))
+                    {
+                        values.Add(text);
+                    }
+                }
+
+                return true;
+            },
+            IntPtr.Zero);
+        return string.Join(" | ", values.ToArray());
+    }
+
     private static int CountSessionMessagesWithContent(
         IList messages,
         string content)
@@ -5036,6 +5227,27 @@ internal static class UiStateSmokeTest
                     "data: [DONE]\r\n\r\n",
                 false,
                 null);
+        }
+
+        public static TcpTestServer StartModels(params string[] models)
+        {
+            StringBuilder body = new StringBuilder();
+            body.Append("{\"data\":[");
+            string[] values = models ?? new string[0];
+            for (int index = 0; index < values.Length; index++)
+            {
+                if (index > 0)
+                {
+                    body.Append(',');
+                }
+
+                body.Append("{\"id\":\"");
+                body.Append(JsonEscape(values[index] ?? string.Empty));
+                body.Append("\"}");
+            }
+
+            body.Append("]}");
+            return new TcpTestServer(200, body.ToString(), false, null);
         }
 
         public static TcpTestServer StartError(
@@ -5561,6 +5773,646 @@ internal static class UiStateSmokeTest
                 File.Delete(settingsPath);
             }
             InvokePrivate(formType, form, "LoadSavedSettings");
+        }
+    }
+
+    private static void TestConnectionActionsRemainTransactional(
+        Assembly application,
+        Type formType,
+        object form)
+    {
+        Type settingsType = application.GetType(
+            "FilePromptAIWin7.AppSettings",
+            true);
+        string settingsPath = (string)settingsType.GetProperty(
+            "SettingsPath",
+            BindingFlags.Static | BindingFlags.Public).GetValue(null, null);
+        bool originalFileExists = File.Exists(settingsPath);
+        byte[] originalBytes = originalFileExists
+            ? File.ReadAllBytes(settingsPath)
+            : null;
+        TextBox endpoint = (TextBox)GetField(
+            formType,
+            form,
+            "endpointTextBox");
+        TextBox apiKey = (TextBox)GetField(
+            formType,
+            form,
+            "apiKeyTextBox");
+        ComboBox model = (ComboBox)GetField(
+            formType,
+            form,
+            "modelTextBox");
+        Button testConnection = (Button)GetField(
+            formType,
+            form,
+            "testConnectionButton");
+        Form settingsDialog = (Form)GetField(
+            formType,
+            form,
+            "settingsDialog");
+        Button fetchModels = (Button)settingsDialog.GetType().GetProperty(
+            "FetchModelsButton",
+            BindingFlags.Instance | BindingFlags.Public).GetValue(
+                settingsDialog,
+                null);
+        ToolStripStatusLabel status = (ToolStripStatusLabel)GetField(
+            formType,
+            form,
+            "statusLabel");
+        const string baselineEndpoint =
+            "http://127.0.0.1:18883/v1/chat/completions";
+        const string baselineKey = "transaction-action-baseline-key";
+        const string baselineModel = "transaction-action-baseline";
+        const string baselineRetrySession = "transaction-retry-session";
+        const string baselineRetryPrompt = "transaction retry prompt";
+        try
+        {
+            endpoint.Text = baselineEndpoint;
+            apiKey.Text = baselineKey;
+            model.Text = baselineModel;
+            AssertTrue(
+                (bool)InvokePrivate(formType, form, "SaveSettings"),
+                "Connection action transaction fixture saves its baseline");
+            SetField(formType, form, "retryAvailable", true);
+            SetField(formType, form, "retryRegeneration", true);
+            SetField(
+                formType,
+                form,
+                "retrySessionId",
+                baselineRetrySession);
+            SetField(
+                formType,
+                form,
+                "retryPromptText",
+                baselineRetryPrompt);
+            InvokePrivate(formType, form, "UpdateRetryButton");
+            byte[] baselineBytes = File.ReadAllBytes(settingsPath);
+            string baselineStatus = status.Text;
+            List<string> baselineModelItems = new List<string>();
+            foreach (object item in model.Items)
+            {
+                baselineModelItems.Add(
+                    item == null ? string.Empty : item.ToString());
+            }
+            bool modalActionsCompleted = false;
+            bool modelErrorShown = false;
+            string modelErrorText = string.Empty;
+            Exception modalActionFailure = null;
+            using (TcpTestServer connectionServer =
+                TcpTestServer.StartSuccess("connection-test-ok"))
+            using (TcpTestServer modelServer = TcpTestServer.StartModels(
+                "temporary-model-a",
+                "temporary-model-b"))
+            using (System.Windows.Forms.Timer failureCloser =
+                CreateMessageBoxCloser(
+                    "获取模型失败",
+                    delegate
+                    {
+                        modelErrorShown = true;
+                        modelErrorText = ReadDialogText("获取模型失败");
+                    }))
+            using (System.Windows.Forms.Timer timeoutCloser =
+                CreateMessageBoxCloser(
+                    "获取模型超时",
+                    delegate
+                    {
+                        modelErrorShown = true;
+                        modelErrorText = ReadDialogText("获取模型超时");
+                    }))
+            using (System.Windows.Forms.Timer actionTimer =
+                new System.Windows.Forms.Timer())
+            {
+                actionTimer.Interval = 50;
+                actionTimer.Tick += delegate
+                {
+                    actionTimer.Stop();
+                    try
+                    {
+                        AssertTrue(
+                            settingsDialog.Visible &&
+                                (bool)GetField(
+                                    formType,
+                                    form,
+                                    "settingsDialogTransactionActive"),
+                            "Connection actions run inside the real Settings transaction");
+
+                        endpoint.Text = connectionServer.Url;
+                        apiKey.Text = "temporary-test-key";
+                        model.Text = "temporary-test-model";
+                        AssertTrue(
+                            testConnection.Visible &&
+                                testConnection.Enabled,
+                            "Pending connection test is visible and clickable");
+                        testConnection.PerformClick();
+                        PumpUntil(
+                            delegate
+                            {
+                                return connectionServer.RequestReceived;
+                            },
+                            10000,
+                            "Transactional connection request begins");
+                        Button saveButton = GetProperty(
+                            settingsDialog,
+                            "SaveButton") as Button;
+                        Button cancelActionButton = GetProperty(
+                            settingsDialog,
+                            "CancelActionButton") as Button;
+                        AssertTrue(
+                            saveButton != null && !saveButton.Enabled &&
+                                cancelActionButton != null &&
+                                !cancelActionButton.Enabled,
+                            "Connection action blocks Save and Cancel while active");
+                        FormClosingEventArgs closeAttempt =
+                            new FormClosingEventArgs(
+                                CloseReason.None,
+                                false);
+                        InvokePrivate(
+                            formType,
+                            form,
+                            "OnSettingsDialogClosing",
+                            settingsDialog,
+                            closeAttempt);
+                        AssertTrue(
+                            closeAttempt.Cancel && settingsDialog.Visible,
+                            "Connection action blocks programmatic dialog close");
+                        PumpUntil(
+                            delegate
+                            {
+                                return connectionServer.RequestReceived &&
+                                    GetField(
+                                        formType,
+                                        form,
+                                        "connectionTestCancellation") == null &&
+                                    fetchModels.Enabled;
+                            },
+                            10000,
+                            "Transactional connection test");
+                        AssertTrue(
+                            ByteArraysEqual(
+                                baselineBytes,
+                                File.ReadAllBytes(settingsPath)),
+                            "Testing a pending connection does not write settings.xml");
+                        AssertTrue(
+                            status.Text.IndexOf(
+                                "保存并关闭",
+                                StringComparison.Ordinal) >= 0,
+                            "Connection test success explains how to save pending settings");
+
+                        endpoint.Text = modelServer.Url;
+                        apiKey.Text = "temporary-model-list-key";
+                        model.Text = "temporary-model-list-selection";
+                        AssertTrue(
+                            fetchModels.Visible && fetchModels.Enabled,
+                            "Pending model discovery is visible and clickable");
+                        fetchModels.PerformClick();
+                        PumpUntil(
+                            delegate
+                            {
+                                return modelServer.RequestReceived &&
+                                    GetField(
+                                        formType,
+                                        form,
+                                        "connectionTestCancellation") == null &&
+                                    fetchModels.Enabled &&
+                                    fetchModels.Text == "获取模型";
+                            },
+                            35000,
+                            "Transactional model discovery");
+                        AssertTrue(
+                            !modelErrorShown,
+                            "Pending model discovery completes without an error dialog" +
+                                "; requests=" +
+                                modelServer.RequestCount.ToString() +
+                                "; status=" + status.Text +
+                                (modelErrorText.Length == 0
+                                    ? string.Empty
+                                    : "; dialog=" + modelErrorText));
+                        AssertTrue(
+                            ByteArraysEqual(
+                                baselineBytes,
+                                File.ReadAllBytes(settingsPath)),
+                            "Discovering models for pending settings does not write settings.xml");
+                        AssertTrue(
+                            model.Items.Contains("temporary-model-a") &&
+                                model.Items.Contains("temporary-model-b"),
+                            "Model discovery populates pending model choices");
+                        AssertTrue(
+                            status.Text.IndexOf(
+                                "保存并关闭",
+                                StringComparison.Ordinal) >= 0,
+                            "Model discovery explains how to save pending settings");
+                    }
+                    catch (Exception exception)
+                    {
+                        modalActionFailure = Unwrap(exception);
+                    }
+                    finally
+                    {
+                        modalActionsCompleted = true;
+                        CancellationTokenSource activeCancellation =
+                            GetField(
+                                formType,
+                                form,
+                                "connectionTestCancellation") as
+                                    CancellationTokenSource;
+                        if (activeCancellation != null)
+                        {
+                            activeCancellation.Cancel();
+                        }
+
+                        Button cancelButton =
+                            settingsDialog.CancelButton as Button;
+                        if (cancelButton != null &&
+                            cancelButton.Enabled)
+                        {
+                            cancelButton.PerformClick();
+                        }
+                        else
+                        {
+                            settingsDialog.DialogResult =
+                                DialogResult.Cancel;
+                            settingsDialog.Hide();
+                        }
+                    }
+                };
+                failureCloser.Start();
+                timeoutCloser.Start();
+                actionTimer.Start();
+                MethodInfo showSettings = formType.GetMethod(
+                    "ShowSettingsDialog",
+                    BindingFlags.Instance | BindingFlags.NonPublic |
+                        BindingFlags.DeclaredOnly,
+                    null,
+                    Type.EmptyTypes,
+                    null);
+                AssertTrue(
+                    showSettings != null,
+                    "Settings modal entry point exists");
+                showSettings.Invoke(form, null);
+                actionTimer.Stop();
+                failureCloser.Stop();
+                timeoutCloser.Stop();
+            }
+
+            AssertTrue(
+                modalActionsCompleted,
+                "Settings modal executes both connection actions before cancelling");
+            if (modalActionFailure != null)
+            {
+                throw new InvalidOperationException(
+                    "The Settings modal action sequence failed.",
+                    modalActionFailure);
+            }
+
+            AssertTrue(
+                endpoint.Text == baselineEndpoint &&
+                    apiKey.Text == baselineKey &&
+                    model.Text == baselineModel,
+                "Cancelling after connection actions restores all baseline fields");
+            bool modelItemsRestored =
+                model.Items.Count == baselineModelItems.Count;
+            for (int index = 0;
+                modelItemsRestored && index < baselineModelItems.Count;
+                index++)
+            {
+                object item = model.Items[index];
+                modelItemsRestored = string.Equals(
+                    item == null ? string.Empty : item.ToString(),
+                    baselineModelItems[index],
+                    StringComparison.Ordinal);
+            }
+            AssertTrue(
+                modelItemsRestored && status.Text == baselineStatus,
+                "Cancelling restores pending model choices and the prior status text");
+            AssertRetryState(
+                formType,
+                form,
+                true,
+                true,
+                baselineRetrySession,
+                baselineRetryPrompt,
+                true,
+                "重试生成",
+                "Cancelling Settings restores retry transaction state");
+            AssertTrue(
+                !settingsDialog.Visible &&
+                    !(bool)GetField(
+                        formType,
+                        form,
+                        "settingsDialogTransactionActive") &&
+                    ByteArraysEqual(
+                        baselineBytes,
+                        File.ReadAllBytes(settingsPath)),
+                "Cancelling closes the transaction without writing settings.xml");
+            object reloadedBaseline = settingsType.GetMethod(
+                "Load",
+                BindingFlags.Static | BindingFlags.Public).Invoke(null, null);
+            AssertTrue(
+                (string)GetProperty(reloadedBaseline, "EndpointUrl") ==
+                    baselineEndpoint &&
+                (string)GetProperty(reloadedBaseline, "ApiKey") ==
+                    baselineKey &&
+                (string)GetProperty(reloadedBaseline, "ModelName") ==
+                    baselineModel,
+                "Reload after cancel keeps the persisted connection baseline");
+        }
+        finally
+        {
+            if (settingsDialog.Visible)
+            {
+                settingsDialog.Hide();
+                Application.DoEvents();
+            }
+            SetField(
+                formType,
+                form,
+                "settingsDialogTransactionActive",
+                false);
+            if (originalFileExists)
+            {
+                File.WriteAllBytes(settingsPath, originalBytes);
+            }
+            else if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+            InvokePrivate(formType, form, "LoadSavedSettings");
+        }
+    }
+
+    private static void TestSettingsRollbackOnOwnerClose(
+        Assembly application,
+        Type formType)
+    {
+        Type settingsType = application.GetType(
+            "FilePromptAIWin7.AppSettings",
+            true);
+        string settingsPath = (string)settingsType.GetProperty(
+            "SettingsPath",
+            BindingFlags.Static | BindingFlags.Public).GetValue(null, null);
+        bool originalFileExists = File.Exists(settingsPath);
+        byte[] originalBytes = originalFileExists
+            ? File.ReadAllBytes(settingsPath)
+            : null;
+        const string baselineEndpoint =
+            "http://127.0.0.1:18771/v1/chat/completions";
+        const string baselineKey = "owner-close-baseline-key";
+        const string baselineModel = "owner-close-baseline-model";
+        try
+        {
+            RunSettingsOwnerCloseScenario(
+                settingsType,
+                formType,
+                settingsPath,
+                baselineEndpoint,
+                baselineKey,
+                baselineModel,
+                false);
+            using (TcpTestServer stalled = TcpTestServer.StartStalled())
+            {
+                RunSettingsOwnerCloseScenario(
+                    settingsType,
+                    formType,
+                    settingsPath,
+                    baselineEndpoint,
+                    baselineKey,
+                    baselineModel,
+                    true,
+                    stalled);
+            }
+        }
+        finally
+        {
+            if (originalFileExists)
+            {
+                File.WriteAllBytes(settingsPath, originalBytes);
+            }
+            else if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    private static void RunSettingsOwnerCloseScenario(
+        Type settingsType,
+        Type formType,
+        string settingsPath,
+        string baselineEndpoint,
+        string baselineKey,
+        string baselineModel,
+        bool startStalledRequest,
+        TcpTestServer server = null)
+    {
+        Form owner = Activator.CreateInstance(formType, true) as Form;
+        AssertTrue(owner != null, "Settings exit rollback creates a real owner window");
+        Form settingsDialog = null;
+        System.Windows.Forms.Timer actionTimer =
+            new System.Windows.Forms.Timer();
+        Exception actionFailure = null;
+        bool actionCompleted = false;
+        try
+        {
+            TextBox endpoint = (TextBox)GetField(
+                formType,
+                owner,
+                "endpointTextBox");
+            TextBox apiKey = (TextBox)GetField(
+                formType,
+                owner,
+                "apiKeyTextBox");
+            ComboBox model = (ComboBox)GetField(
+                formType,
+                owner,
+                "modelTextBox");
+            TextBox systemPrompt = (TextBox)GetField(
+                formType,
+                owner,
+                "systemPromptTextBox");
+            CheckBox temperatureEnabled = (CheckBox)GetField(
+                formType,
+                owner,
+                "temperatureEnabledCheckBox");
+            NumericUpDown temperature = (NumericUpDown)GetField(
+                formType,
+                owner,
+                "temperatureNumericUpDown");
+            CheckBox topPEnabled = (CheckBox)GetField(
+                formType,
+                owner,
+                "topPEnabledCheckBox");
+            NumericUpDown topP = (NumericUpDown)GetField(
+                formType,
+                owner,
+                "topPNumericUpDown");
+            CheckBox maxTokensEnabled = (CheckBox)GetField(
+                formType,
+                owner,
+                "maxOutputTokensEnabledCheckBox");
+            NumericUpDown maxTokens = (NumericUpDown)GetField(
+                formType,
+                owner,
+                "maxOutputTokensNumericUpDown");
+
+            endpoint.Text = baselineEndpoint;
+            apiKey.Text = baselineKey;
+            model.Text = baselineModel;
+            systemPrompt.Text = "owner close baseline prompt";
+            temperatureEnabled.Checked = true;
+            temperature.Value = 0.4M;
+            topPEnabled.Checked = true;
+            topP.Value = 0.8M;
+            maxTokensEnabled.Checked = true;
+            maxTokens.Value = 2048M;
+            SetField(formType, owner, "sendShortcutMode", "CtrlEnter");
+            AssertTrue(
+                (bool)InvokePrivate(formType, owner, "SaveSettings"),
+                "Settings exit rollback saves its persisted baseline");
+            byte[] baselineBytes = File.ReadAllBytes(settingsPath);
+
+            settingsDialog = GetField(
+                formType,
+                owner,
+                "settingsDialog") as Form;
+            AssertTrue(
+                settingsDialog != null,
+                "Settings exit rollback uses the real Settings dialog");
+            Button testConnection = GetField(
+                formType,
+                owner,
+                "testConnectionButton") as Button;
+            owner.Show();
+            Application.DoEvents();
+
+            actionTimer.Interval = 50;
+            actionTimer.Tick += delegate
+            {
+                actionTimer.Stop();
+                try
+                {
+                    AssertTrue(
+                        settingsDialog.Visible,
+                        "Settings exit rollback opens the real modal dialog");
+                    endpoint.Text = startStalledRequest
+                        ? server.Url
+                        : "http://127.0.0.1:19991/v1/chat/completions";
+                    apiKey.Text = "unsaved-owner-close-key";
+                    model.Text = "unsaved-owner-close-model";
+                    systemPrompt.Text = "unsaved owner close prompt";
+                    temperatureEnabled.Checked = true;
+                    temperature.Value = 1.7M;
+                    topPEnabled.Checked = true;
+                    topP.Value = 0.2M;
+                    maxTokensEnabled.Checked = true;
+                    maxTokens.Value = 8192M;
+                    settingsDialog.GetType().GetProperty(
+                        "SendShortcutMode",
+                        BindingFlags.Instance | BindingFlags.Public).SetValue(
+                            settingsDialog,
+                            "Enter",
+                            null);
+
+                    if (startStalledRequest)
+                    {
+                        AssertTrue(
+                            testConnection != null && testConnection.Enabled,
+                            "Busy Settings exit rollback can start connection test");
+                        testConnection.PerformClick();
+                        PumpUntil(
+                            delegate { return server.RequestReceived; },
+                            10000,
+                            "Busy Settings exit rollback starts stalled request");
+                        SetField(
+                            formType,
+                            owner,
+                            "exitConfirmationGranted",
+                            true);
+                    }
+
+                    owner.Close();
+                    actionCompleted = owner.IsDisposed || !owner.Visible;
+                }
+                catch (Exception exception)
+                {
+                    actionFailure = Unwrap(exception);
+                    settingsDialog.Hide();
+                }
+            };
+            actionTimer.Start();
+            MethodInfo showSettings = formType.GetMethod(
+                "ShowSettingsDialog",
+                BindingFlags.Instance | BindingFlags.NonPublic |
+                    BindingFlags.DeclaredOnly,
+                null,
+                Type.EmptyTypes,
+                null);
+            showSettings.Invoke(owner, null);
+            actionTimer.Stop();
+
+            if (actionFailure != null)
+            {
+                throw new InvalidOperationException(
+                    "Closing the real Settings owner failed.",
+                    actionFailure);
+            }
+            AssertTrue(
+                actionCompleted && owner.IsDisposed,
+                startStalledRequest
+                    ? "Real owner closes while a Settings request is active"
+                    : "Real owner closes with unsaved Settings values");
+            AssertTrue(
+                ByteArraysEqual(
+                    baselineBytes,
+                    File.ReadAllBytes(settingsPath)),
+                startStalledRequest
+                    ? "Busy owner close leaves settings.xml byte-identical"
+                    : "Owner close leaves settings.xml byte-identical");
+            object reloaded = settingsType.GetMethod(
+                "Load",
+                BindingFlags.Static | BindingFlags.Public).Invoke(null, null);
+            object reloadedTemperature = GetProperty(
+                reloaded,
+                "Temperature");
+            object reloadedTopP = GetProperty(reloaded, "TopP");
+            object reloadedMaxTokens = GetProperty(
+                reloaded,
+                "MaxOutputTokens");
+            AssertTrue(
+                (string)GetProperty(reloaded, "EndpointUrl") ==
+                    baselineEndpoint &&
+                (string)GetProperty(reloaded, "ApiKey") == baselineKey &&
+                (string)GetProperty(reloaded, "ModelName") == baselineModel &&
+                (string)GetProperty(reloaded, "SystemPrompt") ==
+                    "owner close baseline prompt" &&
+                (string)GetProperty(reloaded, "SendShortcut") ==
+                    "CtrlEnter" &&
+                reloadedTemperature != null &&
+                Math.Abs((double)reloadedTemperature - 0.4d) < 0.0001d &&
+                reloadedTopP != null &&
+                Math.Abs((double)reloadedTopP - 0.8d) < 0.0001d &&
+                reloadedMaxTokens != null &&
+                (int)reloadedMaxTokens == 2048,
+                startStalledRequest
+                    ? "Busy owner close reloads persisted baseline Settings"
+                    : "Owner close reloads persisted baseline Settings");
+        }
+        finally
+        {
+            actionTimer.Stop();
+            actionTimer.Dispose();
+            if (settingsDialog != null && !settingsDialog.IsDisposed &&
+                settingsDialog.Visible)
+            {
+                settingsDialog.Hide();
+            }
+            if (owner != null && !owner.IsDisposed)
+            {
+                SetField(formType, owner, "exitConfirmationGranted", true);
+                owner.Close();
+                owner.Dispose();
+            }
+            Application.DoEvents();
         }
     }
 

@@ -146,6 +146,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $packageScripts = @(
     'VerifyOfflinePackage.ps1',
+    'RunInstalledUserJourneySmokeTest.ps1',
     'RunVerifiedPayloadLeaseSmokeTest.ps1',
     'RunAcceptanceVerifierSmokeTest.ps1',
     'RunUninstallerSmokeTest.ps1',
@@ -154,9 +155,17 @@ $packageScripts = @(
 foreach ($name in $packageScripts) {
     $script = Join-Path $testRoot $name
     Write-Host "RUN $name"
-    & powershell -NoProfile -ExecutionPolicy Bypass `
-        -File $script `
-        -Version $Version
+    if ($name -eq 'RunInstalledUserJourneySmokeTest.ps1') {
+        & powershell -NoProfile -ExecutionPolicy Bypass `
+            -File $script `
+            -Version $Version `
+            -ArchivePath $archivePath
+    }
+    else {
+        & powershell -NoProfile -ExecutionPolicy Bypass `
+            -File $script `
+            -Version $Version
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "$name failed with exit code $LASTEXITCODE."
     }

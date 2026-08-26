@@ -106,6 +106,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 $archivePath = Join-Path $gitRoot "exe\$archiveName"
 $sidecarPath = "$archivePath.sha256.txt"
+$gitSidecarPath = "exe/$archiveName.sha256.txt"
 $candidateEvidencePath = Join-Path $gitRoot "exe\ReleaseCandidate-v$Version.txt"
 $gitProjectPath = Get-GitRelativeProjectPath -GitRoot $gitRoot
 $gitManifestPath = if ([string]::IsNullOrEmpty($gitProjectPath)) {
@@ -251,10 +252,33 @@ foreach ($required in @($archivePath, $sidecarPath)) {
         throw "Required release artifact is missing: $required"
     }
 }
+$tagSidecarBlob = (& git -C $gitRoot rev-parse "${tagName}:$gitSidecarPath" 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw 'The release sidecar is missing from the release tag.'
+}
+$workingSidecarBlob = (& git -C $gitRoot hash-object --no-filters -- $gitSidecarPath 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $tagSidecarBlob -ne $workingSidecarBlob) {
+    throw 'The tagged release sidecar differs byte-for-byte from the working copy.'
+}
 $archiveIdentity = Read-FilePromptReleaseArchiveIdentity `
     -ArchivePath $archivePath
 $archiveHash = $archiveIdentity.ArchiveSha256
 $archiveSize = (Get-Item -LiteralPath $archivePath).Length
+$sidecarBytes = [IO.File]::ReadAllBytes($sidecarPath)
+if ($sidecarBytes.Length -ge 3 -and
+    $sidecarBytes[0] -eq 0xEF -and
+    $sidecarBytes[1] -eq 0xBB -and
+    $sidecarBytes[2] -eq 0xBF) {
+    throw 'The release sidecar must be UTF-8 without BOM.'
+}
+$sidecarText = $strictUtf8.GetString($sidecarBytes)
+$expectedSidecarText = "$archiveHash *$archiveName`r`n"
+if (-not [string]::Equals(
+        $sidecarText,
+        $expectedSidecarText,
+        [StringComparison]::Ordinal)) {
+    throw 'The release sidecar must be canonical UTF-8 without BOM and CRLF, and must contain the exact final ZIP SHA-256.'
+}
 if (-not [string]::Equals(
     $archiveHash,
     $receipt.Hash,

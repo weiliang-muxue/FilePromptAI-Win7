@@ -365,7 +365,14 @@ namespace FilePromptAIBootstrapper
                 ProcessStartInfo startInfo = new ProcessStartInfo();
                 startInfo.FileName = applicationPath;
                 startInfo.WorkingDirectory = Path.GetDirectoryName(applicationPath);
-                startInfo.UseShellExecute = true;
+                startInfo.UseShellExecute = false;
+                string dataRoot = Environment.GetEnvironmentVariable(
+                    "FILEPROMPTAI_DATA_ROOT");
+                if (!string.IsNullOrEmpty(dataRoot))
+                {
+                    startInfo.EnvironmentVariables[
+                        "FILEPROMPTAI_DATA_ROOT"] = dataRoot;
+                }
                 Process.Start(startInfo);
             }
             catch (Exception exception)

@@ -22,8 +22,9 @@ annotated v1.17 标签中的 RELEASE-SHA256.txt、同一 ZIP 的成功测试 rec
    FilePromptAI-Win7-Full-v1.17.zip SHA256 核对整个 ZIP，两个摘要必须完全相同。
 2. ZIP 旁的 .zip.sha256.txt 只是便利副本；若二者来自同一下载位置，它不能独立
    证明 ZIP 未被替换。正式 RELEASE-SHA256.txt 刻意不放进 ZIP，以免摘要自引用。
-3. 校验成功后完整解压 ZIP，不要在压缩包中直接运行，也不要只复制 EXE。
-4. 双击“Start-FilePromptAI.exe”。
+3. 校验成功后把 ZIP 完整解压到同一个目录，不要在压缩包中直接运行，也不要只复制
+   其中某个 EXE（包括启动器、卸载器或 app\FilePromptAI.exe）。
+4. 在解压根目录双击“Start-FilePromptAI.exe”。
 5. 启动器会自动检测 Microsoft .NET Framework 4.8。
 6. 如果缺少运行环境，选择“是”。启动器会先校验随包安装程序的大小和
    SHA-256，再调用微软官方完整离线安装程序；此过程不会下载任何文件。
@@ -33,10 +34,17 @@ annotated v1.17 标签中的 RELEASE-SHA256.txt、同一 ZIP 的成功测试 rec
 卸载方法
 --------
 
-运行“Uninstall-FilePromptAI.exe”，或在左侧“设置”→“维护”中选择
-“卸载程序...”。卸载器只删除校验清单中内容未被修改的程序文件，
-发布目录中的额外文件不会被递归删除。用户配置和会话默认保留；只有明确勾选
-并再次确认后才会删除。
+运行完整解压目录根部的“Uninstall-FilePromptAI.exe”，或依次选择左侧“设置”→
+“维护”→“卸载程序...”。卸载器先锁定并验证清单中的全部程序文件；文件缺失、被修改、
+被占用或路径身份异常等预检失败会在删除前停止，程序文件和用户数据均保持不变。
+如果缺少 PACKAGE-CHECKSUMS-SHA256.txt，提示会列出实际检查目录；请重新完整解压
+ZIP，不要只复制卸载器。验证通过后，发布目录中的额外文件也不会被递归删除。
+用户配置和会话默认保留；只有明确勾选并再次确认后才会删除。如果 Windows 文件系统
+在提交删除或撤销删除标记时发生极少见异常，卸载器会报告可能的部分删除并写入恢复
+标记；再次运行即可清理剩余文件，恢复信息损坏时请重新完整解压原 ZIP 后重试。
+删除用户数据前会先锁定和复核整棵数据目录；任一文件占用、路径身份或重解析点检查
+失败时不会先删掉其他文件。受控测试使用自定义数据根时，卸载器会强制保留用户数据，
+不会误删默认目录或自定义目录。
 
 正常运行时，程序数据固定保存在当前用户的
 %LocalAppData%\FilePromptAI-Win7，不会搜索、读取或迁移其他数据目录。
@@ -74,7 +82,8 @@ annotated v1.17 标签中的 RELEASE-SHA256.txt、同一 ZIP 的成功测试 rec
   content.json 或旧版 content.xml 的 XMind 多画布、主题层级和备注；无需安装
   PowerPoint 或 XMind。
 - 当前运行期跨会话草稿合计最多保留 20 MB 二进制附件，超限时会要求先发送或移除。
-- 连接自检、流式输出、Markdown 排版、资料预览和长会话上下文控制；响应端兼容
+- 连接自检和获取模型只检查设置窗口中的待保存值，点击“保存并关闭”前不会写入
+  settings.xml；另有流式输出、Markdown 排版、资料预览和长会话上下文控制；响应端兼容
   标准 Chat SSE、常见网关的 Responses 文本事件封装、delta.text 与 NDJSON 分片，
   但请求仍固定使用 Chat Completions 格式。
 - 可在左侧“设置”→“模型连接”→“模型配置...”保存多个内网模型预设；
@@ -162,7 +171,8 @@ Windows 7 一键验收
 Verify-FilePromptAI.exe 自身未被替换。
 它先验证 --archive 指向的 ZIP 与 PACKAGE-CHECKSUMS-SHA256.txt 的身份，再校验解压目录
 中的精确文件集合和每个文件的 SHA-256；
-只有包校验通过才会加载和启动真实 app\FilePromptAI.exe。随后用独立临时数据目录
+只有包校验通过才会从解压根目录运行 Start-FilePromptAI.exe，由启动器启动真实
+app\FilePromptAI.exe。随后用独立临时数据目录
 检查窗口启动，以 127.0.0.1 回环服务验证无 API Key 的主动 /models 发现和流式
 Chat Completions，并调用真实程序检查 TXT、PDF、DOCX、PNG 解析以及 DOCX、PDF、
 PPTX、XLSX、CSV、XMind 导出。整个过程不连接外部模型服务。

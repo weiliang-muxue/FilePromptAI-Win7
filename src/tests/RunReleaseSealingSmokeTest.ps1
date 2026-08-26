@@ -279,6 +279,7 @@ function New-ReleaseFixture {
         'RunUiStateSmokeTest.ps1',
         'LaunchSmokeTest.ps1',
         'VerifyOfflinePackage.ps1',
+        'RunInstalledUserJourneySmokeTest.ps1',
         'RunVerifiedPayloadLeaseSmokeTest.ps1',
         'RunAcceptanceVerifierSmokeTest.ps1',
         'RunUninstallerSmokeTest.ps1',
@@ -340,9 +341,10 @@ Write-Host 'PASS | fixture package build'
         $utf8NoBom)
     [IO.File]::WriteAllText(
         (Join-Path $distributionRoot '.gitattributes'),
-        "*.zip filter=lfs diff=lfs merge=lfs -text`r`n" +
-            "ReleaseCandidate-v*.txt -text`r`n" +
-            "* text=auto`r`n",
+        "* text=auto`r`n" +
+            "*.zip filter=lfs diff=lfs merge=lfs -text`r`n" +
+            "*.zip.sha256.txt -text`r`n" +
+            "ReleaseCandidate-v*.txt -text`r`n",
         $utf8NoBom)
     [IO.File]::WriteAllText(
         (Join-Path $sourceRoot 'candidate.txt'),
@@ -517,6 +519,27 @@ try {
         -Description 'The annotated manifest-only release tag' `
         -Result $tagResult `
         -OutputPattern '(?m)^PASS \| annotated release tag \|'
+    $sidecarBytes = [IO.File]::ReadAllBytes($success.SidecarPath)
+    if ($sidecarBytes.Length -lt 2 -or
+        $sidecarBytes[$sidecarBytes.Length - 2] -ne 0x0D -or
+        $sidecarBytes[$sidecarBytes.Length - 1] -ne 0x0A) {
+        throw 'The tagged release sidecar working copy is not CRLF-terminated.'
+    }
+    $rawSidecarBlob = Invoke-GitChecked `
+        -Root $success.Root `
+        -GitArguments @(
+            'hash-object',
+            '--no-filters',
+            '--',
+            "exe/$archiveName.sha256.txt")
+    $tagSidecarBlob = Invoke-GitChecked `
+        -Root $success.Root `
+        -GitArguments @(
+            'rev-parse',
+            "v$Version`:exe/$archiveName.sha256.txt")
+    if ($rawSidecarBlob -cne $tagSidecarBlob) {
+        throw 'core.autocrlf=true changed the tagged release sidecar bytes.'
+    }
 
     $successAcceptanceText = [IO.File]::ReadAllText(
         $success.AcceptanceReportPath,

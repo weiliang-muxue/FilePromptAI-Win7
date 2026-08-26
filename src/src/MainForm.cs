@@ -126,7 +126,11 @@ namespace FilePromptAIWin7
         private bool showArchivedSessions;
         private bool retryAvailable;
         private bool retryRegeneration;
+        private bool uninstallCheckOnlyForTests = false;
         private bool settingsDialogTransactionActive;
+        private int settingsDialogTransactionSequence;
+        private int activeSettingsDialogTransactionId;
+        private SettingsDialogTransactionSnapshot activeSettingsDialogSnapshot;
         private string retrySessionId;
         private string retryPromptText;
         private string sendShortcutMode;
@@ -151,6 +155,27 @@ namespace FilePromptAIWin7
             public ConversationMessage UserMessage { get; set; }
             public ConversationMessage AssistantMessage { get; set; }
             public int UserMessageIndex { get; set; }
+        }
+
+        private sealed class SettingsDialogTransactionSnapshot
+        {
+            public string Endpoint { get; set; }
+            public string ApiKey { get; set; }
+            public string Model { get; set; }
+            public string SystemPrompt { get; set; }
+            public bool TemperatureEnabled { get; set; }
+            public decimal Temperature { get; set; }
+            public bool TopPEnabled { get; set; }
+            public decimal TopP { get; set; }
+            public bool MaxOutputTokensEnabled { get; set; }
+            public decimal MaxOutputTokens { get; set; }
+            public string Shortcut { get; set; }
+            public bool RetryAvailable { get; set; }
+            public bool RetryRegeneration { get; set; }
+            public string RetrySessionId { get; set; }
+            public string RetryPromptText { get; set; }
+            public IList<string> AvailableModels { get; set; }
+            public string StatusText { get; set; }
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -391,7 +416,8 @@ namespace FilePromptAIWin7
             FormClosingEventArgs args)
         {
             if (!isClosing && args != null &&
-                args.CloseReason == CloseReason.UserClosing &&
+                args.CloseReason != CloseReason.FormOwnerClosing &&
+                args.CloseReason != CloseReason.WindowsShutDown &&
                 connectionTestCancellation != null)
             {
                 args.Cancel = true;
@@ -1249,28 +1275,26 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            string previousEndpoint = endpointTextBox.Text;
-            string previousKey = apiKeyTextBox.Text;
-            string previousModel = modelTextBox.Text;
-            string previousSystemPrompt = systemPromptTextBox.Text;
-            bool previousTemperatureEnabled =
-                temperatureEnabledCheckBox.Checked;
-            decimal previousTemperature = temperatureNumericUpDown.Value;
-            bool previousTopPEnabled = topPEnabledCheckBox.Checked;
-            decimal previousTopP = topPNumericUpDown.Value;
-            bool previousMaxOutputTokensEnabled =
-                maxOutputTokensEnabledCheckBox.Checked;
-            decimal previousMaxOutputTokens =
-                maxOutputTokensNumericUpDown.Value;
-            string previousShortcut = sendShortcutMode ?? "Both";
+            SettingsDialogTransactionSnapshot snapshot =
+                CaptureSettingsDialogSnapshot();
             UpdateConfigurationProtectionUi();
-            settingsDialog.SendShortcutMode = previousShortcut;
+            settingsDialog.SendShortcutMode = snapshot.Shortcut;
             settingsDialog.SetContextSummary(BuildContextSummary());
             settingsDialog.SetExtensionSummary(BuildExtensionSummary());
             settingsDialog.PrepareForOpen(focusControl, validationMessage);
+            settingsDialog.SetConnectionActionInProgress(false);
             settingsDialog.DialogResult = DialogResult.None;
 
             DialogResult result;
+            int transactionId = unchecked(
+                ++settingsDialogTransactionSequence);
+            if (transactionId == 0)
+            {
+                transactionId = unchecked(
+                    ++settingsDialogTransactionSequence);
+            }
+            activeSettingsDialogTransactionId = transactionId;
+            activeSettingsDialogSnapshot = snapshot;
             settingsDialogTransactionActive = true;
             try
             {
@@ -1279,24 +1303,24 @@ namespace FilePromptAIWin7
             finally
             {
                 settingsDialogTransactionActive = false;
+                activeSettingsDialogTransactionId = 0;
+                if (ReferenceEquals(
+                    activeSettingsDialogSnapshot,
+                    snapshot))
+                {
+                    activeSettingsDialogSnapshot = null;
+                }
+            }
+            if (isClosing || IsDisposed || Disposing)
+            {
+                return;
             }
             if (result == DialogResult.OK)
             {
                 if (loadedAppSettings != null &&
                     loadedAppSettings.IsWriteBlocked)
                 {
-                    RestoreSettingsControls(
-                        previousEndpoint,
-                        previousKey,
-                        previousModel,
-                        previousSystemPrompt,
-                        previousTemperatureEnabled,
-                        previousTemperature,
-                        previousTopPEnabled,
-                        previousTopP,
-                        previousMaxOutputTokensEnabled,
-                        previousMaxOutputTokens,
-                        previousShortcut);
+                    RestoreSettingsDialogSnapshot(snapshot);
                     SetStatus(
                         "设置处于只读保护，本次运行不能修改或保存配置。");
                     return;
@@ -1314,20 +1338,74 @@ namespace FilePromptAIWin7
                 return;
             }
 
+            RestoreSettingsDialogSnapshot(snapshot);
+        }
+
+        private SettingsDialogTransactionSnapshot
+            CaptureSettingsDialogSnapshot()
+        {
+            SettingsDialogTransactionSnapshot snapshot =
+                new SettingsDialogTransactionSnapshot();
+            snapshot.Endpoint = endpointTextBox.Text;
+            snapshot.ApiKey = apiKeyTextBox.Text;
+            snapshot.Model = modelTextBox.Text;
+            snapshot.SystemPrompt = systemPromptTextBox.Text;
+            snapshot.TemperatureEnabled =
+                temperatureEnabledCheckBox.Checked;
+            snapshot.Temperature = temperatureNumericUpDown.Value;
+            snapshot.TopPEnabled = topPEnabledCheckBox.Checked;
+            snapshot.TopP = topPNumericUpDown.Value;
+            snapshot.MaxOutputTokensEnabled =
+                maxOutputTokensEnabledCheckBox.Checked;
+            snapshot.MaxOutputTokens = maxOutputTokensNumericUpDown.Value;
+            snapshot.Shortcut = sendShortcutMode ?? "Both";
+            snapshot.RetryAvailable = retryAvailable;
+            snapshot.RetryRegeneration = retryRegeneration;
+            snapshot.RetrySessionId = retrySessionId ?? string.Empty;
+            snapshot.RetryPromptText = retryPromptText ?? string.Empty;
+            snapshot.AvailableModels = modelTextBox.Items
+                .Cast<object>()
+                .Select(item => item == null ? string.Empty : item.ToString())
+                .ToList();
+            snapshot.StatusText = statusLabel == null
+                ? string.Empty
+                : statusLabel.Text;
+            return snapshot;
+        }
+
+        private void RestoreSettingsDialogSnapshot(
+            SettingsDialogTransactionSnapshot snapshot)
+        {
+            if (snapshot == null || IsDisposed || Disposing)
+            {
+                return;
+            }
+
             RestoreSettingsControls(
-                previousEndpoint,
-                previousKey,
-                previousModel,
-                previousSystemPrompt,
-                previousTemperatureEnabled,
-                previousTemperature,
-                previousTopPEnabled,
-                previousTopP,
-                previousMaxOutputTokensEnabled,
-                previousMaxOutputTokens,
-                previousShortcut);
+                snapshot.Endpoint,
+                snapshot.ApiKey,
+                snapshot.Model,
+                snapshot.SystemPrompt,
+                snapshot.TemperatureEnabled,
+                snapshot.Temperature,
+                snapshot.TopPEnabled,
+                snapshot.TopP,
+                snapshot.MaxOutputTokensEnabled,
+                snapshot.MaxOutputTokens,
+                snapshot.Shortcut);
+            RestoreRetryState(
+                snapshot.RetryAvailable,
+                snapshot.RetryRegeneration,
+                snapshot.RetrySessionId,
+                snapshot.RetryPromptText);
+            if (settingsDialog != null && !settingsDialog.IsDisposed)
+            {
+                settingsDialog.SetAvailableModels(snapshot.AvailableModels);
+            }
+            modelTextBox.Text = snapshot.Model;
             connectionStatusLabel.Text = BuildConnectionStatus();
             UpdateContextSummary();
+            SetStatus(snapshot.StatusText);
         }
 
         private void RestoreSettingsControls(
@@ -1357,6 +1435,19 @@ namespace FilePromptAIWin7
             settingsDialog.SendShortcutMode = shortcut;
             UpdatePromptHint();
             UpdateSendShortcutMenuChecks();
+        }
+
+        private void RestoreRetryState(
+            bool available,
+            bool regeneration,
+            string sessionId,
+            string prompt)
+        {
+            retryAvailable = available;
+            retryRegeneration = regeneration;
+            retrySessionId = sessionId ?? string.Empty;
+            retryPromptText = prompt ?? string.Empty;
+            UpdateRetryButton();
         }
 
         private void ShowPathInputDialog()
@@ -2684,6 +2775,11 @@ namespace FilePromptAIWin7
                         ? (int?)decimal.ToInt32(
                             maxOutputTokensNumericUpDown.Value)
                         : null;
+                if (HasSameSettings(settings, loadedAppSettings))
+                {
+                    return true;
+                }
+
                 settings.Save();
                 loadedAppSettings = settings;
                 return true;
@@ -2699,6 +2795,38 @@ namespace FilePromptAIWin7
                 }
                 return false;
             }
+        }
+
+        private static bool HasSameSettings(
+            AppSettings current,
+            AppSettings saved)
+        {
+            return current != null && saved != null &&
+                string.Equals(
+                    current.EndpointUrl,
+                    saved.EndpointUrl,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    current.ApiKey,
+                    saved.ApiKey,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    current.ModelName,
+                    saved.ModelName,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    current.SendShortcut,
+                    saved.SendShortcut,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    current.SystemPrompt,
+                    saved.SystemPrompt,
+                    StringComparison.Ordinal) &&
+                Nullable.Equals(current.Temperature, saved.Temperature) &&
+                Nullable.Equals(current.TopP, saved.TopP) &&
+                Nullable.Equals(
+                    current.MaxOutputTokens,
+                    saved.MaxOutputTokens);
         }
 
         private void UpdateConfigurationProtectionUi()
@@ -3118,13 +3246,69 @@ namespace FilePromptAIWin7
 
             try
             {
+                bool checkOnly = uninstallCheckOnlyForTests;
+                string dataRootOverride =
+                    Environment.GetEnvironmentVariable(
+                        "FILEPROMPTAI_DATA_ROOT",
+                        EnvironmentVariableTarget.Process);
+                int currentProcessId;
+                using (Process currentProcess = Process.GetCurrentProcess())
+                {
+                    currentProcessId = currentProcess.Id;
+                }
                 ProcessStartInfo startInfo = new ProcessStartInfo();
                 startInfo.FileName = uninstallerPath;
-                startInfo.Arguments = "--from-app " +
-                    Process.GetCurrentProcess().Id.ToString();
+                startInfo.Arguments = (checkOnly
+                    ? "--check-from-app "
+                    : "--from-app ") + currentProcessId.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture);
                 startInfo.WorkingDirectory = packageRoot;
-                startInfo.UseShellExecute = true;
-                Process.Start(startInfo);
+                startInfo.UseShellExecute = false;
+                if (dataRootOverride == null)
+                {
+                    startInfo.EnvironmentVariables.Remove(
+                        "FILEPROMPTAI_DATA_ROOT");
+                }
+                else
+                {
+                    startInfo.EnvironmentVariables[
+                        "FILEPROMPTAI_DATA_ROOT"] = dataRootOverride;
+                }
+                Process uninstallProcess = Process.Start(startInfo);
+                if (uninstallProcess == null)
+                {
+                    throw new InvalidOperationException(
+                        "Windows 未返回卸载器进程。");
+                }
+                using (uninstallProcess)
+                {
+                    if (checkOnly)
+                    {
+                        if (!uninstallProcess.WaitForExit(30000))
+                        {
+                            try
+                            {
+                                uninstallProcess.Kill();
+                                uninstallProcess.WaitForExit();
+                            }
+                            catch
+                            {
+                            }
+                            throw new TimeoutException(
+                                "卸载器只读组合检查在 30 秒内未完成。");
+                        }
+
+                        uninstallProcess.WaitForExit();
+                        if (uninstallProcess.ExitCode != 0)
+                        {
+                            throw new InvalidOperationException(
+                                "卸载器只读组合检查失败，退出代码 " +
+                                uninstallProcess.ExitCode.ToString(
+                                    System.Globalization.CultureInfo.InvariantCulture) +
+                                "。程序和用户数据均未更改。");
+                        }
+                    }
+                }
                 exitConfirmationGranted = true;
                 if (settingsDialog != null && settingsDialog.Visible)
                 {
@@ -3458,6 +3642,7 @@ namespace FilePromptAIWin7
             string endpoint = endpointTextBox.Text.Trim();
             string key = apiKeyTextBox.Text.Trim();
             IWin32Window owner = GetSettingsActionOwner();
+            int transactionId = activeSettingsDialogTransactionId;
             if (string.IsNullOrWhiteSpace(endpoint))
             {
                 ShowValidation("请先填写完整请求 URL。", endpointTextBox);
@@ -3490,16 +3675,23 @@ namespace FilePromptAIWin7
                     endpoint,
                     key,
                     cancellation.Token);
+                if (!IsCurrentSettingsTransaction(transactionId))
+                {
+                    return;
+                }
                 settingsDialog.SetAvailableModels(models);
-                bool saved = SaveSettings();
                 connectionStatusLabel.Text =
                     "已获取 " + models.Count + " 个模型";
                 SetStatus(
-                    "已获取 " + models.Count + " 个模型，可搜索或手动输入" +
-                    (saved ? string.Empty : "；当前设置未能保存"));
+                    "已获取 " + models.Count + " 个模型，可搜索或手动输入；" +
+                    "当前配置仍需点击“保存并关闭”才会保存");
             }
             catch (OperationCanceledException)
             {
+                if (!IsCurrentSettingsTransaction(transactionId))
+                {
+                    return;
+                }
                 connectionStatusLabel.Text = "获取模型超时";
                 MessageBox.Show(
                     owner,
@@ -3510,6 +3702,10 @@ namespace FilePromptAIWin7
             }
             catch (ModelCallException exception)
             {
+                if (!IsCurrentSettingsTransaction(transactionId))
+                {
+                    return;
+                }
                 connectionStatusLabel.Text = "未能获取模型列表";
                 MessageBox.Show(
                     owner,
@@ -3520,6 +3716,10 @@ namespace FilePromptAIWin7
             }
             catch (Exception exception)
             {
+                if (!IsCurrentSettingsTransaction(transactionId))
+                {
+                    return;
+                }
                 connectionStatusLabel.Text = "未能获取模型列表";
                 MessageBox.Show(
                     owner,
@@ -3531,13 +3731,16 @@ namespace FilePromptAIWin7
             }
             finally
             {
-                if (ReferenceEquals(connectionTestCancellation, cancellation))
+                bool ownsCancellation = ReferenceEquals(
+                    connectionTestCancellation,
+                    cancellation);
+                if (ownsCancellation)
                 {
                     connectionTestCancellation = null;
                 }
 
                 cancellation.Dispose();
-                if (!IsDisposed)
+                if (!IsDisposed && ownsCancellation)
                 {
                     settingsDialog.FetchModelsButton.Text = "获取模型";
                     SetConnectionTestingState(false);
@@ -3558,6 +3761,7 @@ namespace FilePromptAIWin7
             string key = apiKeyTextBox.Text.Trim();
             string model = modelTextBox.Text.Trim();
             IWin32Window owner = GetSettingsActionOwner();
+            int transactionId = activeSettingsDialogTransactionId;
             if (string.IsNullOrWhiteSpace(endpoint))
             {
                 ShowValidation("请先填写完整请求 URL。", endpointTextBox);
@@ -3581,7 +3785,6 @@ namespace FilePromptAIWin7
                 return;
             }
 
-            bool settingsSaved = SaveSettings();
             CancellationTokenSource cancellation =
                 new CancellationTokenSource();
             cancellation.CancelAfter(TimeSpan.FromSeconds(30));
@@ -3596,13 +3799,20 @@ namespace FilePromptAIWin7
                     key,
                     model,
                     cancellation.Token);
+                if (!IsCurrentSettingsTransaction(transactionId))
+                {
+                    return;
+                }
                 connectionStatusLabel.Text = "连接成功 · " + model;
-                SetStatus(settingsSaved
-                    ? "连接测试成功，配置已保存在本机"
-                    : "连接测试成功，但当前配置未能保存");
+                SetStatus(
+                    "连接测试成功；当前配置仍需点击“保存并关闭”才会保存");
             }
             catch (OperationCanceledException)
             {
+                if (!IsCurrentSettingsTransaction(transactionId))
+                {
+                    return;
+                }
                 connectionStatusLabel.Text = "连接超时 · 请检查网络或 URL";
                 MessageBox.Show(
                     owner,
@@ -3613,6 +3823,10 @@ namespace FilePromptAIWin7
             }
             catch (ModelCallException exception)
             {
+                if (!IsCurrentSettingsTransaction(transactionId))
+                {
+                    return;
+                }
                 connectionStatusLabel.Text = "连接失败 · 请检查配置";
                 MessageBox.Show(
                     owner,
@@ -3623,6 +3837,10 @@ namespace FilePromptAIWin7
             }
             catch (Exception exception)
             {
+                if (!IsCurrentSettingsTransaction(transactionId))
+                {
+                    return;
+                }
                 connectionStatusLabel.Text = "连接失败 · 请检查配置";
                 MessageBox.Show(
                     owner,
@@ -3633,17 +3851,31 @@ namespace FilePromptAIWin7
             }
             finally
             {
-                if (ReferenceEquals(connectionTestCancellation, cancellation))
+                bool ownsCancellation = ReferenceEquals(
+                    connectionTestCancellation,
+                    cancellation);
+                if (ownsCancellation)
                 {
                     connectionTestCancellation = null;
                 }
 
                 cancellation.Dispose();
-                if (!IsDisposed)
+                if (!IsDisposed && ownsCancellation)
                 {
                     SetConnectionTestingState(false);
                 }
             }
+        }
+
+        private bool IsCurrentSettingsTransaction(int transactionId)
+        {
+            return transactionId != 0 &&
+                settingsDialogTransactionActive &&
+                activeSettingsDialogTransactionId == transactionId &&
+                settingsDialog != null &&
+                !settingsDialog.IsDisposed &&
+                settingsDialog.Visible &&
+                !isClosing;
         }
 
         private void SetConnectionTestingState(bool testing)
@@ -3667,6 +3899,7 @@ namespace FilePromptAIWin7
             settingsDialog.ModelProfilesButton.Enabled = settingsEditable;
             settingsDialog.UninstallButton.Enabled = !testing;
             settingsDialog.SendShortcutComboBox.Enabled = settingsEditable;
+            settingsDialog.SetConnectionActionInProgress(testing);
             if (extensionsButton != null)
             {
                 extensionsButton.Enabled = !testing &&
@@ -7144,6 +7377,12 @@ namespace FilePromptAIWin7
             }
 
             isClosing = true;
+            settingsDialogTransactionActive = false;
+            activeSettingsDialogTransactionId = 0;
+            SettingsDialogTransactionSnapshot pendingSettings =
+                activeSettingsDialogSnapshot;
+            activeSettingsDialogSnapshot = null;
+            RestoreSettingsDialogSnapshot(pendingSettings);
             DisableFileDropTarget();
 
             if (sessionSearchTimer != null)

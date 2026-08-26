@@ -19,7 +19,11 @@ namespace FilePromptAIUninstaller
         private const string UninstallerFileName = "Uninstall-FilePromptAI.exe";
         private const string LauncherFileName = "Start-FilePromptAI.exe";
         private const string ApplicationRelativePath = "app\\FilePromptAI.exe";
+        private const string RecoveryMarkerFileName =
+            ".FilePromptAI-uninstall-recovery";
         private const string DataDirectoryName = "FilePromptAI-Win7";
+        private const string DataRootOverrideVariable =
+            "FILEPROMPTAI_DATA_ROOT";
         private const int MoveFileDelayUntilReboot = 0x4;
         private const uint DeleteAccess = 0x00010000;
         private const uint FileReadAttributes = 0x00000080;
@@ -27,6 +31,7 @@ namespace FilePromptAIUninstaller
         private const uint FileShareRead = 0x00000001;
         private const uint FileShareWrite = 0x00000002;
         private const uint OpenExisting = 3;
+        private const uint FileAttributeReadOnly = 0x00000001;
         private const uint FileAttributeDirectory = 0x00000010;
         private const uint FileAttributeReparsePoint = 0x00000400;
         private const uint FileFlagOpenReparsePoint = 0x00200000;
@@ -37,7 +42,13 @@ namespace FilePromptAIUninstaller
         private const int ErrorPathNotFound = 3;
         private const int ErrorDirectoryNotEmpty = 145;
         private const int MaximumManifestBytes = 4 * 1024 * 1024;
+        private const int ProcessExitWaitMilliseconds = 60000;
         private const uint CreateNoWindow = 0x08000000;
+
+        // Private fault controls are set only by the regression test through
+        // reflection. Production executions always keep these defaults.
+        private static int commitFailureAfterForTests = -1;
+        private static bool rollbackFailureForTests = false;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool MoveFileEx(
@@ -161,15 +172,15 @@ namespace FilePromptAIUninstaller
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            if ((args.Length == 6 || args.Length == 7) &&
+            if ((args.Length == 12 || args.Length == 13) &&
                 string.Equals(args[0], "--execute", StringComparison.Ordinal))
             {
-                bool silent = args.Length == 7 &&
+                bool silent = args.Length == 13 &&
                     string.Equals(
-                        args[6],
+                        args[12],
                         "--silent",
                         StringComparison.Ordinal);
-                if (args.Length == 7 && !silent)
+                if (args.Length == 13 && !silent)
                 {
                     Environment.ExitCode = 2;
                     return;
@@ -186,7 +197,264 @@ namespace FilePromptAIUninstaller
                 return;
             }
 
-            RunInteractive();
+            if (args.Length > 0 &&
+                string.Equals(
+                    args[0],
+                    "--check-from-app",
+                    StringComparison.Ordinal))
+            {
+                RunCheckFromApp(args);
+                return;
+            }
+
+            int applicationProcessId;
+            string argumentError;
+            if (!TryParseInteractiveArguments(
+                args,
+                out applicationProcessId,
+                out argumentError))
+            {
+                Environment.ExitCode = 2;
+                ShowError(argumentError);
+                return;
+            }
+
+            RunInteractive(applicationProcessId);
+        }
+
+        private static bool TryParseInteractiveArguments(
+            string[] args,
+            out int applicationProcessId,
+            out string error)
+        {
+            applicationProcessId = 0;
+            error = string.Empty;
+            if (args == null || args.Length == 0)
+            {
+                return true;
+            }
+
+            if (args.Length == 2 &&
+                string.Equals(
+                    args[0],
+                    "--from-app",
+                    StringComparison.Ordinal) &&
+                int.TryParse(
+                    args[1],
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out applicationProcessId) &&
+                applicationProcessId > 0)
+            {
+                return true;
+            }
+
+            applicationProcessId = 0;
+            error =
+                "卸载启动参数无效，未删除任何文件。\r\n\r\n" +
+                "请直接运行 " + UninstallerFileName +
+                "，或从 FilePrompt AI 设置中的“卸载程序...”进入。";
+            return false;
+        }
+
+        private static bool TryParseCheckFromAppArguments(
+            string[] args,
+            out int applicationProcessId)
+        {
+            applicationProcessId = 0;
+            if (args == null ||
+                args.Length != 2 ||
+                !string.Equals(
+                    args[0],
+                    "--check-from-app",
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            int parsedProcessId;
+            if (!int.TryParse(
+                    args[1],
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out parsedProcessId) ||
+                parsedProcessId <= 0)
+            {
+                return false;
+            }
+
+            applicationProcessId = parsedProcessId;
+            return true;
+        }
+
+        private static void RunCheckFromApp(string[] args)
+        {
+            int applicationProcessId;
+            if (!TryParseCheckFromAppArguments(
+                args,
+                out applicationProcessId))
+            {
+                Environment.ExitCode = 2;
+                return;
+            }
+
+            string releaseRoot;
+            string rootError;
+            if (!TryNormalizeReleaseRoot(
+                AppDomain.CurrentDomain.BaseDirectory,
+                out releaseRoot,
+                out rootError) ||
+                !IsExpectedRootUninstaller(releaseRoot))
+            {
+                Environment.ExitCode = 2;
+                return;
+            }
+
+            long applicationProcessStartTicks;
+            string processError;
+            if (!TryValidateApplicationProcessForCheck(
+                applicationProcessId,
+                releaseRoot,
+                out applicationProcessStartTicks,
+                out processError))
+            {
+                Environment.ExitCode = 2;
+                return;
+            }
+
+            List<ManifestEntry> entries;
+            string manifestError;
+            string manifestHash;
+            if (!TryReadManifest(
+                releaseRoot,
+                out entries,
+                out manifestHash,
+                out manifestError))
+            {
+                Environment.ExitCode = 3;
+                return;
+            }
+
+            if (!IsIdentifiedProcessStillRunning(
+                applicationProcessId,
+                applicationProcessStartTicks))
+            {
+                Environment.ExitCode = 2;
+                return;
+            }
+
+            Environment.ExitCode = 0;
+        }
+
+        private static bool IsExpectedRootUninstaller(string releaseRoot)
+        {
+            try
+            {
+                string executablePath = Path.GetFullPath(
+                    Application.ExecutablePath);
+                string expectedPath = Path.GetFullPath(
+                    Path.Combine(releaseRoot, UninstallerFileName));
+                return File.Exists(executablePath) &&
+                    (File.GetAttributes(executablePath) &
+                        FileAttributes.ReparsePoint) == 0 &&
+                    string.Equals(
+                        executablePath,
+                        expectedPath,
+                        StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryValidateApplicationProcessForCheck(
+            int processId,
+            string releaseRoot,
+            out long startTicks,
+            out string error)
+        {
+            startTicks = 0;
+            error = string.Empty;
+            try
+            {
+                string expectedAppDirectory = TrimTrailingSeparators(
+                    Path.GetFullPath(Path.Combine(releaseRoot, "app")));
+                if (!Directory.Exists(expectedAppDirectory) ||
+                    (File.GetAttributes(expectedAppDirectory) &
+                        FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new InvalidOperationException(
+                        "发布目录中的 app 目录身份无效。");
+                }
+
+                using (Process process = Process.GetProcessById(processId))
+                {
+                    if (process.HasExited)
+                    {
+                        throw new InvalidOperationException(
+                            "FilePrompt AI 主程序进程已经退出。");
+                    }
+
+                    startTicks = process.StartTime.ToUniversalTime().Ticks;
+                    if (startTicks <= 0)
+                    {
+                        throw new InvalidOperationException(
+                            "无法确认 FilePrompt AI 主程序启动时间。");
+                    }
+
+                    string modulePath = Path.GetFullPath(
+                        process.MainModule.FileName);
+                    string moduleDirectory = TrimTrailingSeparators(
+                        Path.GetDirectoryName(modulePath));
+                    if (!File.Exists(modulePath) ||
+                        (File.GetAttributes(modulePath) &
+                            FileAttributes.ReparsePoint) != 0 ||
+                        !string.Equals(
+                            moduleDirectory,
+                            expectedAppDirectory,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException(
+                            "请求检查的进程不在当前发布目录的 app 目录中。");
+                    }
+
+                    process.Refresh();
+                    if (process.HasExited ||
+                        process.StartTime.ToUniversalTime().Ticks != startTicks)
+                    {
+                        throw new InvalidOperationException(
+                            "FilePrompt AI 主程序进程身份已变化。");
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception exception)
+            {
+                startTicks = 0;
+                error = exception.Message;
+                return false;
+            }
+        }
+
+        private static bool IsIdentifiedProcessStillRunning(
+            int processId,
+            long expectedStartTicks)
+        {
+            try
+            {
+                using (Process process = Process.GetProcessById(processId))
+                {
+                    return !process.HasExited &&
+                        process.StartTime.ToUniversalTime().Ticks ==
+                            expectedStartTicks;
+                }
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static void RunCheck()
@@ -214,7 +482,7 @@ namespace FilePromptAIUninstaller
                 : 3;
         }
 
-        private static void RunInteractive()
+        private static void RunInteractive(int applicationProcessId)
         {
             string releaseRoot;
             string rootError;
@@ -223,6 +491,7 @@ namespace FilePromptAIUninstaller
                 out releaseRoot,
                 out rootError))
             {
+                Environment.ExitCode = 2;
                 ShowError(rootError);
                 return;
             }
@@ -236,8 +505,25 @@ namespace FilePromptAIUninstaller
                 out manifestHash,
                 out manifestError))
             {
+                Environment.ExitCode = 3;
                 ShowError(manifestError);
                 return;
+            }
+
+            long applicationProcessStartTicks;
+            string processError;
+            if (!TryCaptureProcessStartTicks(
+                applicationProcessId,
+                out applicationProcessStartTicks,
+                out processError))
+            {
+                Environment.ExitCode = 2;
+                ShowError(processError);
+                return;
+            }
+            if (applicationProcessStartTicks == 0)
+            {
+                applicationProcessId = 0;
             }
 
             bool deleteData;
@@ -249,6 +535,20 @@ namespace FilePromptAIUninstaller
                 }
 
                 deleteData = form.DeleteData;
+            }
+
+            if (deleteData)
+            {
+                string dataDeletionError;
+                if (!CanDeleteDefaultUserData(out dataDeletionError))
+                {
+                    deleteData = false;
+                    MessageBox.Show(
+                        dataDeletionError,
+                        "用户数据将保留",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
             }
 
             if (deleteData)
@@ -265,8 +565,14 @@ namespace FilePromptAIUninstaller
             }
 
             string startError;
-            if (!StartTemporaryWorker(releaseRoot, deleteData, out startError))
+            if (!StartTemporaryWorker(
+                releaseRoot,
+                deleteData,
+                applicationProcessId,
+                applicationProcessStartTicks,
+                out startError))
             {
+                Environment.ExitCode = 2;
                 ShowError(startError);
             }
         }
@@ -274,6 +580,8 @@ namespace FilePromptAIUninstaller
         private static bool StartTemporaryWorker(
             string releaseRoot,
             bool deleteData,
+            int applicationProcessId,
+            long applicationProcessStartTicks,
             out string error)
         {
             error = string.Empty;
@@ -304,11 +612,26 @@ namespace FilePromptAIUninstaller
                 startInfo.FileName = temporaryExe;
                 startInfo.WorkingDirectory = temporaryRoot;
                 startInfo.UseShellExecute = false;
+                int parentProcessId;
+                long parentProcessStartTicks;
+                using (Process parentProcess = Process.GetCurrentProcess())
+                {
+                    parentProcessId = parentProcess.Id;
+                    parentProcessStartTicks = parentProcess.StartTime
+                        .ToUniversalTime().Ticks;
+                }
                 startInfo.Arguments =
                     "--execute " + QuoteArgument(releaseRoot) +
                     " --delete-data " + (deleteData ? "true" : "false") +
-                    " --parent-pid " +
-                    Process.GetCurrentProcess().Id.ToString(
+                    " --parent-pid " + parentProcessId.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture) +
+                    " --parent-start-ticks " +
+                    parentProcessStartTicks.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture) +
+                    " --app-pid " + applicationProcessId.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture) +
+                    " --app-start-ticks " +
+                    applicationProcessStartTicks.ToString(
                         System.Globalization.CultureInfo.InvariantCulture);
                 Process process = Process.Start(startInfo);
                 if (process == null)
@@ -359,7 +682,16 @@ namespace FilePromptAIUninstaller
             }
 
             if (!string.Equals(args[2], "--delete-data", StringComparison.Ordinal) ||
-                !string.Equals(args[4], "--parent-pid", StringComparison.Ordinal))
+                !string.Equals(args[4], "--parent-pid", StringComparison.Ordinal) ||
+                !string.Equals(
+                    args[6],
+                    "--parent-start-ticks",
+                    StringComparison.Ordinal) ||
+                !string.Equals(args[8], "--app-pid", StringComparison.Ordinal) ||
+                !string.Equals(
+                    args[10],
+                    "--app-start-ticks",
+                    StringComparison.Ordinal))
             {
                 ShowWorkerError(
                     "卸载参数无效，未删除任何文件。",
@@ -378,6 +710,19 @@ namespace FilePromptAIUninstaller
                 return;
             }
 
+            if (deleteData)
+            {
+                string dataDeletionError;
+                if (!CanDeleteDefaultUserData(out dataDeletionError))
+                {
+                    ShowWorkerError(
+                        dataDeletionError,
+                        silent,
+                        4);
+                    return;
+                }
+            }
+
             int parentProcessId;
             if (!int.TryParse(
                 args[5],
@@ -393,7 +738,60 @@ namespace FilePromptAIUninstaller
                 return;
             }
 
-            WaitForParent(parentProcessId);
+            long parentProcessStartTicks;
+            if (!long.TryParse(
+                args[7],
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out parentProcessStartTicks) ||
+                parentProcessStartTicks <= 0)
+            {
+                ShowWorkerError(
+                    "父进程身份参数无效，未删除任何文件。",
+                    silent,
+                    2);
+                return;
+            }
+
+            int applicationProcessId;
+            long applicationProcessStartTicks;
+            if (!int.TryParse(
+                args[9],
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out applicationProcessId) ||
+                applicationProcessId < 0 ||
+                !long.TryParse(
+                    args[11],
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out applicationProcessStartTicks) ||
+                applicationProcessStartTicks < 0 ||
+                ((applicationProcessId == 0) !=
+                    (applicationProcessStartTicks == 0)))
+            {
+                ShowWorkerError(
+                    "原程序进程身份参数无效，未删除任何文件。",
+                    silent,
+                    2);
+                return;
+            }
+
+            string waitError;
+            if (!WaitForIdentifiedProcessExit(
+                parentProcessId,
+                parentProcessStartTicks,
+                "启动卸载器",
+                out waitError) ||
+                !WaitForIdentifiedProcessExit(
+                    applicationProcessId,
+                    applicationProcessStartTicks,
+                    "FilePrompt AI 主程序",
+                    out waitError))
+            {
+                ShowWorkerError(waitError, silent, 4);
+                return;
+            }
 
             List<ManifestEntry> entries;
             string manifestError;
@@ -412,21 +810,30 @@ namespace FilePromptAIUninstaller
                 releaseRoot,
                 entries,
                 manifestHash);
-            if (deleteData)
+            if (deleteData && IsReleaseDeletionSuccessful(result))
             {
                 DeleteUserData(result);
+            }
+            else if (deleteData)
+            {
+                result.DataDeletionRequested = true;
+                result.Warnings.Add(
+                    "发布文件未能通过完整卸载检查，用户数据也已保留，未删除任何用户数据。");
             }
 
             if (silent)
             {
-                Environment.ExitCode = result.FailedFiles == 0 &&
-                    result.ModifiedFiles == 0 &&
+                Environment.ExitCode = IsReleaseDeletionSuccessful(result) &&
                     !result.DataDeletionFailed
                     ? 0
                     : 4;
             }
             else
             {
+                Environment.ExitCode = IsReleaseDeletionSuccessful(result) &&
+                    !result.DataDeletionFailed
+                    ? 0
+                    : 4;
                 ShowResult(result, releaseRoot);
             }
         }
@@ -476,18 +883,105 @@ namespace FilePromptAIUninstaller
             }
         }
 
-        private static void WaitForParent(int processId)
+        private static bool TryCaptureProcessStartTicks(
+            int processId,
+            out long startTicks,
+            out string error)
         {
+            startTicks = 0;
+            error = string.Empty;
+            if (processId == 0)
+            {
+                return true;
+            }
+
             try
             {
-                using (Process parent = Process.GetProcessById(processId))
+                using (Process process = Process.GetProcessById(processId))
                 {
-                    parent.WaitForExit(30000);
+                    if (process.HasExited)
+                    {
+                        return true;
+                    }
+
+                    startTicks = process.StartTime.ToUniversalTime().Ticks;
+                    return true;
                 }
             }
-            catch
+            catch (ArgumentException)
             {
-                // The original process may already have exited.
+                // The application completed before the uninstaller captured it.
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                // The process exited while its identity was being captured.
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error =
+                    "无法确认 FilePrompt AI 主程序进程，未删除任何文件：\r\n\r\n" +
+                    exception.Message;
+                return false;
+            }
+        }
+
+        private static bool WaitForIdentifiedProcessExit(
+            int processId,
+            long expectedStartTicks,
+            string description,
+            out string error)
+        {
+            error = string.Empty;
+            if (processId == 0 || expectedStartTicks == 0)
+            {
+                return true;
+            }
+
+            try
+            {
+                using (Process process = Process.GetProcessById(processId))
+                {
+                    if (process.HasExited)
+                    {
+                        return true;
+                    }
+
+                    long actualStartTicks = process.StartTime
+                        .ToUniversalTime().Ticks;
+                    if (actualStartTicks != expectedStartTicks)
+                    {
+                        // The original process exited and Windows reused its PID.
+                        return true;
+                    }
+
+                    if (!process.WaitForExit(ProcessExitWaitMilliseconds))
+                    {
+                        error =
+                            "等待" + description + "退出超时，未删除任何文件。\r\n\r\n" +
+                            "请关闭 FilePrompt AI 后重新运行卸载器。";
+                        return false;
+                    }
+
+                    process.WaitForExit();
+                    return true;
+                }
+            }
+            catch (ArgumentException)
+            {
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error =
+                    "无法确认" + description + "已经退出，未删除任何文件：\r\n\r\n" +
+                    exception.Message;
+                return false;
             }
         }
 
@@ -642,8 +1136,12 @@ namespace FilePromptAIUninstaller
                     !File.Exists(manifestPath))
                 {
                     throw new FileNotFoundException(
-                        "发布目录中缺少 " + ManifestFileName +
-                        "，为避免误删，卸载已停止。");
+                        "没有在以下实际检查目录找到卸载清单：\r\n" +
+                        releaseRoot + "\r\n\r\n" +
+                        "缺少文件：" + ManifestFileName + "\r\n\r\n" +
+                        "请先将完整离线压缩包全部解压到同一个文件夹，" +
+                        "再运行该发布根目录内的 " + UninstallerFileName +
+                        "。不要只复制或单独运行卸载器文件。为避免误删，卸载已停止。");
                 }
 
                 byte[] manifestBytes = File.ReadAllBytes(manifestPath);
@@ -841,10 +1339,16 @@ namespace FilePromptAIUninstaller
             string manifestHash)
         {
             UninstallResult result = new UninstallResult();
-            List<ManifestEntry> controlEntries = new List<ManifestEntry>();
+            List<PreparedFile> payloadFiles = new List<PreparedFile>();
+            List<PreparedFile> controlFiles = new List<PreparedFile>();
+            List<PreparedFile> preparedFiles = new List<PreparedFile>();
+            List<PreparedFile> openedFiles = new List<PreparedFile>();
             List<string> candidateDirectories = new List<string>();
             string canonicalRoot = string.Empty;
             SafeFileHandle rootHandle = null;
+            bool filesCommitted = false;
+            bool commitAttempted = false;
+            bool recoveryMode = false;
 
             try
             {
@@ -872,6 +1376,18 @@ namespace FilePromptAIUninstaller
 
                 canonicalRoot = GetFinalHandlePath(rootHandle);
 
+                string recoveryError;
+                if (!TryGetRecoveryMode(
+                    releaseRoot,
+                    manifestHash,
+                    out recoveryMode,
+                    out recoveryError))
+                {
+                    result.FailedFiles++;
+                    result.Warnings.Add(recoveryError);
+                    return result;
+                }
+
                 int index;
                 for (index = 0; index < entries.Count; index++)
                 {
@@ -881,48 +1397,107 @@ namespace FilePromptAIUninstaller
                         entry.FullPath,
                         candidateDirectories);
 
-                    if (IsUninstallerControlFile(releaseRoot, entry.FullPath))
+                    PreparedFile prepared;
+                    if (TryPrepareVerifiedFile(
+                        canonicalRoot,
+                        entry,
+                        recoveryMode &&
+                            !IsUninstallerControlFile(
+                                releaseRoot,
+                                entry.FullPath),
+                        result,
+                        out prepared))
                     {
-                        controlEntries.Add(entry);
-                        continue;
+                        if (prepared != null)
+                        {
+                            openedFiles.Add(prepared);
+                            if (IsUninstallerControlFile(
+                                releaseRoot,
+                                entry.FullPath))
+                            {
+                                controlFiles.Add(prepared);
+                            }
+                            else
+                            {
+                                payloadFiles.Add(prepared);
+                            }
+                        }
                     }
-
-                    DeleteVerifiedFile(canonicalRoot, entry, result);
                 }
 
-                if (result.ModifiedFiles == 0 && result.FailedFiles == 0)
+                ManifestEntry manifestEntry = new ManifestEntry();
+                manifestEntry.ExpectedHash = manifestHash;
+                manifestEntry.RelativePath = ManifestFileName;
+                manifestEntry.FullPath = Path.GetFullPath(
+                    Path.Combine(releaseRoot, ManifestFileName));
+                PreparedFile preparedManifest;
+                if (TryPrepareVerifiedFile(
+                    canonicalRoot,
+                    manifestEntry,
+                    false,
+                    result,
+                    out preparedManifest))
                 {
-                    for (index = 0; index < controlEntries.Count; index++)
+                    if (preparedManifest != null)
                     {
-                        DeleteVerifiedFile(
-                            canonicalRoot,
-                            controlEntries[index],
-                            result);
-                    }
-
-                    if (result.ModifiedFiles == 0 && result.FailedFiles == 0)
-                    {
-                        TryDeleteManifest(
-                            releaseRoot,
-                            canonicalRoot,
-                            manifestHash,
-                            result);
+                        openedFiles.Add(preparedManifest);
+                        controlFiles.Add(preparedManifest);
                     }
                 }
-                else if (controlEntries.Count > 0)
+
+                if (recoveryMode)
+                {
+                    ManifestEntry recoveryEntry = CreateRecoveryMarkerEntry(
+                        releaseRoot,
+                        manifestHash);
+                    PreparedFile preparedRecovery;
+                    if (TryPrepareVerifiedFile(
+                        canonicalRoot,
+                        recoveryEntry,
+                        false,
+                        result,
+                        out preparedRecovery))
+                    {
+                        if (preparedRecovery != null)
+                        {
+                            openedFiles.Add(preparedRecovery);
+                            controlFiles.Add(preparedRecovery);
+                        }
+                    }
+                }
+
+                if (result.MissingFiles != 0 ||
+                    result.ModifiedFiles != 0 ||
+                    result.FailedFiles != 0 ||
+                    payloadFiles.Count + controlFiles.Count +
+                        result.AlreadyRemovedFiles !=
+                        entries.Count + 1 + (recoveryMode ? 1 : 0))
                 {
                     result.Warnings.Add(
-                        "检测到修改过或无法删除的发布文件，已保留卸载器和校验清单，便于关闭占用程序后重试。");
+                        "卸载前完整安全检查未通过。程序文件、卸载清单和发布目录均保持原样，未删除任何文件。");
+                    return result;
                 }
 
-                candidateDirectories.Sort(ComparePathLengthDescending);
-                for (index = 0; index < candidateDirectories.Count; index++)
+                // Recovery controls are committed only after every payload.
+                // The root uninstaller is always the final delete operation,
+                // so any earlier failure leaves an executable retry entry.
+                preparedFiles.AddRange(payloadFiles);
+                AddControlFilesForCommit(
+                    releaseRoot,
+                    controlFiles,
+                    preparedFiles);
+                commitAttempted = true;
+                if (!TryCommitPreparedFiles(preparedFiles, result))
                 {
-                    TryDeleteEmptyDirectory(
-                        releaseRoot,
-                        canonicalRoot,
-                        candidateDirectories[index],
-                        result);
+                    result.Warnings.Add(
+                        "提交删除时 Windows 返回错误。Windows 可能已经删除部分载荷；根卸载器会尽量保留，并写入恢复标记供再次运行。请勿手工移动剩余文件。"
+                    );
+                }
+                else
+                {
+                    filesCommitted = true;
+                    result.DeletedFiles = preparedFiles.Count;
+                    result.ManifestDeleted = true;
                 }
             }
             catch (Exception exception)
@@ -934,14 +1509,55 @@ namespace FilePromptAIUninstaller
             }
             finally
             {
+                if (commitAttempted && !filesCommitted &&
+                    result.PartialDeletion)
+                {
+                    DisposePreparedFiles(openedFiles);
+                    openedFiles.Clear();
+                    if (rootHandle != null)
+                    {
+                        rootHandle.Dispose();
+                        rootHandle = null;
+                    }
+                    result.DeletedFiles = CountAbsentReleaseFiles(
+                        releaseRoot,
+                        entries);
+                    EnsureRetryMetadata(
+                        releaseRoot,
+                        entries,
+                        result);
+                    if (result.DeletedFiles > 0)
+                    {
+                        result.PartialDeletion = true;
+                        result.Warnings.Add(
+                            "本次提交失败后检测到 " +
+                            result.DeletedFiles.ToString() +
+                            " 个清单载荷已不存在。请再次运行发布根目录中的 " +
+                            UninstallerFileName + " 完成清理。"
+                        );
+                    }
+                }
+                DisposePreparedFiles(openedFiles);
+
                 if (rootHandle != null)
                 {
                     rootHandle.Dispose();
                 }
             }
 
-            if (!string.IsNullOrEmpty(canonicalRoot))
+            if (filesCommitted && !string.IsNullOrEmpty(canonicalRoot))
             {
+                candidateDirectories.Sort(ComparePathLengthDescending);
+                int index;
+                for (index = 0; index < candidateDirectories.Count; index++)
+                {
+                    TryDeleteEmptyDirectory(
+                        releaseRoot,
+                        canonicalRoot,
+                        candidateDirectories[index],
+                        result);
+                }
+
                 TryDeleteEmptyDirectory(
                     releaseRoot,
                     canonicalRoot,
@@ -952,35 +1568,326 @@ namespace FilePromptAIUninstaller
             return result;
         }
 
-        private static void DeleteVerifiedFile(
-            string canonicalRoot,
-            ManifestEntry entry,
+        private static bool IsReleaseDeletionSuccessful(
             UninstallResult result)
         {
+            return result != null &&
+                result.DeletedFiles > 0 &&
+                result.MissingFiles == 0 &&
+                result.ModifiedFiles == 0 &&
+                result.FailedFiles == 0 &&
+                !result.PartialDeletion &&
+                result.ManifestDeleted;
+        }
+
+        private static bool IsUninstallerControlFile(
+            string releaseRoot,
+            string fullPath)
+        {
+            string uninstaller = Path.GetFullPath(
+                Path.Combine(releaseRoot, UninstallerFileName));
+            return string.Equals(
+                    fullPath,
+                    uninstaller,
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    fullPath,
+                    uninstaller + ".config",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void AddControlFilesForCommit(
+            string releaseRoot,
+            List<PreparedFile> controlFiles,
+            List<PreparedFile> destination)
+        {
+            string uninstaller = Path.GetFullPath(
+                Path.Combine(releaseRoot, UninstallerFileName));
+            PreparedFile uninstallerFile = null;
+            int index;
+            for (index = 0; index < controlFiles.Count; index++)
+            {
+                PreparedFile prepared = controlFiles[index];
+                if (string.Equals(
+                    prepared.Entry.FullPath,
+                    uninstaller,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    uninstallerFile = prepared;
+                }
+                else
+                {
+                    destination.Add(prepared);
+                }
+            }
+
+            if (uninstallerFile == null)
+            {
+                throw new InvalidDataException(
+                    "卸载清单缺少可保留到最后的根卸载器。"
+                );
+            }
+
+            destination.Add(uninstallerFile);
+        }
+
+        private static bool TryGetRecoveryMode(
+            string releaseRoot,
+            string manifestHash,
+            out bool recoveryMode,
+            out string error)
+        {
+            recoveryMode = false;
+            error = string.Empty;
+            string markerPath = Path.GetFullPath(
+                Path.Combine(releaseRoot, RecoveryMarkerFileName));
+            try
+            {
+                if (!IsStrictChildPath(releaseRoot, markerPath))
+                {
+                    throw new InvalidDataException("卸载恢复标记路径越界。");
+                }
+
+                if (!File.Exists(markerPath))
+                {
+                    return true;
+                }
+
+                FileAttributes attributes = File.GetAttributes(markerPath);
+                if ((attributes & FileAttributes.ReparsePoint) != 0 ||
+                    (attributes & FileAttributes.Directory) != 0)
+                {
+                    throw new InvalidDataException(
+                        "卸载恢复标记不是普通文件。"
+                    );
+                }
+
+                byte[] actual = File.ReadAllBytes(markerPath);
+                byte[] expected = BuildRecoveryMarkerBytes(manifestHash);
+                if (!ByteArraysEqual(actual, expected))
+                {
+                    throw new InvalidDataException(
+                        "卸载恢复标记与当前校验清单不匹配。请重新完整解压原 ZIP。"
+                    );
+                }
+
+                recoveryMode = true;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = "无法验证卸载恢复状态，未删除任何文件：" +
+                    exception.Message;
+                return false;
+            }
+        }
+
+        private static ManifestEntry CreateRecoveryMarkerEntry(
+            string releaseRoot,
+            string manifestHash)
+        {
+            byte[] bytes = BuildRecoveryMarkerBytes(manifestHash);
+            ManifestEntry entry = new ManifestEntry();
+            entry.ExpectedHash = ComputeSha256(bytes);
+            entry.RelativePath = RecoveryMarkerFileName;
+            entry.FullPath = Path.GetFullPath(
+                Path.Combine(releaseRoot, RecoveryMarkerFileName));
+            return entry;
+        }
+
+        private static byte[] BuildRecoveryMarkerBytes(string manifestHash)
+        {
+            string text =
+                "FilePromptAI-Uninstall-Recovery: 1\r\n" +
+                "Manifest-SHA256: " + manifestHash + "\r\n";
+            return new UTF8Encoding(false).GetBytes(text);
+        }
+
+        private static bool ByteArraysEqual(byte[] left, byte[] right)
+        {
+            if (left == null || right == null || left.Length != right.Length)
+            {
+                return false;
+            }
+
+            int difference = 0;
+            int index;
+            for (index = 0; index < left.Length; index++)
+            {
+                difference |= left[index] ^ right[index];
+            }
+
+            return difference == 0;
+        }
+
+        private static void EnsureRetryMetadata(
+            string releaseRoot,
+            List<ManifestEntry> entries,
+            UninstallResult result)
+        {
+            try
+            {
+                string uninstallerPath = Path.GetFullPath(
+                    Path.Combine(releaseRoot, UninstallerFileName));
+                string workerPath = Path.GetFullPath(Application.ExecutablePath);
+                EnsureRecoveryFile(workerPath, uninstallerPath);
+                EnsureRecoveryFile(
+                    workerPath + ".config",
+                    uninstallerPath + ".config");
+
+                string manifestPath = Path.GetFullPath(
+                    Path.Combine(releaseRoot, ManifestFileName));
+                if (!File.Exists(manifestPath))
+                {
+                    WriteRecoveryFile(
+                        manifestPath,
+                        BuildCanonicalManifestBytes(entries));
+                }
+
+                string markerPath = Path.GetFullPath(
+                    Path.Combine(releaseRoot, RecoveryMarkerFileName));
+                byte[] markerBytes = BuildRecoveryMarkerBytes(
+                    ComputeSha256(File.ReadAllBytes(manifestPath)));
+                if (!File.Exists(markerPath) ||
+                    !ByteArraysEqual(File.ReadAllBytes(markerPath), markerBytes))
+                {
+                    WriteRecoveryFile(markerPath, markerBytes);
+                }
+            }
+            catch (Exception exception)
+            {
+                result.PartialDeletion = true;
+                result.Warnings.Add(
+                    "无法完整写入卸载恢复信息：" + exception.Message +
+                    "。请重新完整解压原 ZIP 后再次运行卸载器。"
+                );
+            }
+        }
+
+        private static void EnsureRecoveryFile(
+            string source,
+            string destination)
+        {
+            if (File.Exists(destination))
+            {
+                return;
+            }
+
+            if (!File.Exists(source))
+            {
+                throw new FileNotFoundException(
+                    "恢复源文件不存在。",
+                    source);
+            }
+
+            byte[] bytes = File.ReadAllBytes(source);
+            WriteRecoveryFile(destination, bytes);
+        }
+
+        private static void WriteRecoveryFile(string path, byte[] bytes)
+        {
+            string temporary = path + "." +
+                Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllBytes(temporary, bytes);
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+                File.Move(temporary, path);
+            }
+            finally
+            {
+                if (File.Exists(temporary))
+                {
+                    File.Delete(temporary);
+                }
+            }
+        }
+
+        private static byte[] BuildCanonicalManifestBytes(
+            List<ManifestEntry> entries)
+        {
+            StringBuilder manifest = new StringBuilder();
+            int index;
+            for (index = 0; index < entries.Count; index++)
+            {
+                manifest.Append(entries[index].ExpectedHash);
+                manifest.Append(" *");
+                manifest.Append(entries[index].RelativePath);
+                manifest.Append("\r\n");
+            }
+
+            return new UTF8Encoding(false).GetBytes(manifest.ToString());
+        }
+
+        private static int CountAbsentReleaseFiles(
+            string releaseRoot,
+            List<ManifestEntry> entries)
+        {
+            int missing = 0;
+            int index;
+            for (index = 0; index < entries.Count; index++)
+            {
+                if (!IsUninstallerControlFile(
+                        releaseRoot,
+                        entries[index].FullPath) &&
+                    !File.Exists(entries[index].FullPath))
+                {
+                    missing++;
+                }
+            }
+
+            return missing;
+        }
+
+        private static bool TryPrepareVerifiedFile(
+            string canonicalRoot,
+            ManifestEntry entry,
+            bool allowMissingFromRecovery,
+            UninstallResult result,
+            out PreparedFile prepared)
+        {
+            prepared = null;
             SafeFileHandle handle = null;
+            FileStream stream = null;
+            bool transferred = false;
             try
             {
                 int openError;
-                handle = OpenNativePath(
+                handle = OpenNativeFileForUninstallPreflight(
                     entry.FullPath,
-                    false,
-                    true,
                     out openError);
                 if (handle.IsInvalid)
                 {
                     if (openError == ErrorFileNotFound ||
                         openError == ErrorPathNotFound)
                     {
-                        result.MissingFiles++;
+                        if (allowMissingFromRecovery)
+                        {
+                            result.AlreadyRemovedFiles++;
+                        }
+                        else
+                        {
+                            result.MissingFiles++;
+                            result.Warnings.Add(
+                                "清单中的文件不存在，已停止卸载：" +
+                                entry.RelativePath);
+                        }
                     }
                     else
                     {
-                        throw CreateNativeException(
-                            openError,
-                            "无法锁定文件");
+                        result.FailedFiles++;
+                        result.Warnings.Add(
+                            "文件被占用、无删除权限或无法锁定，已停止卸载：" +
+                            entry.RelativePath + "；" +
+                            CreateNativeException(
+                                openError,
+                                "Windows 无法取得安全删除句柄").Message);
                     }
 
-                    return;
+                    return false;
                 }
 
                 ByHandleFileInformation information =
@@ -992,7 +1899,16 @@ namespace FilePromptAIUninstaller
                     result.Warnings.Add(
                         "文件身份是目录或重解析点，已保留：" +
                         entry.RelativePath);
-                    return;
+                    return false;
+                }
+
+                if ((information.FileAttributes & FileAttributeReadOnly) != 0)
+                {
+                    result.FailedFiles++;
+                    result.Warnings.Add(
+                        "文件是只读文件，Windows 无法安全删除，已停止卸载：" +
+                        entry.RelativePath);
+                    return false;
                 }
 
                 string expectedFinalPath = Path.GetFullPath(
@@ -1008,43 +1924,146 @@ namespace FilePromptAIUninstaller
                     result.Warnings.Add(
                         "文件最终路径与发布目录身份不一致，已保留：" +
                         entry.RelativePath);
-                    return;
+                    return false;
                 }
 
-                using (FileStream stream = new FileStream(
+                stream = new FileStream(
                     handle,
                     FileAccess.Read,
                     128 * 1024,
-                    false))
+                    false);
+                string actualHash = ComputeSha256(stream);
+                if (!string.Equals(
+                    actualHash,
+                    entry.ExpectedHash,
+                    StringComparison.OrdinalIgnoreCase))
                 {
-                    string actualHash = ComputeSha256(stream);
-                    if (!string.Equals(
-                        actualHash,
-                        entry.ExpectedHash,
-                        StringComparison.OrdinalIgnoreCase))
-                    {
-                        result.ModifiedFiles++;
-                        result.Warnings.Add(
-                            "文件内容与发布清单不一致，已保留：" +
-                            entry.RelativePath);
-                        return;
-                    }
-
-                    MarkHandleForDeletion(handle);
-                    result.DeletedFiles++;
+                    result.ModifiedFiles++;
+                    result.Warnings.Add(
+                        "文件内容与发布清单不一致，已停止卸载：" +
+                        entry.RelativePath);
+                    return false;
                 }
+
+                prepared = new PreparedFile();
+                prepared.Entry = entry;
+                prepared.Handle = handle;
+                prepared.Stream = stream;
+                transferred = true;
+                return true;
             }
             catch (Exception exception)
             {
                 result.FailedFiles++;
                 result.Warnings.Add(
-                    "无法删除 " + entry.RelativePath + "：" + exception.Message);
+                    "无法完成卸载前检查 " + entry.RelativePath + "：" +
+                    exception.Message);
+                return false;
             }
             finally
             {
-                if (handle != null)
+                if (!transferred)
                 {
-                    handle.Dispose();
+                    if (stream != null)
+                    {
+                        stream.Dispose();
+                    }
+                    else if (handle != null)
+                    {
+                        handle.Dispose();
+                    }
+                }
+            }
+        }
+
+        private static bool TryCommitPreparedFiles(
+            List<PreparedFile> preparedFiles,
+            UninstallResult result)
+        {
+            int markedCount = 0;
+            try
+            {
+                for (markedCount = 0;
+                    markedCount < preparedFiles.Count;
+                    markedCount++)
+                {
+                    if (commitFailureAfterForTests >= 0 &&
+                        markedCount == commitFailureAfterForTests)
+                    {
+                        throw new InvalidOperationException(
+                            "测试注入：提交删除失败。");
+                    }
+
+                    SetHandleDeletion(
+                        preparedFiles[markedCount].Handle,
+                        true);
+                    preparedFiles[markedCount].DeleteMarked = true;
+                }
+
+                return true;
+            }
+            catch (Exception exception)
+            {
+                result.FailedFiles++;
+                string relativePath = markedCount < preparedFiles.Count
+                    ? preparedFiles[markedCount].Entry.RelativePath
+                    : "未知文件";
+                result.Warnings.Add(
+                    "Windows 无法提交删除 " + relativePath + "：" +
+                    exception.Message);
+
+                int rollbackIndex;
+                for (rollbackIndex = markedCount - 1;
+                    rollbackIndex >= 0;
+                    rollbackIndex--)
+                {
+                    try
+                    {
+                        if (rollbackFailureForTests && rollbackIndex == 0)
+                        {
+                            throw new InvalidOperationException(
+                                "测试注入：撤销删除标记失败。");
+                        }
+
+                        SetHandleDeletion(
+                            preparedFiles[rollbackIndex].Handle,
+                            false);
+                        preparedFiles[rollbackIndex].DeleteMarked = false;
+                    }
+                    catch (Exception rollbackException)
+                    {
+                        result.PartialDeletion = true;
+                        result.Warnings.Add(
+                            "无法撤销文件删除标记 " +
+                            preparedFiles[rollbackIndex].Entry.RelativePath +
+                            "：" + rollbackException.Message);
+                    }
+                }
+
+                return false;
+            }
+        }
+
+        private static void DisposePreparedFiles(
+            List<PreparedFile> preparedFiles)
+        {
+            int index;
+            for (index = preparedFiles.Count - 1; index >= 0; index--)
+            {
+                try
+                {
+                    if (preparedFiles[index].Stream != null)
+                    {
+                        preparedFiles[index].Stream.Dispose();
+                    }
+                    else if (preparedFiles[index].Handle != null)
+                    {
+                        preparedFiles[index].Handle.Dispose();
+                    }
+                }
+                catch
+                {
+                    // Windows will close remaining native handles when the worker exits.
                 }
             }
         }
@@ -1071,39 +2090,6 @@ namespace FilePromptAIUninstaller
             {
                 return ComputeSha256(stream);
             }
-        }
-
-        private static void TryDeleteManifest(
-            string releaseRoot,
-            string canonicalRoot,
-            string manifestHash,
-            UninstallResult result)
-        {
-            ManifestEntry manifest = new ManifestEntry();
-            manifest.ExpectedHash = manifestHash;
-            manifest.RelativePath = ManifestFileName;
-            manifest.FullPath = Path.GetFullPath(
-                Path.Combine(releaseRoot, ManifestFileName));
-            int deletedBefore = result.DeletedFiles;
-            DeleteVerifiedFile(canonicalRoot, manifest, result);
-            result.ManifestDeleted = result.DeletedFiles > deletedBefore;
-        }
-
-        private static bool IsUninstallerControlFile(
-            string releaseRoot,
-            string fullPath)
-        {
-            string uninstaller = Path.GetFullPath(
-                Path.Combine(releaseRoot, UninstallerFileName));
-            string configuration = uninstaller + ".config";
-            return string.Equals(
-                fullPath,
-                uninstaller,
-                StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(
-                    fullPath,
-                    configuration,
-                    StringComparison.OrdinalIgnoreCase);
         }
 
         private static void AddParentDirectories(
@@ -1174,6 +2160,22 @@ namespace FilePromptAIUninstaller
             return handle;
         }
 
+        private static SafeFileHandle OpenNativeFileForUninstallPreflight(
+            string path,
+            out int error)
+        {
+            SafeFileHandle handle = CreateFile(
+                path,
+                DeleteAccess | FileReadAttributes | GenericRead,
+                0,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagOpenReparsePoint | FileFlagSequentialScan,
+                IntPtr.Zero);
+            error = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0;
+            return handle;
+        }
+
         private static ByHandleFileInformation GetNativeInformation(
             SafeFileHandle handle)
         {
@@ -1238,11 +2240,13 @@ namespace FilePromptAIUninstaller
             return TrimTrailingSeparators(Path.GetFullPath(value));
         }
 
-        private static void MarkHandleForDeletion(SafeFileHandle handle)
+        private static void SetHandleDeletion(
+            SafeFileHandle handle,
+            bool deleteFile)
         {
             FileDispositionInformation information =
                 new FileDispositionInformation();
-            information.DeleteFile = true;
+            information.DeleteFile = deleteFile;
             uint size = (uint)Marshal.SizeOf(
                 typeof(FileDispositionInformation));
             if (!SetFileInformationByHandle(
@@ -1253,8 +2257,15 @@ namespace FilePromptAIUninstaller
             {
                 throw CreateNativeException(
                     Marshal.GetLastWin32Error(),
-                    "Windows 拒绝句柄级删除");
+                    deleteFile
+                        ? "Windows 拒绝句柄级删除"
+                        : "Windows 拒绝撤销句柄级删除");
             }
+        }
+
+        private static void MarkHandleForDeletion(SafeFileHandle handle)
+        {
+            SetHandleDeletion(handle, true);
         }
 
         private static Win32Exception CreateNativeException(
@@ -1359,66 +2370,26 @@ namespace FilePromptAIUninstaller
         private static void DeleteUserData(UninstallResult result)
         {
             result.DataDeletionRequested = true;
-            string dataRoot = GetExpectedDataRoot();
+            string dataDeletionError;
+            if (!CanDeleteDefaultUserData(out dataDeletionError))
+            {
+                result.DataDeletionFailed = true;
+                result.Warnings.Add(dataDeletionError);
+                return;
+            }
+
+            string dataRoot = GetDefaultDataRoot();
             try
             {
-                string localRoot = TrimTrailingSeparators(Path.GetFullPath(
-                    Environment.GetFolderPath(
-                        Environment.SpecialFolder.LocalApplicationData)));
-                dataRoot = Path.GetFullPath(dataRoot);
-                if (!IsStrictChildPath(localRoot, dataRoot) ||
-                    !string.Equals(
-                        Path.GetFileName(dataRoot),
-                        DataDirectoryName,
-                        StringComparison.Ordinal))
+                bool alreadyMissing;
+                string deletionError;
+                if (!TryDeleteUserDataTree(
+                    dataRoot,
+                    out alreadyMissing,
+                    out deletionError))
                 {
                     throw new InvalidOperationException(
-                        "用户数据目录未通过边界校验。");
-                }
-
-                int openError;
-                SafeFileHandle rootHandle = OpenNativePath(
-                    dataRoot,
-                    true,
-                    false,
-                    out openError);
-                if (rootHandle.IsInvalid)
-                {
-                    rootHandle.Dispose();
-                    if (openError == ErrorFileNotFound ||
-                        openError == ErrorPathNotFound)
-                    {
-                        result.DataDeleted = true;
-                        return;
-                    }
-
-                    throw CreateNativeException(
-                        openError,
-                        "无法锁定用户数据根目录");
-                }
-
-                using (rootHandle)
-                {
-                    ByHandleFileInformation rootInformation =
-                        GetNativeInformation(rootHandle);
-                    if ((rootInformation.FileAttributes &
-                            FileAttributeDirectory) == 0 ||
-                        (rootInformation.FileAttributes &
-                            FileAttributeReparsePoint) != 0)
-                    {
-                        throw new InvalidOperationException(
-                            "用户数据根目录身份无效或是重解析点，已拒绝递归访问。");
-                    }
-
-                    string canonicalDataRoot =
-                        GetFinalHandlePath(rootHandle);
-                    DeleteOpenedUserDirectory(
-                        dataRoot,
-                        canonicalDataRoot,
-                        dataRoot,
-                        canonicalDataRoot,
-                        rootHandle,
-                        true);
+                        deletionError);
                 }
 
                 result.DataDeleted = true;
@@ -1431,171 +2402,614 @@ namespace FilePromptAIUninstaller
             }
         }
 
-        private static void DeleteOpenedUserDirectory(
-            string dataRoot,
-            string canonicalDataRoot,
-            string directory,
-            string expectedFinalPath,
-            SafeFileHandle directoryHandle,
-            bool isRoot)
+        private static bool CanDeleteDefaultUserData(out string error)
         {
-            ByHandleFileInformation directoryInformation =
-                GetNativeInformation(directoryHandle);
-            if ((directoryInformation.FileAttributes &
-                    FileAttributeDirectory) == 0 ||
-                !string.Equals(
-                    GetFinalHandlePath(directoryHandle),
-                    expectedFinalPath,
+            error = string.Empty;
+            try
+            {
+                string defaultRoot = GetDefaultDataRoot();
+                string configured = Environment.GetEnvironmentVariable(
+                    DataRootOverrideVariable,
+                    EnvironmentVariableTarget.Process);
+                if (configured == null || configured.Trim().Length == 0)
+                {
+                    return true;
+                }
+
+                string configuredRoot = TrimTrailingSeparators(
+                    Path.GetFullPath(configured.Trim()));
+                if (string.Equals(
+                    configuredRoot,
+                    defaultRoot,
                     StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException(
-                    "用户数据目录句柄身份不一致，删除已停止。");
+                {
+                    return true;
+                }
+
+                error =
+                    "当前程序使用自定义用户数据目录。为避免误删，卸载器已拒绝删除用户数据；" +
+                    "自定义目录和默认目录均会保留。\r\n\r\n" +
+                    "当前目录：" + configuredRoot;
+                return false;
             }
-
-            if ((directoryInformation.FileAttributes &
-                FileAttributeReparsePoint) != 0)
+            catch (Exception exception)
             {
-                if (isRoot)
-                {
-                    throw new InvalidOperationException(
-                        "用户数据根目录是重解析点，删除已停止。");
-                }
-
-                MarkHandleForDeletion(directoryHandle);
-                return;
+                error =
+                    "无法确认当前用户数据目录，卸载器已拒绝删除任何用户数据：" +
+                    exception.Message;
+                return false;
             }
-
-            string[] files = Directory.GetFiles(directory);
-            int index;
-            for (index = 0; index < files.Length; index++)
-            {
-                string file = Path.GetFullPath(files[index]);
-                if (!IsStrictChildPath(dataRoot, file))
-                {
-                    throw new InvalidOperationException(
-                        "用户数据文件路径越界，删除已停止。");
-                }
-
-                string expectedFilePath = Path.GetFullPath(Path.Combine(
-                    expectedFinalPath,
-                    Path.GetFileName(file)));
-                DeleteUserFileByHandle(
-                    canonicalDataRoot,
-                    file,
-                    expectedFilePath);
-            }
-
-            string[] directories = Directory.GetDirectories(directory);
-            for (index = 0; index < directories.Length; index++)
-            {
-                string child = Path.GetFullPath(directories[index]);
-                if (!IsStrictChildPath(dataRoot, child))
-                {
-                    throw new InvalidOperationException(
-                        "用户数据子目录路径越界，删除已停止。");
-                }
-
-                string expectedChildPath = Path.GetFullPath(Path.Combine(
-                    expectedFinalPath,
-                    Path.GetFileName(child)));
-                if (!IsStrictChildPath(
-                    canonicalDataRoot,
-                    expectedChildPath))
-                {
-                    throw new InvalidOperationException(
-                        "用户数据子目录最终路径越界，删除已停止。");
-                }
-
-                int childError;
-                SafeFileHandle childHandle = OpenNativePath(
-                    child,
-                    true,
-                    false,
-                    out childError);
-                if (childHandle.IsInvalid)
-                {
-                    childHandle.Dispose();
-                    if (childError == ErrorFileNotFound ||
-                        childError == ErrorPathNotFound)
-                    {
-                        continue;
-                    }
-
-                    throw CreateNativeException(
-                        childError,
-                        "无法锁定用户数据子目录");
-                }
-
-                using (childHandle)
-                {
-                    DeleteOpenedUserDirectory(
-                        dataRoot,
-                        canonicalDataRoot,
-                        child,
-                        expectedChildPath,
-                        childHandle,
-                        false);
-                }
-            }
-
-            MarkHandleForDeletion(directoryHandle);
         }
 
-        private static void DeleteUserFileByHandle(
-            string canonicalDataRoot,
-            string file,
-            string expectedFinalPath)
+        private static bool TryDeleteUserDataTree(
+            string dataRoot,
+            out bool alreadyMissing,
+            out string error)
         {
-            if (!IsStrictChildPath(canonicalDataRoot, expectedFinalPath))
+            alreadyMissing = false;
+            error = string.Empty;
+            PreparedUserDataTree tree = new PreparedUserDataTree();
+            try
             {
-                throw new InvalidOperationException(
-                    "用户数据文件最终路径越界，删除已停止。");
-            }
-
-            int openError;
-            SafeFileHandle handle = OpenNativePath(
-                file,
-                false,
-                false,
-                out openError);
-            if (handle.IsInvalid)
-            {
-                handle.Dispose();
-                if (openError == ErrorFileNotFound ||
-                    openError == ErrorPathNotFound)
+                tree.LogicalRoot = TrimTrailingSeparators(
+                    Path.GetFullPath(dataRoot));
+                string pathRoot = TrimTrailingSeparators(
+                    Path.GetPathRoot(tree.LogicalRoot));
+                if (string.IsNullOrEmpty(tree.LogicalRoot) ||
+                    string.Equals(
+                        tree.LogicalRoot,
+                        pathRoot,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(
+                        Path.GetFileName(tree.LogicalRoot),
+                        DataDirectoryName,
+                        StringComparison.Ordinal))
                 {
-                    return;
+                    error = "用户数据目录未通过安全边界校验。";
+                    return false;
                 }
 
-                throw CreateNativeException(
-                    openError,
-                    "无法锁定用户数据文件");
-            }
+                bool rootMissing;
+                if (!TryPrepareUserDataDirectory(
+                    tree,
+                    tree.LogicalRoot,
+                    null,
+                    true,
+                    out rootMissing,
+                    out error))
+                {
+                    return false;
+                }
 
-            using (handle)
+                if (rootMissing)
+                {
+                    alreadyMissing = true;
+                    return true;
+                }
+
+                tree.CanonicalRoot = tree.Directories[0].FinalPath;
+                if (!string.Equals(
+                    tree.CanonicalRoot,
+                    tree.LogicalRoot,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    error =
+                        "用户数据根目录最终身份与默认目录不一致，删除已停止。";
+                    return false;
+                }
+
+                if (!ValidatePreparedUserDataTree(tree, out error))
+                {
+                    return false;
+                }
+
+                return CommitPreparedUserDataTree(tree, out error);
+            }
+            catch (Exception exception)
             {
+                error = "用户数据删除准备失败：" + exception.Message;
+                return false;
+            }
+            finally
+            {
+                DisposePreparedUserDataTree(tree);
+            }
+        }
+
+        private static bool TryPrepareUserDataDirectory(
+            PreparedUserDataTree tree,
+            string directory,
+            string expectedFinalPath,
+            bool isRoot,
+            out bool rootMissing,
+            out string error)
+        {
+            rootMissing = false;
+            error = string.Empty;
+            SafeFileHandle handle = null;
+            bool transferred = false;
+            try
+            {
+                int openError;
+                handle = OpenNativeUserDataDirectory(
+                    directory,
+                    out openError);
+                if (handle.IsInvalid)
+                {
+                    handle.Dispose();
+                    handle = null;
+                    if (isRoot &&
+                        (openError == ErrorFileNotFound ||
+                            openError == ErrorPathNotFound))
+                    {
+                        rootMissing = true;
+                        return true;
+                    }
+
+                    error = CreateNativeException(
+                        openError,
+                        "无法独占验证用户数据目录 " + directory).Message;
+                    return false;
+                }
+
                 ByHandleFileInformation information =
                     GetNativeInformation(handle);
-                if ((information.FileAttributes & FileAttributeDirectory) != 0 ||
+                string finalPath = GetFinalHandlePath(handle);
+                if ((information.FileAttributes & FileAttributeDirectory) == 0 ||
+                    (information.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                    (information.FileAttributes & FileAttributeReadOnly) != 0)
+                {
+                    error =
+                        "用户数据目录是只读目录、重解析点或身份无效，删除已停止：" +
+                        directory;
+                    return false;
+                }
+
+                if (isRoot)
+                {
+                    expectedFinalPath = finalPath;
+                }
+                else if (!IsStrictChildPath(tree.CanonicalRoot, finalPath) ||
                     !string.Equals(
-                        GetFinalHandlePath(handle),
+                        finalPath,
                         expectedFinalPath,
                         StringComparison.OrdinalIgnoreCase))
                 {
-                    throw new InvalidOperationException(
-                        "用户数据文件句柄身份不一致，删除已停止。");
+                    error =
+                        "用户数据子目录句柄身份不一致，删除已停止：" +
+                        directory;
+                    return false;
                 }
 
-                MarkHandleForDeletion(handle);
+                PreparedUserDataDirectory prepared =
+                    new PreparedUserDataDirectory();
+                prepared.LogicalPath = directory;
+                prepared.FinalPath = finalPath;
+                prepared.Identity = information;
+                prepared.Handle = handle;
+                tree.Directories.Add(prepared);
+                if (isRoot)
+                {
+                    tree.CanonicalRoot = finalPath;
+                }
+                transferred = true;
+
+                string[] entries = Directory.GetFileSystemEntries(directory);
+                Array.Sort(entries, StringComparer.OrdinalIgnoreCase);
+                int index;
+                for (index = 0; index < entries.Length; index++)
+                {
+                    string entry = Path.GetFullPath(entries[index]);
+                    if (!IsStrictChildPath(tree.LogicalRoot, entry))
+                    {
+                        error =
+                            "用户数据条目路径越界，删除已停止：" + entry;
+                        return false;
+                    }
+
+                    string name = Path.GetFileName(entry);
+                    prepared.EntryNames.Add(name);
+                    string expectedChildFinalPath = Path.GetFullPath(
+                        Path.Combine(finalPath, name));
+                    FileAttributes attributes = File.GetAttributes(entry);
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        bool childMissing;
+                        if (!TryPrepareUserDataDirectory(
+                            tree,
+                            entry,
+                            expectedChildFinalPath,
+                            false,
+                            out childMissing,
+                            out error) ||
+                            childMissing)
+                        {
+                            if (string.IsNullOrEmpty(error))
+                            {
+                                error =
+                                    "用户数据子目录在预检期间消失，删除已停止：" +
+                                    entry;
+                            }
+                            return false;
+                        }
+                    }
+                    else if (!TryPrepareUserDataFile(
+                        tree,
+                        entry,
+                        expectedChildFinalPath,
+                        out error))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
             }
+            catch (Exception exception)
+            {
+                error =
+                    "无法完成用户数据目录预检 " + directory + "：" +
+                    exception.Message;
+                return false;
+            }
+            finally
+            {
+                if (!transferred && handle != null)
+                {
+                    handle.Dispose();
+                }
+            }
+        }
+
+        private static bool TryPrepareUserDataFile(
+            PreparedUserDataTree tree,
+            string file,
+            string expectedFinalPath,
+            out string error)
+        {
+            error = string.Empty;
+            SafeFileHandle handle = null;
+            bool transferred = false;
+            try
+            {
+                int openError;
+                handle = OpenNativeUserDataFile(file, out openError);
+                if (handle.IsInvalid)
+                {
+                    handle.Dispose();
+                    handle = null;
+                    error = CreateNativeException(
+                        openError,
+                        "用户数据文件被占用或无法独占验证 " + file).Message;
+                    return false;
+                }
+
+                ByHandleFileInformation information =
+                    GetNativeInformation(handle);
+                string finalPath = GetFinalHandlePath(handle);
+                if ((information.FileAttributes & FileAttributeDirectory) != 0 ||
+                    (information.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                    (information.FileAttributes & FileAttributeReadOnly) != 0 ||
+                    !IsStrictChildPath(tree.CanonicalRoot, finalPath) ||
+                    !string.Equals(
+                        finalPath,
+                        expectedFinalPath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    error =
+                        "用户数据文件是只读文件、重解析点或身份不一致，删除已停止：" +
+                        file;
+                    return false;
+                }
+
+                PreparedUserDataFile prepared = new PreparedUserDataFile();
+                prepared.LogicalPath = file;
+                prepared.FinalPath = finalPath;
+                prepared.Identity = information;
+                prepared.Handle = handle;
+                tree.Files.Add(prepared);
+                transferred = true;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error =
+                    "无法完成用户数据文件预检 " + file + "：" +
+                    exception.Message;
+                return false;
+            }
+            finally
+            {
+                if (!transferred && handle != null)
+                {
+                    handle.Dispose();
+                }
+            }
+        }
+
+        private static bool ValidatePreparedUserDataTree(
+            PreparedUserDataTree tree,
+            out string error)
+        {
+            error = string.Empty;
+            try
+            {
+                int index;
+                for (index = 0; index < tree.Directories.Count; index++)
+                {
+                    PreparedUserDataDirectory directory =
+                        tree.Directories[index];
+                    ByHandleFileInformation current =
+                        GetNativeInformation(directory.Handle);
+                    if (!HasSameNativeIdentity(directory.Identity, current) ||
+                        (current.FileAttributes & FileAttributeDirectory) == 0 ||
+                        (current.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                        !string.Equals(
+                            GetFinalHandlePath(directory.Handle),
+                            directory.FinalPath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        error =
+                            "用户数据目录身份在提交前发生变化，未删除任何用户数据：" +
+                            directory.LogicalPath;
+                        return false;
+                    }
+
+                    string[] entries = Directory.GetFileSystemEntries(
+                        directory.LogicalPath);
+                    Array.Sort(entries, StringComparer.OrdinalIgnoreCase);
+                    if (entries.Length != directory.EntryNames.Count)
+                    {
+                        error =
+                            "用户数据目录内容在提交前发生变化，未删除任何用户数据：" +
+                            directory.LogicalPath;
+                        return false;
+                    }
+
+                    int entryIndex;
+                    for (entryIndex = 0;
+                        entryIndex < entries.Length;
+                        entryIndex++)
+                    {
+                        if (!string.Equals(
+                            Path.GetFileName(entries[entryIndex]),
+                            directory.EntryNames[entryIndex],
+                            StringComparison.OrdinalIgnoreCase))
+                        {
+                            error =
+                                "用户数据目录内容在提交前发生变化，未删除任何用户数据：" +
+                                directory.LogicalPath;
+                            return false;
+                        }
+                    }
+                }
+
+                for (index = 0; index < tree.Files.Count; index++)
+                {
+                    PreparedUserDataFile file = tree.Files[index];
+                    ByHandleFileInformation current =
+                        GetNativeInformation(file.Handle);
+                    if (!HasSameNativeIdentity(file.Identity, current) ||
+                        (current.FileAttributes & FileAttributeDirectory) != 0 ||
+                        (current.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                        !string.Equals(
+                            GetFinalHandlePath(file.Handle),
+                            file.FinalPath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        error =
+                            "用户数据文件身份在提交前发生变化，未删除任何用户数据：" +
+                            file.LogicalPath;
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error =
+                    "用户数据完整预检失败，未删除任何用户数据：" +
+                    exception.Message;
+                return false;
+            }
+        }
+
+        private static bool CommitPreparedUserDataTree(
+            PreparedUserDataTree tree,
+            out string error)
+        {
+            error = string.Empty;
+            int markedFiles = 0;
+            try
+            {
+                for (markedFiles = 0;
+                    markedFiles < tree.Files.Count;
+                    markedFiles++)
+                {
+                    SetHandleDeletion(
+                        tree.Files[markedFiles].Handle,
+                        true);
+                    tree.Files[markedFiles].DeleteMarked = true;
+                }
+            }
+            catch (Exception exception)
+            {
+                bool rollbackSucceeded = true;
+                int rollbackIndex;
+                for (rollbackIndex = markedFiles - 1;
+                    rollbackIndex >= 0;
+                    rollbackIndex--)
+                {
+                    try
+                    {
+                        SetHandleDeletion(
+                            tree.Files[rollbackIndex].Handle,
+                            false);
+                        tree.Files[rollbackIndex].DeleteMarked = false;
+                    }
+                    catch
+                    {
+                        rollbackSucceeded = false;
+                    }
+                }
+
+                error = rollbackSucceeded
+                    ? "用户数据提交删除失败；删除标记已全部撤销，未删除任何用户数据：" +
+                        exception.Message
+                    : "用户数据提交删除失败，且 Windows 未能撤销全部删除标记：" +
+                        exception.Message;
+                return false;
+            }
+
+            int index;
+            for (index = 0; index < tree.Files.Count; index++)
+            {
+                tree.Files[index].Handle.Dispose();
+                tree.Files[index].Handle = null;
+            }
+
+            try
+            {
+                for (index = tree.Directories.Count - 1;
+                    index >= 0;
+                    index--)
+                {
+                    PreparedUserDataDirectory directory =
+                        tree.Directories[index];
+                    ByHandleFileInformation current =
+                        GetNativeInformation(directory.Handle);
+                    if (!HasSameNativeIdentity(directory.Identity, current) ||
+                        !string.Equals(
+                            GetFinalHandlePath(directory.Handle),
+                            directory.FinalPath,
+                            StringComparison.OrdinalIgnoreCase) ||
+                        Directory.GetFileSystemEntries(
+                            directory.LogicalPath).Length != 0)
+                    {
+                        throw new InvalidOperationException(
+                            "目录内容或身份在提交阶段发生变化：" +
+                            directory.LogicalPath);
+                    }
+
+                    MarkHandleForDeletion(directory.Handle);
+                    directory.DeleteMarked = true;
+                    directory.Handle.Dispose();
+                    directory.Handle = null;
+                }
+
+                if (Directory.Exists(tree.LogicalRoot))
+                {
+                    throw new IOException(
+                        "Windows 未能移除已清空的用户数据根目录。");
+                }
+
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error =
+                    "用户数据文件已通过完整预检，但目录提交删除未能完成：" +
+                    exception.Message;
+                return false;
+            }
+        }
+
+        private static SafeFileHandle OpenNativeUserDataDirectory(
+            string path,
+            out int error)
+        {
+            SafeFileHandle handle = CreateFile(
+                path,
+                DeleteAccess | FileReadAttributes,
+                FileShareRead | FileShareWrite,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagOpenReparsePoint | FileFlagBackupSemantics,
+                IntPtr.Zero);
+            error = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0;
+            return handle;
+        }
+
+        private static SafeFileHandle OpenNativeUserDataFile(
+            string path,
+            out int error)
+        {
+            SafeFileHandle handle = CreateFile(
+                path,
+                DeleteAccess | FileReadAttributes,
+                0,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagOpenReparsePoint | FileFlagSequentialScan,
+                IntPtr.Zero);
+            error = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0;
+            return handle;
+        }
+
+        private static bool HasSameNativeIdentity(
+            ByHandleFileInformation expected,
+            ByHandleFileInformation actual)
+        {
+            return expected.VolumeSerialNumber == actual.VolumeSerialNumber &&
+                expected.FileIndexHigh == actual.FileIndexHigh &&
+                expected.FileIndexLow == actual.FileIndexLow;
+        }
+
+        private static void DisposePreparedUserDataTree(
+            PreparedUserDataTree tree)
+        {
+            int index;
+            for (index = tree.Files.Count - 1; index >= 0; index--)
+            {
+                if (tree.Files[index].Handle != null)
+                {
+                    tree.Files[index].Handle.Dispose();
+                    tree.Files[index].Handle = null;
+                }
+            }
+
+            for (index = tree.Directories.Count - 1; index >= 0; index--)
+            {
+                if (tree.Directories[index].Handle != null)
+                {
+                    tree.Directories[index].Handle.Dispose();
+                    tree.Directories[index].Handle = null;
+                }
+            }
+        }
+
+        private static string GetDefaultDataRoot()
+        {
+            string local = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData);
+            if (local == null || local.Trim().Length == 0)
+            {
+                throw new InvalidOperationException(
+                    "Windows 未返回当前用户的 LocalAppData 目录。");
+            }
+
+            string localRoot = TrimTrailingSeparators(
+                Path.GetFullPath(local));
+            string dataRoot = TrimTrailingSeparators(Path.GetFullPath(Path.Combine(
+                localRoot,
+                DataDirectoryName)));
+            if (!IsStrictChildPath(localRoot, dataRoot) ||
+                !string.Equals(
+                    Path.GetFileName(dataRoot),
+                    DataDirectoryName,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Windows 返回的默认用户数据目录未通过安全边界校验。");
+            }
+
+            return dataRoot;
         }
 
         private static string GetExpectedDataRoot()
         {
-            return Path.Combine(
-                Environment.GetFolderPath(
-                    Environment.SpecialFolder.LocalApplicationData),
-                DataDirectoryName);
+            return GetDefaultDataRoot();
         }
 
         private static bool IsStrictChildPath(string parent, string candidate)
@@ -1879,6 +3293,43 @@ namespace FilePromptAIUninstaller
             public string FullPath;
         }
 
+        private sealed class PreparedFile
+        {
+            public ManifestEntry Entry;
+            public SafeFileHandle Handle;
+            public FileStream Stream;
+            public bool DeleteMarked;
+        }
+
+        private sealed class PreparedUserDataTree
+        {
+            public string LogicalRoot;
+            public string CanonicalRoot;
+            public readonly List<PreparedUserDataDirectory> Directories =
+                new List<PreparedUserDataDirectory>();
+            public readonly List<PreparedUserDataFile> Files =
+                new List<PreparedUserDataFile>();
+        }
+
+        private sealed class PreparedUserDataDirectory
+        {
+            public string LogicalPath;
+            public string FinalPath;
+            public ByHandleFileInformation Identity;
+            public SafeFileHandle Handle;
+            public readonly List<string> EntryNames = new List<string>();
+            public bool DeleteMarked;
+        }
+
+        private sealed class PreparedUserDataFile
+        {
+            public string LogicalPath;
+            public string FinalPath;
+            public ByHandleFileInformation Identity;
+            public SafeFileHandle Handle;
+            public bool DeleteMarked;
+        }
+
         private sealed class UninstallResult
         {
             public readonly List<string> Warnings = new List<string>();
@@ -1886,8 +3337,10 @@ namespace FilePromptAIUninstaller
             public int MissingFiles;
             public int ModifiedFiles;
             public int FailedFiles;
+            public int AlreadyRemovedFiles;
             public int DeletedDirectories;
             public bool ManifestDeleted;
+            public bool PartialDeletion;
             public bool DataDeletionRequested;
             public bool DataDeleted;
             public bool DataDeletionFailed;
@@ -1933,6 +3386,15 @@ namespace FilePromptAIUninstaller
                 deleteDataCheckBox.Location = new Point(28, 130);
                 deleteDataCheckBox.Text = "同时删除当前用户的本地配置和会话数据";
                 deleteDataCheckBox.Checked = false;
+                string dataDeletionError;
+                if (!CanDeleteDefaultUserData(out dataDeletionError))
+                {
+                    deleteDataCheckBox.Enabled = false;
+                    deleteDataCheckBox.AutoSize = false;
+                    deleteDataCheckBox.Size = new Size(466, 44);
+                    deleteDataCheckBox.Text =
+                        "当前使用自定义数据目录；为避免误删，用户数据将保留。";
+                }
                 Controls.Add(deleteDataCheckBox);
 
                 Button uninstallButton = new Button();

@@ -91,6 +91,12 @@ function Invoke-UninstallerWorker {
             'false',
             '--parent-pid',
             '2147483647',
+            '--parent-start-ticks',
+            '1',
+            '--app-pid',
+            '0',
+            '--app-start-ticks',
+            '0',
             '--silent'
         ) -join ' '
         $process = Start-Process `
@@ -129,7 +135,6 @@ function Invoke-UninstallerWorker {
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $outsideRoot -Force | Out-Null
 $junctionPath = $null
-$dataLink = $null
 try {
     $modifiedRoot = Join-Path $runRoot 'modified'
     New-MinimalPackage -Root $modifiedRoot -IncludeReadme
@@ -149,7 +154,9 @@ try {
         throw "Modified-file uninstall returned $modifiedExit instead of 4."
     }
     foreach ($retained in @(
+        'app\FilePromptAI.exe',
         'app\README.md',
+        'Start-FilePromptAI.exe',
         'Uninstall-FilePromptAI.exe',
         'Uninstall-FilePromptAI.exe.config',
         'PACKAGE-CHECKSUMS-SHA256.txt'
@@ -158,7 +165,11 @@ try {
             throw "Uninstaller did not retain required retry file: $retained"
         }
     }
-    Write-Host 'PASS | modified package file and uninstall controls are retained'
+    if (@(Get-ChildItem -LiteralPath $modifiedRoot -File -Recurse -Force).Count -ne
+        ($modifiedPaths.Count + 1)) {
+        throw 'Modified-file rejection changed the manifest-controlled package file set.'
+    }
+    Write-Host 'PASS | modified package file rejects uninstall with zero package-file deletion'
 
     $junctionRoot = Join-Path $runRoot 'junction'
     New-MinimalPackage -Root $junctionRoot
@@ -190,6 +201,8 @@ try {
         throw 'Uninstaller changed a file reached through an outside junction.'
     }
     foreach ($retained in @(
+        'app\FilePromptAI.exe',
+        'Start-FilePromptAI.exe',
         'Uninstall-FilePromptAI.exe',
         'Uninstall-FilePromptAI.exe.config',
         'PACKAGE-CHECKSUMS-SHA256.txt'
@@ -200,91 +213,17 @@ try {
     }
     Write-Host 'PASS | junction target outside the package root is preserved'
 
-    $dataRoot = Join-Path $runRoot 'data-delete'
-    $dataNested = Join-Path $dataRoot 'nested'
-    $dataOutside = Join-Path $outsideRoot 'data-outside'
-    New-Item -ItemType Directory -Path $dataNested -Force | Out-Null
-    New-Item -ItemType Directory -Path $dataOutside -Force | Out-Null
-    [IO.File]::WriteAllText(
-        (Join-Path $dataNested 'session.xml'),
-        'test conversation data',
-        (New-Object Text.UTF8Encoding($false)))
-    $dataOutsideFile = Join-Path $dataOutside 'outside-data.txt'
-    [IO.File]::WriteAllText(
-        $dataOutsideFile,
-        'must remain outside the user data root',
-        (New-Object Text.UTF8Encoding($false)))
-    $dataOutsideHash = (
-        Get-FileHash -LiteralPath $dataOutsideFile -Algorithm SHA256
-    ).Hash
-    $dataLink = Join-Path $dataRoot 'external-link'
-    New-Item -ItemType Junction -Path $dataLink -Target $dataOutside |
-        Out-Null
-
-    $assembly = [Reflection.Assembly]::LoadFrom($sourceUninstaller)
-    $programType = $assembly.GetType(
-        'FilePromptAIUninstaller.Program',
-        $true)
-    $flags = [Reflection.BindingFlags]::NonPublic -bor
-        [Reflection.BindingFlags]::Static
-    $openMethod = $programType.GetMethod('OpenNativePath', $flags)
-    $finalPathMethod = $programType.GetMethod('GetFinalHandlePath', $flags)
-    $deleteTreeMethod = $programType.GetMethod(
-        'DeleteOpenedUserDirectory',
-        $flags)
-    foreach ($method in @($openMethod, $finalPathMethod, $deleteTreeMethod)) {
-        if ($null -eq $method) {
-            throw 'Could not load the hardened user-data deletion methods.'
-        }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (
+        Join-Path $testRoot 'RunUninstallerUserDataSmokeTest.ps1') `
+        -Version $Version
+    if ($LASTEXITCODE -ne 0) {
+        throw "Uninstaller user-data smoke test failed with exit code $LASTEXITCODE."
     }
-
-    $openArguments = [object[]]@(
-        [string]$dataRoot,
-        [bool]$true,
-        [bool]$false,
-        [int]0
-    )
-    $dataHandle = $openMethod.Invoke($null, $openArguments)
-    if ($dataHandle.IsInvalid) {
-        throw "Could not lock test data root; error=$($openArguments[3])"
-    }
-    try {
-        $canonicalDataRoot = $finalPathMethod.Invoke(
-            $null,
-            [object[]]@($dataHandle))
-        $deleteTreeMethod.Invoke(
-            $null,
-            [object[]]@(
-                [string]$dataRoot,
-                [string]$canonicalDataRoot,
-                [string]$dataRoot,
-                [string]$canonicalDataRoot,
-                $dataHandle,
-                [bool]$true
-            ))
-    }
-    finally {
-        $dataHandle.Dispose()
-    }
-
-    if (Test-Path -LiteralPath $dataRoot) {
-        throw 'Hardened user-data deletion left the test data root behind.'
-    }
-    if (-not (Test-Path -LiteralPath $dataOutsideFile -PathType Leaf) -or
-        (Get-FileHash -LiteralPath $dataOutsideFile -Algorithm SHA256).Hash -ne
-            $dataOutsideHash) {
-        throw 'User-data deletion followed a junction outside its root.'
-    }
-    Write-Host 'PASS | user-data deletion removes its tree without following junctions'
 }
 finally {
     if ($junctionPath -and (Test-Path -LiteralPath $junctionPath)) {
         [IO.Directory]::Delete($junctionPath, $false)
     }
-    if ($dataLink -and (Test-Path -LiteralPath $dataLink)) {
-        [IO.Directory]::Delete($dataLink, $false)
-    }
-
     $resolvedArtifacts = [IO.Path]::GetFullPath($artifactRoot)
     foreach ($candidate in @($runRoot, $outsideRoot)) {
         $resolved = [IO.Path]::GetFullPath($candidate)
