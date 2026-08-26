@@ -30,7 +30,7 @@ internal static class AcceptanceProgram
     private const string TrustedPayloadResourceName =
         "FilePromptAI.Acceptance.TrustedPayload.sha256";
     private const string VerifierRelativePath = "Verify-FilePromptAI.exe";
-    private const string ArchiveName = "FilePromptAI-Win7-Full-v1.17.zip";
+    private const string ArchiveName = "FilePromptAI-Win7-Full-v1.18.zip";
     private const string WindowTitle =
         "FilePrompt AI  \u00b7  \u5185\u7f51\u6587\u4ef6\u95ee\u7b54\u5de5\u4f5c\u53f0";
 
@@ -76,7 +76,7 @@ internal static class AcceptanceProgram
                 !string.Equals(args[0], "--archive", StringComparison.Ordinal))
             {
                 throw new AcceptanceFailure(
-                    "Usage: Verify-FilePromptAI.exe --archive <FilePromptAI-Win7-Full-v1.17.zip>",
+                    "Usage: Verify-FilePromptAI.exe --archive <FilePromptAI-Win7-Full-v1.18.zip>",
                     string.Empty);
             }
 

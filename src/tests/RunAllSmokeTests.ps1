@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.17',
+    [string]$Version = '1.18',
     [switch]$WriteReleaseReceipt
 )
 

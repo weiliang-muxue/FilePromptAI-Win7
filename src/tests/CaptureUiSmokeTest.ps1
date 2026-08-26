@@ -41,7 +41,7 @@ else {
     ''
 }
 $outputPath = Join-Path $artifactRoot (
-    'FilePromptAI-ui-v1.17-' + $Mode.ToLowerInvariant() + $sizeSuffix + '.png'
+    'FilePromptAI-ui-v1.18-' + $Mode.ToLowerInvariant() + $sizeSuffix + '.png'
 )
 
 if (-not (Test-Path -LiteralPath $artifactRoot)) {

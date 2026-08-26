@@ -431,9 +431,9 @@ function Read-FilePromptAcceptanceEvidence {
     }
     if (-not [string]::Equals(
         $Version,
-        '1.17',
+        '1.18',
         [StringComparison]::Ordinal)) {
-        throw 'The acceptance evidence reader only supports verifier v1.17.'
+        throw 'The acceptance evidence reader only supports verifier v1.18.'
     }
 
     $reportPath = [IO.Path]::GetFullPath($Path)
@@ -512,8 +512,8 @@ function Read-FilePromptAcceptanceEvidence {
     if ($root.GetAttribute('schemaVersion') -ne '3' -or
         $root.GetAttribute('result') -ne 'pass' -or
         $root.GetAttribute('exitCode') -ne '0' -or
-        $root.GetAttribute('verifierVersion') -ne '1.17.0.0') {
-        throw 'The Windows 7 acceptance XML report is not a passing v1.17 verifier report.'
+        $root.GetAttribute('verifierVersion') -ne '1.18.0.0') {
+        throw 'The Windows 7 acceptance XML report is not a passing v1.18 verifier report.'
     }
     $createdUtc = [DateTime]::MinValue
     if (-not [DateTime]::TryParseExact(

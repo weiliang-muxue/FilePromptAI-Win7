@@ -1,226 +1,167 @@
 FilePrompt AI for Windows 7 离线完整版
 ======================================
 
-版本说明
+当前版本：v1.18
+安装包：FilePromptAI-Win7-Full-v1.18.zip
+
+能做什么
 --------
 
-当前唯一维护版本为 FilePrompt AI v1.17。版本号或包名本身不表示已经正式发布：只有
-annotated v1.17 标签中的 RELEASE-SHA256.txt 和 RELEASE-EVIDENCE.txt、同一 ZIP 的
-成功测试 receipt，以及规定环境中的 Windows 7 PASS XML（验收时另附同名校验文件）
-全部通过封存与标签后复核时，该 ZIP 才是正式发布包；缺少任一项时均按候选包处理。仓库 exe 目录只保留
-FilePromptAI-Win7-Full-v1.17.zip；该 ZIP 由仓库根 .gitattributes 配置 Git LFS 跟踪，
-不附带任何摘要副本、说明或其他文件。界面采用左侧会话导航、右侧会话
-记录和底部消息编辑器布局；模型、技能/MCP、会话和维护选项统一收进左侧
-“设置”窗口，不占用主工作区。附件列表收进底部消息编辑器，通过“+ 添加”选择文件、
-粘贴内容或打开路径窗口，有资料时才展开；新回复只更新本轮内容，不会清空并重画已有历史。源码仓库与离线包
-按同一版本构建。
+- 连接单位内网中的 OpenAI Chat Completions 兼容模型。
+- 读取用户主动添加的文本、代码、PDF、Office、图片、PPTX 和 XMind 文件。
+- 支持多会话、搜索、置顶、归档、分支、备份和恢复。
+- 可将回答或整个会话导出为 Markdown、文本、Word、PDF、PowerPoint、XMind、
+  Excel 或 CSV。
+- 支持离线技能，以及由用户明确启用的本地 stdio 和 Streamable HTTP MCP。
 
-使用方法
---------
-
-1. 在解压或运行任何文件前先判断包状态。已通过正式发布门禁的包应从可信 annotated
-   v1.17 标签内的 src\RELEASE-SHA256.txt 取得固定摘要。其他包必须按候选包处理：
-   构建工作树可读取被 Git 忽略的
-   src\tests\build-artifacts\release\ReleaseCandidate-v1.17.txt；可信候选提交可读取
-   exe/FilePromptAI-Win7-Full-v1.17.zip 的 Git LFS oid sha256；管理员也可通过可信通道
-   单独提供预期摘要。再运行 Get-FileHash：
-
-   (Get-FileHash .\FilePromptAI-Win7-Full-v1.17.zip -Algorithm SHA256).Hash
-
-   预期摘要必须与计算结果完全相同；仅对当前文件重新计算摘要不能替代可信来源。
-2. 正式 RELEASE-SHA256.txt 刻意不放进 ZIP，以免摘要自引用。
-3. 校验成功后把 ZIP 完整解压到同一个目录，不要在压缩包中直接运行，也不要只复制
-   其中某个 EXE（包括启动器、卸载器或 app\FilePromptAI.exe）。
-4. 在解压根目录双击“Start-FilePromptAI.exe”。
-5. 启动器会自动检测 Microsoft .NET Framework 4.8。
-6. 如果缺少运行环境，选择“是”。启动器会先校验随包安装程序的大小和
-   SHA-256，再调用微软官方完整离线安装程序；此过程不会下载任何文件。
-7. 安装完成后会自动启动 FilePrompt AI；如果提示重启，请重启电脑后再次
-   双击启动器。
-
-卸载方法
---------
-
-运行完整解压目录根部的“Uninstall-FilePromptAI.exe”，或依次选择左侧“设置”→
-“维护”→“卸载程序...”。卸载器先锁定并验证清单中的全部程序文件；文件缺失、被修改、
-被占用或路径身份异常等预检失败会在删除前停止，程序文件和用户数据均保持不变。
-如果缺少 PACKAGE-CHECKSUMS-SHA256.txt，提示会列出实际检查目录；请重新完整解压
-ZIP，不要只复制卸载器。验证通过后，发布目录中的额外文件也不会被递归删除。
-用户配置和会话默认保留；只有明确勾选并再次确认后才会删除。如果 Windows 文件系统
-在提交删除或撤销删除标记时发生极少见异常，卸载器会报告可能的部分删除并写入恢复
-标记；再次运行即可清理剩余文件，恢复信息损坏时请重新完整解压原 ZIP 后重试。
-删除用户数据前会先锁定和复核整棵数据目录；任一文件占用、路径身份或重解析点检查
-失败时不会先删掉其他文件。受控测试使用自定义数据根时，卸载器会强制保留用户数据，
-不会误删默认目录或自定义目录。
-
-正常运行时，程序数据固定保存在当前用户的
-%LocalAppData%\FilePromptAI-Win7，不会搜索、读取或迁移其他数据目录。
-
-无需另外安装
-------------
-
-- WebView2、VC++ 运行库、Node.js、Python、Java。
-- Microsoft Word 或 Excel。Word/表格文件的读取和导出由 app 目录中的 DLL 完成。
-- PDF、Office、图片解析与导出组件。所需的 33 个托管 DLL 已放在 app 目录。
-
-必须保留 app 目录中的全部文件，不能只复制 FilePromptAI.exe。
-完整运行 ZIP 还附带 Microsoft .NET Framework 4.8 官方完整离线安装程序；安装和
-启动不会联网下载依赖。
-
-主要功能
---------
-
-- 标准 OpenAI 兼容 URL 可主动读取同源 /models 列表；模型框仍可手动输入。
-- 多会话、会话搜索、会话备份/恢复和运行期草稿保留；会话可置顶、归档或移回，
-  并可在“当前 / 已归档”视图间切换。
-- 可从最新模型回复创建独立会话分支；分支复制此前上下文，原会话保持不变。
-- 可对最新模型回复原位重新生成，用新结果替换原回复；请求失败后可从失败位置
-  快速重试，不必重新整理当前会话。
-- 可在主工作区快速切换已保存的模型配置，无需先打开设置窗口。
-- 会话列表固定在左侧；右侧上方显示会话标题和连接状态，对话历史占据主要区域，
-  紧凑上下文摘要显示在对话区上沿，资料与指令统一位于底部消息编辑器。
-- 流式回复按本轮序号增量追加；完成、失败或取消后会丢弃排队中的过期分片，避免
-  重复内容和整段历史闪烁。
-- 窗口缩放时专用拖放入口不会重建句柄；最小窗口中对话记录和输入框仍然可见，
-  上下文摘要被截断时可悬停查看完整内容。
-- 文件可直接拖入；“+ 添加”菜单可选择文件、粘贴内容或打开路径窗口，路径只有
-  在用户点击“添加”后才读取，不会后台扫描目录。
-- 可本地提取 PPTX 的自然页序、标题、正文、表格和备注，也可提取使用新版
-  content.json 或旧版 content.xml 的 XMind 多画布、主题层级和备注；无需安装
-  PowerPoint 或 XMind。
-- 当前运行期跨会话草稿合计最多保留 20 MB 二进制附件，超限时会要求先发送或移除。
-- 连接自检和获取模型只检查设置窗口中的待保存值，点击“保存并关闭”前不会写入
-  settings.xml；另有流式输出、Markdown 排版、资料预览和长会话上下文控制；响应端兼容
-  标准 Chat SSE、常见网关的 Responses 文本事件封装、delta.text 与 NDJSON 分片，
-  但请求仍固定使用 Chat Completions 格式。
-- 可在左侧“设置”→“模型连接”→“模型配置...”保存多个内网模型预设；
-  预设 API Key 使用当前用户 DPAPI 加密。
-- API Key 可留空，支持无需鉴权的 Ollama、vLLM 等 OpenAI 兼容内网服务；
-  留空时不会发送 Authorization 请求头。
-- 文本资料正文会进入会话历史；图片和无文本内联文件只在当前轮发送，后续轮次
-  需要再次主动添加，不会根据路径自动重读。
-- 最新回复或整个会话可导出 Markdown、文本、Word、PDF、PowerPoint 和 XMind，Markdown 表格可
-  导出 Excel/CSV；全部在本机生成，不依赖 Microsoft Office 或 XMind。
-- “快捷指令”可填入总结、提炼、翻译、PPT 大纲、XMind 结构和 Markdown 表格模板；
-  对话记录菜单可载入上一条用户指令编辑重发，模板不会自动发送。
-- 网络请求具有超时、有限重试和异常流式结束检测；成功响应体断流后不会自动重发。
-  无附件的文字空流仅在 `[DONE]`、`finish_reason: stop` 或普通 `done: true` 且没有正文、
-  思考、工具、拒绝或错误内容时降级一次；`content_filter`、`length`、`tool_calls` 等
-  结束状态不会重提。二进制附件任何情况下都不会因流式兼容降级而自动重复上传。
-- 有未发送文字、已添加资料或运行中任务时，关闭程序会先要求确认，默认不退出。
-- 会话文件内容损坏时先在同目录重命名保留；有效文件若只是暂时被占用、无权限或
-  无法安全读取，不会被标记为损坏或移动，而是进入粘性只读保护并保持原文件不变。
-- 会话备份不包含 URL、API Key 或模型名称。
-- 可从剪贴板安装普通文本、SKILL.md 或 JSON 离线技能，也可由用户显式选择单个
-  不超过 2 MiB 的本地 UTF-8 SKILL.md、JSON 或文本文件导入。
-- 支持 stdio 与 Streamable HTTP MCP；可从剪贴板导入标准 mcpServers JSON，也可
-  由用户显式选择单个不超过 2 MiB 的本地 UTF-8 JSON 文件导入。
-- 二进制附件触发 MCP 工具调用时，只在首轮上传；后续工具回合保留附件信息占位，
-  不会再次发送 Base64 数据。
-- MCP 命令、环境变量、URL 和请求头使用当前 Windows 用户的 DPAPI 加密保存；
-  从剪贴板或本地文件导入后一律停用，stdio 启动和每一次工具调用默认都要人工确认。
-
-离线扩展说明
-------------
-
-- 技能是保存在本机的模型指令，不需要额外运行环境；本地文件导入只读取用户当次
-  显式选择的单个 UTF-8 文件，不扫描目录、不执行脚本，也不会因导入操作联网。
-- MCP 本地文件导入同样只接受用户显式选择的单个 UTF-8 JSON 文件，不扫描目录、
-  不执行脚本，也不会因导入操作联网；技能和 MCP 导入文件上限均为 2 MiB。
-- stdio MCP 的 EXE 和它自身需要的 Node.js、Python、Java 等运行环境不会由
-  FilePrompt AI 下载或安装，必须由管理员提前从离线介质准备好。
-- 手工启用 stdio MCP 后，每次实际启动前都会显示完整命令、工作目录、参数和
-  环境变量名称，默认操作是拒绝。
-- HTTP MCP 只连接用户填写的地址。模型只收到工具名称、说明、参数结构和获准
-  执行后的结果，不会收到 MCP 命令、本地路径、环境变量、URL 或请求头。
-- MCP 结果若回显上述较长的已知配置值，程序会先脱敏再交给模型。
-- MCP 服务本身的文件和系统访问能力由该服务及当前 Windows 用户权限决定。
-  脱敏不能阻止恶意服务编码或转发内容，只能启用管理员已审查的可信 MCP。
-
-Windows 7 基础要求
+下载安装：只需三步
 ------------------
 
-- 必须是 Windows 7 Service Pack 1；不支持未安装 SP1 的系统。
-- 微软 .NET Framework 4.8 完整离线安装程序已随包附带。
-- 长期未更新或被精简过的 Windows 7，可能还需要先离线安装 SHA-2 代码签名
-  支持、最新服务堆栈以及提供 D3DCompiler_47.dll 的系统更新。这些是 Windows
-  自身补丁，当前包没有附带；请从单位的离线补丁源安装。
-- 使用 HTTPS 内网模型服务时，Windows 需要支持 TLS 1.2。如果服务使用单位
-  内部 CA，还需由管理员把单位根证书安装到 Windows 证书库。
-- 中文 PDF 导出需要系统已安装 PDFsharp 可嵌入的 CJK 字体，例如 Microsoft YaHei、
-  SimSun 或 Noto Sans SC；精简系统若删除了这些字体，需要由管理员离线补装。
+1. 取得 FilePromptAI-Win7-Full-v1.18.zip。
+2. 将 ZIP 完整解压到一个文件夹。不要在压缩包内直接运行，也不要只复制某个 EXE
+   或只复制 app 目录。
+3. 进入解压目录，双击 Start-FilePromptAI.exe。
 
-网络说明
+如果电脑缺少 Microsoft .NET Framework 4.8，启动器会先校验包内微软官方离线
+安装程序，再提示并自动运行它；安装过程不会联网下载。如果安装程序要求重启，
+重启电脑后再次双击 Start-FilePromptAI.exe。
+
+普通用户无需运行 Verify-FilePromptAI.exe，也无需使用 --archive 参数。
+Verify-FilePromptAI.exe 是发布维护者的验收工具，不是应用启动器。
+
+首次使用
 --------
 
-程序安装和启动不访问互联网，也不会在线下载依赖。生成内容时，程序只会连接
-界面中填写的完整请求 URL；该 URL 可以是内网地址。模型请求和主动模型列表请求
-不使用 Windows 系统代理，也不访问更新、遥测、扩展商店或其他辅助服务。未启用
-可选 MCP 时，基础问答只需要这个 OpenAI Chat Completions 兼容模型端点。若内网
-模型服务不可达，程序无法生成内容，这与安装依赖无关。
+1. 打开左侧“设置”→“模型连接”。
+2. 填写单位提供的完整请求 URL 和模型名称。程序不会自动补全请求路径。
+3. 服务需要鉴权时填写 API Key；无需鉴权的内网服务可留空。
+4. 可使用“获取模型”读取标准兼容服务的同源 /models 列表。
+5. 选择“测试连接”，确认成功后选择“保存并关闭”。
 
-Windows 7 一键验收
-------------------
+程序固定发送 OpenAI Chat Completions 格式请求。模型服务需要兼容 model、messages
+和可选流式响应。填写 API Key 时会发送 Bearer 认证头；留空时不发送该认证头。
 
-在目标 Windows 7 SP1 电脑上安装 .NET Framework 4.8，将主屏设置为
-1920×1080、100% 缩放。保留原始 ZIP，并把它完整解压到另一个目录；原始 ZIP
-不得放在解压目录内。进入解压目录后运行（--archive 参数不可省略）：
+日常使用
+--------
 
-.\Verify-FilePromptAI.exe --archive D:\Transfer\FilePromptAI-Win7-Full-v1.17.zip
+- 在底部输入问题，按 Enter 或点击发送；生成过程中可以停止，失败后可以重试。
+- 通过“+ 添加”选择文件、粘贴内容或打开路径窗口，也可以把文件拖到专用拖放区。
+- 粘贴文件路径后，只有主动点击“添加”才会读取；程序不会扫描目录。
+- 双击附件或按 Enter 可以预览已读取的文字或图片。
+- 文本资料可随会话历史保留；图片和其他无文本二进制附件只在当前轮发送，后续需要
+  时请重新添加。
+- 模型只收到文件名、提取内容和内联数据，不会收到本地文件路径。
+- 左侧会话列表支持新建、重命名、搜索、置顶、归档、移回、删除和创建分支。
+- 会话可备份为 .fpc 并合并恢复；备份不包含 URL、API Key 或模型配置。
+- 可导出 Markdown、文本、Word、PDF、PowerPoint 和 XMind；Markdown 表格还可导出
+  Excel 或 CSV。导出在本机完成，不要求安装 Microsoft Office 或 XMind。
 
-参数必须指向这次解压所用、名称仍为 FilePromptAI-Win7-Full-v1.17.zip 的原始 ZIP。
-不能只双击验收器；验收期间它会保持原始 ZIP 的只读句柄，并把 ZIP 的 SHA-256、
-大小和包清单身份写入报告。
+完整运行期间，所有会话中尚未发送的二进制附件合计上限为 20 MB。中文 PDF 导出
+需要系统具有可嵌入的中文字体，例如 Microsoft YaHei、SimSun 或 Noto Sans SC。
 
-验收程序不访问公网、不修改注册表、不请求管理员权限，也不使用现有用户会话。
-运行前必须先按“使用方法”判断包状态：正式包从可信 Git 标签取得固定摘要，其他包从
-可信本地 receipt、可信提交的 LFS oid 或管理员提供的可信摘要取得候选身份。包内清单
-不能单独证明 Verify-FilePromptAI.exe 自身未被替换。
-它先验证 --archive 指向的 ZIP 与 PACKAGE-CHECKSUMS-SHA256.txt 的身份，再校验解压目录
-中的精确文件集合和每个文件的 SHA-256。启动检查从解压根目录运行真实
-Start-FilePromptAI.exe，由启动器拉起独立的 app\FilePromptAI.exe 主进程，检查窗口、
-进程映像、响应和正常退出。UI 功能旅程在隔离验收进程中加载同一包内程序集，使用
-独立临时数据目录和 127.0.0.1 回环服务验证设置、Enter/按钮发送、两轮上下文、路径文本
-附件、已注册 WinForms/OLE 的 FileDrop 处理器所接收的 PNG 图片附件、持久化，以及
-13 个生产导出处理器和生成文件内容；测试不执行真实 Explorer 鼠标拖动，并注入隔离
-保存路径而不自动操作系统“另存为”窗口。整个过程不连接
-外部模型服务。
+系统要求
+--------
 
-XML schema 3 报告和同名 .sha256.txt 默认写到 %TEMP%；如果该目录位于发布包内，
-则写到 %LocalAppData%\FilePromptAI-Acceptance\AcceptanceReports，绝不会向发布目录
-添加报告。只有总 PASS 报告才会记录已锁定验证的 PACKAGE-CHECKSUMS-SHA256.txt
-原始字节 SHA-256 和条目数；失败报告只标记 unverified，不能用于正式发布封存。
-发布维护者必须同时保留 XML 和同名报告 SHA-256 校验文件。正式封存仍在 src 生成
-RELEASE-SHA256.txt 和 RELEASE-EVIDENCE.txt，并把本地 receipt、最终 ZIP identity 与
-Windows 7 PASS 报告直接绑定；它不依赖 exe 中的任何附加文件。
+- Windows 7 必须安装 Service Pack 1；也支持 Windows 8、Windows 10 和 Windows 11。
+- .NET Framework 4.8 已随完整包附带，缺少时由启动器离线安装，无需另行下载。
+- 不需要另装 WebView2、VC++ 运行库、Node.js、Python、Java 或 Microsoft Office。
+- 解压后的客户端运行不依赖 PowerShell。
+- 长期未更新或被精简过的 Windows 7 可能还需要管理员离线安装微软 SHA-2
+  代码签名支持、最新服务堆栈，以及提供 D3DCompiler_47.dll 的系统更新。这些
+  Windows 补丁不在应用包内。
+- 使用 HTTPS 内网模型服务时，Windows 需要支持 TLS 1.2 并信任服务端证书；
+  单位内部 CA 的根证书需由管理员预先导入系统证书库。
 
-只有 Windows 7 SP1、.NET Framework 4.8、1920×1080@96 DPI 和全部检查同时通过时，
-程序才输出总 PASS 并返回退出码 0。退出码按位表示失败：1=系统、
-2=.NET、4=显示、8=包清单、16=启动、32=API、64=文件、128=验收程序内部错误。
-在 Windows 8/10/11 上运行会明确失败 os.win7-sp1，这是预期行为，不能作为
-Windows 7 通过报告。
+1920×1080、100% 缩放只用于正式发布验收，不是普通用户运行程序的要求。
 
-源码离线重建
-------------
+卸载
+----
 
-仅克隆源码仓库不会得到被忽略的 packages、lib 和 redist 本地缓存。离线重建前
-必须另行准备项目锁定的 packages 包缓存和经过核验的 .NET Framework 4.8 redist
-安装程序；构建脚本不会联网还原或下载这些文件，并会按仓库
-LIBRARIES-SHA256.txt 核对 33 个托管 DLL 的固定 SHA-256。
-源码构建、打包和测试需要构建机安装 Windows PowerShell 5.1；这是构建工具要求，
-解压后的客户端运行不依赖 PowerShell。
+运行完整解压目录根部的 Uninstall-FilePromptAI.exe，或依次选择左侧
+“设置”→“维护”→“卸载程序...”。
 
-随包运行环境
-------------
+卸载器会先校验发布清单。文件缺失、被修改、被占用或路径身份异常时会在删除前
+停止；发布目录中的额外文件不会被递归删除。用户配置和会话默认保留，只有明确
+勾选并再次确认后才删除。
 
-Microsoft .NET Framework 4.8 Offline Installer
+如果提示缺少 PACKAGE-CHECKSUMS-SHA256.txt，请重新完整解压原 ZIP，不要只复制
+卸载器。正常数据目录固定为：
+
+%LocalAppData%\FilePromptAI-Win7
+
+安全与联网边界
+--------------
+
+- 安装和启动不访问互联网，也不会下载依赖、更新、遥测或扩展。
+- 生成内容时只连接用户填写的完整模型请求 URL；模型请求和主动模型列表请求
+  不使用 Windows 系统代理，也不跟随 3xx 重定向。
+- API Key、MCP 命令、环境变量、URL 和请求头使用当前 Windows 用户的 DPAPI
+  加密保存。
+- 程序只读取用户当次明确选择、拖入、粘贴或确认添加的文件，不扫描目录。
+- 从文件或剪贴板导入的技能和 MCP 不会因为导入而执行脚本或联网。
+- 导入的 MCP 默认停用；stdio 服务启动及工具调用默认需要用户确认。
+- stdio MCP 需要的 Node.js、Python、Java 或其他运行环境不随客户端安装，
+  必须由管理员另行离线准备。只能启用来源可信且已经审查的 MCP。
+- 基础问答只需要用户配置的 OpenAI Chat Completions 兼容端点；服务不可达时
+  无法生成内容，这与安装依赖无关。
+
+验证下载
+--------
+
+普通用户可选：核对 ZIP 的 SHA-256
+
+从可信的 v1.18 发布页或带注释的 v1.18 Git 标签中的 src\RELEASE-SHA256.txt
+取得公布摘要，再在 ZIP 所在目录运行：
+
+(Get-FileHash .\FilePromptAI-Win7-Full-v1.18.zip -Algorithm SHA256).Hash
+
+计算结果应与可信来源公布的摘要完全一致。单独计算当前文件的摘要只能确认文件
+身份，不能代替可信来源。此核对是可选步骤，不影响正常启动。
+
+发布维护者可选：Windows 7 正式验收
+----------------------------------
+
+本节只用于正式发布取证。普通用户无需执行，也无需使用 --archive。
+
+验收机必须是 Windows 7 SP1，主屏为 1920×1080、100% 缩放。如果缺少
+.NET Framework 4.8，先双击 Start-FilePromptAI.exe，由启动器调用包内离线
+安装程序；如提示重启，重启后再继续。
+
+保留本次解压所用的原始 ZIP，并完整解压到另一个目录。原始 ZIP 不得位于解压
+目录内。进入解压根目录后运行：
+
+.\Verify-FilePromptAI.exe --archive D:\Transfer\FilePromptAI-Win7-Full-v1.18.zip
+
+这里的 --archive 在“正式验收命令”中不可省略，参数必须指向本次解压所用、
+文件名仍为 FilePromptAI-Win7-Full-v1.18.zip 的原始 ZIP。它不是正常启动参数。
+
+验收器保持原始 ZIP 的只读句柄，将 ZIP 的 SHA-256、大小和包清单身份写入报告，
+再校验解压目录的精确文件集合。它使用独立临时数据和 127.0.0.1 回环服务检查
+真实启动器、独立主进程、设置、两轮问答、附件、持久化和生产导出处理器，不连接
+外部模型服务，不使用现有用户会话，也不修改注册表。
+
+只有 Windows 7 SP1、.NET Framework 4.8、1920×1080@96 DPI 和全部功能检查
+同时通过时，验收器才输出总 PASS 并返回退出码 0。Windows 8/10/11 上的报告会
+明确失败 os.win7-sp1，不能作为 Windows 7 发布证据。
+
+验收报告及其同名 .sha256.txt 校验文件默认写入 %TEMP%；如果该目录位于发布包内，
+则改写到：
+
+%LocalAppData%\FilePromptAI-Acceptance\AcceptanceReports
+
+只有总 PASS 报告才能用于正式发布封存。发布维护者还必须按源码仓库
+src\DEVELOPMENT.md 中的说明核对可信包身份、保留报告，并完成晋升、封存和标签复核。
+
+随包 .NET Framework 4.8 离线安装程序
+-------------------------------------
+
 文件名：runtime\NDP48-x86-x64-AllOS-ENU.exe
 文件大小：121346568 字节
 SHA-256：0A3A390C47E639D0F7FC65B21195FEE6B7F65B066F80F70C60FAB191D14B7E40
 数字签名：Microsoft Corporation
 官方来源：https://go.microsoft.com/fwlink/?linkid=2088631
 
-管理员可在命令提示符中离线复核安装程序：
+管理员可在命令提示符中离线复核：
 
 certutil -hashfile runtime\NDP48-x86-x64-AllOS-ENU.exe SHA256
 

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.17'
+    [string]$Version = '1.18'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -282,10 +282,10 @@ $uninstallerPath = Join-Path $stagingRoot 'Uninstall-FilePromptAI.exe'
 $uninstallerVersion = (Get-Item -LiteralPath $uninstallerPath).VersionInfo.FileVersion
 $acceptancePath = Join-Path $stagingRoot 'Verify-FilePromptAI.exe'
 $acceptanceVersion = (Get-Item -LiteralPath $acceptancePath).VersionInfo.FileVersion
-if ($appVersion -ne '1.17.0.0' -or
-    $bootstrapperVersion -ne '1.17.0.0' -or
-    $uninstallerVersion -ne '1.17.0.0' -or
-    $acceptanceVersion -ne '1.17.0.0') {
+if ($appVersion -ne '1.18.0.0' -or
+    $bootstrapperVersion -ne '1.18.0.0' -or
+    $uninstallerVersion -ne '1.18.0.0' -or
+    $acceptanceVersion -ne '1.18.0.0') {
     throw "Unexpected executable versions: app=$appVersion bootstrapper=$bootstrapperVersion uninstaller=$uninstallerVersion acceptance=$acceptanceVersion"
 }
 
