@@ -161,6 +161,12 @@ foreach ($name in $packageScripts) {
             -Version $Version `
             -ArchivePath $archivePath
     }
+    elseif ($name -eq 'RunVerifiedPayloadLeaseSmokeTest.ps1') {
+        & powershell -NoProfile -ExecutionPolicy Bypass `
+            -File $script `
+            -Version $Version `
+            -ArchivePath $archivePath
+    }
     else {
         & powershell -NoProfile -ExecutionPolicy Bypass `
             -File $script `

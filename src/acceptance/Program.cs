@@ -2294,6 +2294,7 @@ internal static class AcceptanceProgram
             GetProcessIds(Path.GetFileNameWithoutExtension(applicationPath));
         Process launcher = null;
         Process process = null;
+        IntPtr applicationProcessHandle = IntPtr.Zero;
         bool forcedTermination = false;
         try
         {
@@ -2340,7 +2341,8 @@ internal static class AcceptanceProgram
                 {
                     process = FindNewApplicationProcess(
                         applicationPath,
-                        existingApplicationProcessIds);
+                        existingApplicationProcessIds,
+                        out applicationProcessHandle);
                     if (process == null)
                     {
                         Thread.Sleep(100);
@@ -2350,9 +2352,12 @@ internal static class AcceptanceProgram
                 process.Refresh();
                 if (process.HasExited)
                 {
+                    uint earlyExitCode = GetNativeProcessExitCode(
+                        applicationProcessHandle,
+                        process.Id);
                     throw new AcceptanceFailure(
                         "FilePromptAI exited before opening its main window.",
-                        "exitCode=" + process.ExitCode.ToString(
+                        "exitCode=" + earlyExitCode.ToString(
                             CultureInfo.InvariantCulture));
                 }
                 window = process.MainWindowHandle;
@@ -2429,12 +2434,15 @@ internal static class AcceptanceProgram
                     "pid=" + process.Id.ToString(CultureInfo.InvariantCulture) +
                         "; title=" + title + "; forcedTermination=true");
             }
-            if (process.ExitCode != 0)
+            uint applicationExitCode = GetNativeProcessExitCode(
+                applicationProcessHandle,
+                process.Id);
+            if (applicationExitCode != 0)
             {
                 throw new AcceptanceFailure(
                     "FilePromptAI returned a failure exit code after normal close.",
                     "pid=" + process.Id.ToString(CultureInfo.InvariantCulture) +
-                        "; exitCode=" + process.ExitCode.ToString(
+                        "; exitCode=" + applicationExitCode.ToString(
                             CultureInfo.InvariantCulture));
             }
             verifiedPackage.AssertIntact();
@@ -2451,6 +2459,8 @@ internal static class AcceptanceProgram
                 width.ToString(CultureInfo.InvariantCulture) + "x" +
                 height.ToString(CultureInfo.InvariantCulture) +
                 "; isolatedDataRoot=" + isolatedDataRoot +
+                "; applicationExitCode=" + applicationExitCode.ToString(
+                    CultureInfo.InvariantCulture) +
                 "; forcedTermination=" + forcedTermination;
         }
         finally
@@ -2511,8 +2521,10 @@ internal static class AcceptanceProgram
 
     private static Process FindNewApplicationProcess(
         string expectedApplicationPath,
-        List<int> existingProcessIds)
+        List<int> existingProcessIds,
+        out IntPtr processHandle)
     {
+        processHandle = IntPtr.Zero;
         string processName = Path.GetFileNameWithoutExtension(
             expectedApplicationPath);
         Process[] candidates = Process.GetProcessesByName(processName);
@@ -2532,6 +2544,12 @@ internal static class AcceptanceProgram
                         expectedApplicationPath,
                         StringComparison.OrdinalIgnoreCase))
                 {
+                    IntPtr candidateHandle = candidate.Handle;
+                    if (candidateHandle == IntPtr.Zero)
+                    {
+                        continue;
+                    }
+                    processHandle = candidateHandle;
                     keep = true;
                     return candidate;
                 }
@@ -2553,6 +2571,24 @@ internal static class AcceptanceProgram
             }
         }
         return null;
+    }
+
+    private static uint GetNativeProcessExitCode(
+        IntPtr processHandle,
+        int processId)
+    {
+        uint exitCode;
+        if (processHandle == IntPtr.Zero ||
+            !NativeMethods.GetExitCodeProcess(processHandle, out exitCode))
+        {
+            int error = Marshal.GetLastWin32Error();
+            throw new AcceptanceFailure(
+                "The FilePromptAI process exit code is unavailable.",
+                "pid=" + processId.ToString(CultureInfo.InvariantCulture) +
+                    "; win32Error=" + error.ToString(
+                        CultureInfo.InvariantCulture));
+        }
+        return exitCode;
     }
 
     private static string GetProcessImagePath(Process process)
@@ -4083,6 +4119,12 @@ internal static class AcceptanceProgram
         internal static extern bool IsWow64Process(
             IntPtr process,
             out bool wow64Process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetExitCodeProcess(
+            IntPtr process,
+            out uint exitCode);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         internal static extern SafeFileHandle CreateFile(

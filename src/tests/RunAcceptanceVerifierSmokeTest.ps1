@@ -92,6 +92,46 @@ foreach ($required in @($verifierPath, $archivePath)) {
     }
 }
 
+function Assert-NativeExitCodeReader {
+    $assembly = [Reflection.Assembly]::LoadFrom($verifierPath)
+    $program = $assembly.GetType('AcceptanceProgram', $true)
+    $method = $program.GetMethod(
+        'GetNativeProcessExitCode',
+        [Reflection.BindingFlags]'NonPublic,Static')
+    if ($null -eq $method) {
+        throw 'The verifier native exit-code reader is missing.'
+    }
+
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = $env:ComSpec
+    $start.Arguments = '/d /c exit 37'
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $process = [Diagnostics.Process]::Start($start)
+    if ($null -eq $process) {
+        throw 'The native exit-code fixture process did not start.'
+    }
+    try {
+        $handle = $process.Handle
+        if (-not $process.WaitForExit(10000)) {
+            $process.Kill()
+            throw 'The native exit-code fixture process timed out.'
+        }
+        $actual = [uint32]$method.Invoke(
+            $null,
+            [object[]]@($handle, $process.Id))
+        if ($actual -ne 37) {
+            throw "The native exit-code reader returned $actual instead of 37."
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+    Write-Host 'PASS | acceptance native exit-code reader | indirectExit=37'
+}
+
+Assert-NativeExitCodeReader
+
 $beforeReports = @(
     Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
         -Filter 'FilePromptAI-Acceptance-*.xml' `
@@ -160,6 +200,11 @@ $root = $document.filePromptAiAcceptance
 if ($root.schemaVersion -ne '3' -or
     $root.verifierVersion -ne '1.17.0.0') {
     throw 'The acceptance report does not use the v1.17 schemaVersion=3 contract.'
+}
+if ($output -notmatch (
+        '(?m)^PASS \| application\.launch \|[^\r\n]*\r?\n' +
+        '  [^\r\n]*applicationExitCode=0(?:;|$)')) {
+    throw 'The verifier launch evidence does not include the native application exit code.'
 }
 
 function Assert-FailedReportHasNoVerifiedIdentity {

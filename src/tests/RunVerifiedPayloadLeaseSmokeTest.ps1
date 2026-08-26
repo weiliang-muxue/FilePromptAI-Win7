@@ -1,5 +1,6 @@
 param(
-    [string]$Version = '1.17'
+    [string]$Version = '1.17',
+    [string]$ArchivePath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,13 +12,19 @@ $frameworkRoot = 'C:\Windows\Microsoft.NET\Framework\v4.0.30319'
 $compiler = Join-Path $frameworkRoot 'csc.exe'
 $artifactRoot = Join-Path $testRoot 'build-artifacts'
 $testExecutable = Join-Path $artifactRoot 'VerifiedPayloadLeaseSmokeTest.exe'
-$stagingRoot = Join-Path $projectRoot "FilePromptAI-offline-release-v$Version"
-$verifierPath = Join-Path $stagingRoot 'Verify-FilePromptAI.exe'
+$archiveName = "FilePromptAI-Win7-Full-v$Version.zip"
+$resolvedArchivePath = if ([string]::IsNullOrWhiteSpace($ArchivePath)) {
+    Join-Path $projectRoot $archiveName
+}
+else {
+    [IO.Path]::GetFullPath($ArchivePath)
+}
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'FilePromptAI-PayloadLease-' + [Guid]::NewGuid().ToString('N')
 )
+$verifierPath = Join-Path $temporaryRoot 'Verify-FilePromptAI.exe'
 
-foreach ($required in @($compiler, $verifierPath)) {
+foreach ($required in @($compiler, $resolvedArchivePath)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required payload lease test input is missing: $required"
     }
@@ -38,13 +45,19 @@ $arguments = @(
     "/reference:$(Join-Path $frameworkRoot 'System.dll')",
     (Join-Path $testRoot 'VerifiedPayloadLeaseSmokeTest.cs')
 )
-& $compiler $arguments
-if ($LASTEXITCODE -ne 0) {
-    throw "Payload lease test compilation failed with exit code $LASTEXITCODE."
-}
-
-Copy-Item -LiteralPath $stagingRoot -Destination $temporaryRoot -Recurse
 try {
+    & $compiler $arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Payload lease test compilation failed with exit code $LASTEXITCODE."
+    }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory(
+        $resolvedArchivePath,
+        $temporaryRoot)
+    if (-not (Test-Path -LiteralPath $verifierPath -PathType Leaf)) {
+        throw "The tested ZIP does not contain its root verifier: $verifierPath"
+    }
     & $testExecutable $verifierPath $temporaryRoot
     if ($LASTEXITCODE -ne 0) {
         throw "Payload lease test failed with exit code $LASTEXITCODE."
