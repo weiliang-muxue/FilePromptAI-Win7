@@ -3,6 +3,9 @@
 FilePrompt AI 是一个面向 Windows 7 和内网自定义模型的文件问答客户端，不依赖
 WebView2。当前维护版本为 **v1.18**。
 
+本页面向普通使用者。开发者与发布维护者请阅读
+[DEVELOPMENT.md](DEVELOPMENT.md)。
+
 ## 能做什么
 
 - 连接 OpenAI Chat Completions 兼容的内网模型，可配置完整请求 URL、模型名称和
@@ -27,8 +30,7 @@ WebView2。当前维护版本为 **v1.18**。
    启动器会先校验并运行包内的微软官方离线安装程序，不会联网下载；如果安装程序要求
    重启，重启电脑后再次双击启动器。
 
-普通用户只需使用 `Start-FilePromptAI.exe`。无需运行 `Verify-FilePromptAI.exe`，
-也无需使用 `--archive` 参数。
+以后启动程序时，直接双击 `Start-FilePromptAI.exe` 即可。
 
 ## 首次配置
 
@@ -99,24 +101,19 @@ MCP 支持本地 stdio 和 Streamable HTTP。导入的 MCP 默认停用；stdio 
 
 ### 普通用户可选：核对 ZIP 的 SHA-256
 
-从可信的 v1.18 发布页或带注释的 `v1.18` Git 标签取得
-`src/RELEASE-SHA256.txt` 中公布的摘要，然后在 ZIP 所在目录运行：
+当前 `v1.18` 分支中安装包的 SHA-256 为：
+
+```text
+E8116757C96E6912ED26A93964B32E854C5A97A88250677C03E9A1EAF5BEB3C7
+```
+
+下载后可在 ZIP 所在目录运行：
 
 ```powershell
 (Get-FileHash .\FilePromptAI-Win7-Full-v1.18.zip -Algorithm SHA256).Hash
 ```
 
-计算结果应与可信来源公布的摘要完全一致。此步骤是可选的文件身份核对，不影响正常
-启动；不要使用 ZIP 内部的文件替代可信来源提供的摘要。
-
-### 发布维护者可选：Windows 7 验收
-
-`Verify-FilePromptAI.exe` 是发布取证工具，不是应用启动器。`--archive` 只用于
-发布维护者把原始 ZIP 与 Windows 7 验收报告绑定。普通用户无需运行验收器，也不要把
-`--archive` 传给启动器。
-
-正式验收的环境、命令、报告和发布证据链见
-[开发、测试与发布维护说明](DEVELOPMENT.md)。
+计算结果应与上方摘要完全一致。此步骤是可选的文件身份核对，不影响正常启动。
 
 ## 系统要求
 
@@ -130,8 +127,6 @@ MCP 支持本地 stdio 和 Streamable HTTP。导入的 MCP 默认停用；stdio 
   补丁不在应用包内。
 - 访问 HTTPS 模型或 HTTP MCP 地址时，Windows 需要支持 TLS 1.2，并信任服务端证书；
   单位内部 CA 的根证书需由管理员预先导入系统证书库。
-
-1920×1080、100% 缩放只属于正式发布验收环境要求，不是普通用户运行程序的前置条件。
 
 ## 卸载
 
@@ -150,7 +145,8 @@ MCP 支持本地 stdio 和 Streamable HTTP。导入的 MCP 默认停用；stdio 
 - 安装和启动不访问互联网，也不会在线下载依赖、更新、遥测或扩展。
 - 生成内容时只连接用户填写的完整模型请求 URL；模型请求和主动模型列表请求不使用
   Windows 系统代理，也不跟随 3xx 重定向。
-- API Key、MCP 命令、环境变量、URL 和请求头使用当前 Windows 用户的 DPAPI 加密保存。
+- API Key 以及 MCP 配置中的命令、环境变量、URL 和请求头使用当前 Windows 用户的
+  DPAPI 加密保存；模型请求 URL 会以明文保存在本机配置中。
 - 程序只读取用户当次明确选择、拖入、粘贴或确认添加的文件，不扫描目录；本地路径不会
   发给模型。
 - 会话文件无法安全读取时，程序进入只读保护，不覆盖原文件；确认内容损坏时会先在同一
@@ -160,8 +156,3 @@ MCP 支持本地 stdio 和 Streamable HTTP。导入的 MCP 默认停用；stdio 
   FilePrompt AI 的配置脱敏不能约束恶意 MCP，启用前必须确认来源和行为。
 - 基础问答只需要用户配置的 OpenAI Chat Completions 兼容端点。模型服务不可达时无法
   生成内容，这与安装依赖无关。
-
-## 开发入口
-
-源码构建、自动测试、离线依赖准备、候选包晋升、Windows 7 发布验收、Git LFS 和标签
-封存流程统一见 [DEVELOPMENT.md](DEVELOPMENT.md)。普通用户不需要执行其中的命令。

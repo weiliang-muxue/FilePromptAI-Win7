@@ -10,8 +10,8 @@ FilePrompt AI for Windows 7 离线完整版
 - 连接单位内网中的 OpenAI Chat Completions 兼容模型。
 - 读取用户主动添加的文本、代码、PDF、Office、图片、PPTX 和 XMind 文件。
 - 支持多会话、搜索、置顶、归档、分支、备份和恢复。
-- 可将回答或整个会话导出为 Markdown、文本、Word、PDF、PowerPoint、XMind、
-  Excel 或 CSV。
+- 可将回答或整个会话导出为 Markdown、文本、Word、PDF、PowerPoint 和 XMind；
+  回答中的 Markdown 表格还可导出为 Excel 或 CSV。
 - 支持离线技能，以及由用户明确启用的本地 stdio 和 Streamable HTTP MCP。
 
 下载安装：只需三步
@@ -26,8 +26,7 @@ FilePrompt AI for Windows 7 离线完整版
 安装程序，再提示并自动运行它；安装过程不会联网下载。如果安装程序要求重启，
 重启电脑后再次双击 Start-FilePromptAI.exe。
 
-普通用户无需运行 Verify-FilePromptAI.exe，也无需使用 --archive 参数。
-Verify-FilePromptAI.exe 是发布维护者的验收工具，不是应用启动器。
+以后启动程序时，直接双击 Start-FilePromptAI.exe 即可。
 
 首次使用
 --------
@@ -72,8 +71,6 @@ Verify-FilePromptAI.exe 是发布维护者的验收工具，不是应用启动�
 - 使用 HTTPS 内网模型服务时，Windows 需要支持 TLS 1.2 并信任服务端证书；
   单位内部 CA 的根证书需由管理员预先导入系统证书库。
 
-1920×1080、100% 缩放只用于正式发布验收，不是普通用户运行程序的要求。
-
 卸载
 ----
 
@@ -95,8 +92,8 @@ Verify-FilePromptAI.exe 是发布维护者的验收工具，不是应用启动�
 - 安装和启动不访问互联网，也不会下载依赖、更新、遥测或扩展。
 - 生成内容时只连接用户填写的完整模型请求 URL；模型请求和主动模型列表请求
   不使用 Windows 系统代理，也不跟随 3xx 重定向。
-- API Key、MCP 命令、环境变量、URL 和请求头使用当前 Windows 用户的 DPAPI
-  加密保存。
+- API Key 以及 MCP 配置中的命令、环境变量、URL 和请求头使用当前 Windows 用户的
+  DPAPI 加密保存；模型请求 URL 会以明文保存在本机配置中。
 - 程序只读取用户当次明确选择、拖入、粘贴或确认添加的文件，不扫描目录。
 - 从文件或剪贴板导入的技能和 MCP 不会因为导入而执行脚本或联网。
 - 导入的 MCP 默认停用；stdio 服务启动及工具调用默认需要用户确认。
@@ -110,47 +107,15 @@ Verify-FilePromptAI.exe 是发布维护者的验收工具，不是应用启动�
 
 普通用户可选：核对 ZIP 的 SHA-256
 
-从可信的 v1.18 发布页或带注释的 v1.18 Git 标签中的 src\RELEASE-SHA256.txt
-取得公布摘要，再在 ZIP 所在目录运行：
+当前 v1.18 分支中安装包的 SHA-256 为：
+
+E8116757C96E6912ED26A93964B32E854C5A97A88250677C03E9A1EAF5BEB3C7
+
+下载后可在 ZIP 所在目录运行：
 
 (Get-FileHash .\FilePromptAI-Win7-Full-v1.18.zip -Algorithm SHA256).Hash
 
-计算结果应与可信来源公布的摘要完全一致。单独计算当前文件的摘要只能确认文件
-身份，不能代替可信来源。此核对是可选步骤，不影响正常启动。
-
-发布维护者可选：Windows 7 正式验收
-----------------------------------
-
-本节只用于正式发布取证。普通用户无需执行，也无需使用 --archive。
-
-验收机必须是 Windows 7 SP1，主屏为 1920×1080、100% 缩放。如果缺少
-.NET Framework 4.8，先双击 Start-FilePromptAI.exe，由启动器调用包内离线
-安装程序；如提示重启，重启后再继续。
-
-保留本次解压所用的原始 ZIP，并完整解压到另一个目录。原始 ZIP 不得位于解压
-目录内。进入解压根目录后运行：
-
-.\Verify-FilePromptAI.exe --archive D:\Transfer\FilePromptAI-Win7-Full-v1.18.zip
-
-这里的 --archive 在“正式验收命令”中不可省略，参数必须指向本次解压所用、
-文件名仍为 FilePromptAI-Win7-Full-v1.18.zip 的原始 ZIP。它不是正常启动参数。
-
-验收器保持原始 ZIP 的只读句柄，将 ZIP 的 SHA-256、大小和包清单身份写入报告，
-再校验解压目录的精确文件集合。它使用独立临时数据和 127.0.0.1 回环服务检查
-真实启动器、独立主进程、设置、两轮问答、附件、持久化和生产导出处理器，不连接
-外部模型服务，不使用现有用户会话，也不修改注册表。
-
-只有 Windows 7 SP1、.NET Framework 4.8、1920×1080@96 DPI 和全部功能检查
-同时通过时，验收器才输出总 PASS 并返回退出码 0。Windows 8/10/11 上的报告会
-明确失败 os.win7-sp1，不能作为 Windows 7 发布证据。
-
-验收报告及其同名 .sha256.txt 校验文件默认写入 %TEMP%；如果该目录位于发布包内，
-则改写到：
-
-%LocalAppData%\FilePromptAI-Acceptance\AcceptanceReports
-
-只有总 PASS 报告才能用于正式发布封存。发布维护者还必须按源码仓库
-src\DEVELOPMENT.md 中的说明核对可信包身份、保留报告，并完成晋升、封存和标签复核。
+计算结果应与上方摘要完全一致。此核对是可选步骤，不影响正常启动。
 
 随包 .NET Framework 4.8 离线安装程序
 -------------------------------------
