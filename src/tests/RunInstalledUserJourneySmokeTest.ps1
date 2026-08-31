@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 
 param(
-    [string]$Version = '1.18',
+    [string]$Version = '1.19',
     [string]$ArchivePath = ''
 )
 

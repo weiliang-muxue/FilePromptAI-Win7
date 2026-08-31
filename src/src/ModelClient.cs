@@ -413,7 +413,7 @@ namespace FilePromptAIWin7
             }
             catch (AttemptException exception)
             {
-                throw CreateUserFacingException(exception, request);
+                throw CreateToolUserFacingException(exception, request);
             }
             catch (HttpRequestException exception)
             {
@@ -4508,6 +4508,68 @@ namespace FilePromptAIWin7
         private sealed class EndpointAttempt
         {
             public Uri Url { get; set; }
+        }
+
+        private static bool IsModelToolsUnsupported(AttemptException exception)
+        {
+            if (exception == null ||
+                (exception.StatusCode != 400 &&
+                    exception.StatusCode != 404 &&
+                    exception.StatusCode != 422))
+            {
+                return false;
+            }
+
+            string body = exception.Body ?? string.Empty;
+            bool mentionsTools =
+                body.IndexOf("tool_choice", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("tool_calls", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("function calling", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("function_call", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("tools", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("工具调用", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool rejectsParameter =
+                body.IndexOf("not support", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("unsupported", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("unknown parameter", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("unrecognized", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("not permitted", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("not allowed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("extra inputs", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("不支持", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                body.IndexOf("未知参数", StringComparison.OrdinalIgnoreCase) >= 0;
+            return mentionsTools && rejectsParameter;
+        }
+
+        private ModelCallException CreateToolUserFacingException(
+            AttemptException exception,
+            ModelRequest request)
+        {
+            if (!IsModelToolsUnsupported(exception))
+            {
+                return CreateUserFacingException(exception, request);
+            }
+
+            string message =
+                "当前模型接口不支持 Chat Completions 的 tools/tool_calls " +
+                "工具调用，因此不能让模型搜索、读取或修改所选代码目录。" +
+                "请在内网模型网关启用 OpenAI 兼容的 function calling，" +
+                "或改用支持工具调用的模型。程序不会绕过确认直接写入文件。";
+            string serverMessage = ExtractErrorMessageFromBody(exception.Body);
+            if (!string.IsNullOrWhiteSpace(serverMessage))
+            {
+                message += "\r\n\r\n服务端信息：" + serverMessage;
+            }
+
+            if (!string.IsNullOrWhiteSpace(exception.RequestId))
+            {
+                message += "\r\n请求 ID：" + exception.RequestId;
+            }
+
+            return new ModelCallException(
+                message,
+                exception.StatusCode,
+                exception.RequestId);
         }
 
         private sealed class StreamDiagnostics

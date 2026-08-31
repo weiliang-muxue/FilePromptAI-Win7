@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.18',
+    [string]$Version = '1.19',
     [switch]$WriteReleaseReceipt
 )
 
@@ -110,6 +110,10 @@ $scripts = @(
     'RunApiHardeningSmokeTest.ps1',
     'RunNetworkReliabilitySmokeTest.ps1',
     'RunToolLoopSmokeTest.ps1',
+    'RunModelToolRegistrySmokeTest.ps1',
+    'RunCodeWorkspaceSmokeTest.ps1',
+    'RunCodeWorkspaceToolProviderSmokeTest.ps1',
+    'RunWorkspaceToolLoopEndToEndSmokeTest.ps1',
     'RunExtensionSettingsSmokeTest.ps1',
     'RunModelProfileSmokeTest.ps1',
     'RunGenerationSettingsSmokeTest.ps1',

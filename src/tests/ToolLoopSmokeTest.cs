@@ -23,6 +23,8 @@ namespace FilePromptAIWin7
                 TestSuccessfulToolLoop();
                 TestToolRoundLimit();
                 TestToolCancellation();
+                TestUnsupportedToolsDiagnosis();
+                TestGenericBadRequestKeepsGenericDiagnosis();
                 Console.WriteLine("PASS | model tool loop");
                 return 0;
             }
@@ -197,6 +199,100 @@ namespace FilePromptAIWin7
             return new McpToolResult();
         }
 
+        private static void TestUnsupportedToolsDiagnosis()
+        {
+            TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            Task server = Task.Factory.StartNew(
+                delegate
+                {
+                    HandleErrorResponse(
+                        listener,
+                        400,
+                        "{\"error\":{\"message\":" +
+                        "\"Unknown parameter: tools is not supported\"}}");
+                });
+
+            Exception failure;
+            using (ModelClient client = new ModelClient())
+            {
+                Task<string> task = client.GenerateWithToolsAsync(
+                    CreateRequest(port, "/tools-unsupported"),
+                    CreateTools(),
+                    delegate(
+                        ModelToolCall call,
+                        CancellationToken cancellationToken)
+                    {
+                        throw new InvalidOperationException(
+                            "Unsupported tool request must not execute tools.");
+                    },
+                    null,
+                    null,
+                    CancellationToken.None);
+                failure = WaitForFailure(task, TimeSpan.FromSeconds(5));
+            }
+
+            listener.Stop();
+            Assert(server.Wait(TimeSpan.FromSeconds(5)), "unsupported server completed");
+            Assert(
+                failure is ModelCallException,
+                "unsupported tools exception type");
+            Assert(
+                failure.Message.IndexOf(
+                    "tools/tool_calls",
+                    StringComparison.OrdinalIgnoreCase) >= 0 &&
+                failure.Message.IndexOf(
+                    "不能让模型搜索、读取或修改",
+                    StringComparison.Ordinal) >= 0,
+                "unsupported tools guidance");
+        }
+
+        private static void TestGenericBadRequestKeepsGenericDiagnosis()
+        {
+            TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            Task server = Task.Factory.StartNew(
+                delegate
+                {
+                    HandleErrorResponse(
+                        listener,
+                        400,
+                        "{\"error\":{\"message\":\"temperature is invalid\"}}");
+                });
+
+            Exception failure;
+            using (ModelClient client = new ModelClient())
+            {
+                Task<string> task = client.GenerateWithToolsAsync(
+                    CreateRequest(port, "/tools-generic-error"),
+                    CreateTools(),
+                    delegate(
+                        ModelToolCall call,
+                        CancellationToken cancellationToken)
+                    {
+                        return Task.FromResult(new McpToolResult());
+                    },
+                    null,
+                    null,
+                    CancellationToken.None);
+                failure = WaitForFailure(task, TimeSpan.FromSeconds(5));
+            }
+
+            listener.Stop();
+            Assert(server.Wait(TimeSpan.FromSeconds(5)), "generic error server completed");
+            Assert(failure is ModelCallException, "generic error exception type");
+            Assert(
+                failure.Message.IndexOf(
+                    "tools/tool_calls",
+                    StringComparison.OrdinalIgnoreCase) < 0 &&
+                failure.Message.IndexOf(
+                    "temperature is invalid",
+                    StringComparison.OrdinalIgnoreCase) >= 0,
+                "generic error is not misdiagnosed as unsupported tools");
+        }
+
         private static ModelRequest CreateRequest(int port, string path)
         {
             return new ModelRequest
@@ -349,6 +445,27 @@ namespace FilePromptAIWin7
                 stream.Write(bodyBytes, 0, bodyBytes.Length);
                 stream.Flush();
                 return request;
+            }
+        }
+
+        private static void HandleErrorResponse(
+            TcpListener listener,
+            int statusCode,
+            string body)
+        {
+            using (TcpClient connection = listener.AcceptTcpClient())
+            using (NetworkStream stream = connection.GetStream())
+            {
+                ReadRequest(stream);
+                byte[] bodyBytes = Encoding.UTF8.GetBytes(body);
+                byte[] headers = Encoding.ASCII.GetBytes(
+                    "HTTP/1.1 " + statusCode + " Bad Request\r\n" +
+                    "Content-Type: application/json; charset=utf-8\r\n" +
+                    "Content-Length: " + bodyBytes.Length + "\r\n" +
+                    "Connection: close\r\n\r\n");
+                stream.Write(headers, 0, headers.Length);
+                stream.Write(bodyBytes, 0, bodyBytes.Length);
+                stream.Flush();
             }
         }
 

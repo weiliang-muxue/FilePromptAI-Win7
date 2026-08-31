@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.18'
+    [string]$Version = '1.19'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -198,8 +198,8 @@ if (-not (Test-Path -LiteralPath $checksumPath -PathType Leaf)) {
 [xml]$document = Get-Content -LiteralPath $report.FullName -Raw -Encoding UTF8
 $root = $document.filePromptAiAcceptance
 if ($root.schemaVersion -ne '3' -or
-    $root.verifierVersion -ne '1.18.0.0') {
-    throw 'The acceptance report does not use the v1.18 schemaVersion=3 contract.'
+    $root.verifierVersion -ne '1.19.0.0') {
+    throw 'The acceptance report does not use the v1.19 schemaVersion=3 contract.'
 }
 if ($output -notmatch (
         '(?m)^PASS \| application\.launch \|[^\r\n]*\r?\n' +

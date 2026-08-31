@@ -17,7 +17,7 @@ $hostExecutable = Join-Path $artifactRoot 'ExtensionsDialogHost.exe'
 $fullHdProbe = Join-Path $testRoot 'AssertFullHd100.ps1'
 $sizeSuffix = if ($FullHd100) { '-fullhd100' } else { '' }
 $outputPath = Join-Path $artifactRoot (
-    'FilePromptAI-ui-v1.18-extensions-' + $Mode.ToLowerInvariant() +
+    'FilePromptAI-ui-v1.19-extensions-' + $Mode.ToLowerInvariant() +
         $sizeSuffix + '.png'
 )
 $profileRoot = Join-Path $artifactRoot 'extensions-ui-profile'

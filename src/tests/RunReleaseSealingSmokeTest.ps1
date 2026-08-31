@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.18'
+    [string]$Version = '1.19'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -125,7 +125,7 @@ function Write-AcceptanceFixtureReport {
             [DateTime]::UtcNow.ToString(
                 'o',
                 [Globalization.CultureInfo]::InvariantCulture))
-        $writer.WriteAttributeString('verifierVersion', '1.18.0.0')
+        $writer.WriteAttributeString('verifierVersion', '1.19.0.0')
         foreach ($name in @(
             'packageRoot',
             'reportPath',
@@ -265,6 +265,10 @@ function New-ReleaseFixture {
         'RunApiHardeningSmokeTest.ps1',
         'RunNetworkReliabilitySmokeTest.ps1',
         'RunToolLoopSmokeTest.ps1',
+        'RunModelToolRegistrySmokeTest.ps1',
+        'RunCodeWorkspaceSmokeTest.ps1',
+        'RunCodeWorkspaceToolProviderSmokeTest.ps1',
+        'RunWorkspaceToolLoopEndToEndSmokeTest.ps1',
         'RunExtensionSettingsSmokeTest.ps1',
         'RunModelProfileSmokeTest.ps1',
         'RunGenerationSettingsSmokeTest.ps1',
@@ -299,7 +303,7 @@ function New-ReleaseFixture {
         $stubScript,
         $utf8NoBom)
     $packageStub = @'
-param([string]$Version = '1.18')
+param([string]$Version = '1.19')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $name = "FilePromptAI-Win7-Full-v$Version.zip"
@@ -572,19 +576,19 @@ try {
         -Result (Invoke-Script `
             -ScriptPath $invalidEvidence.SealScript `
             -Root $invalidEvidence.Root) `
-        -OutputPattern 'not a passing v1\.18'
+        -OutputPattern 'not a passing v1\.19'
 
     Set-AcceptanceFixtureText `
         -Path $invalidEvidence.AcceptanceReportPath `
         -OriginalText $acceptanceText `
-        -OldValue 'verifierVersion="1.18.0.0"' `
+        -OldValue 'verifierVersion="1.19.0.0"' `
         -NewValue 'verifierVersion="1.16.0.0"'
     Assert-Rejected `
         -Description 'An acceptance report from an older verifier' `
         -Result (Invoke-Script `
             -ScriptPath $invalidEvidence.SealScript `
             -Root $invalidEvidence.Root) `
-        -OutputPattern 'not a passing v1\.18'
+        -OutputPattern 'not a passing v1\.19'
 
     Set-AcceptanceFixtureText `
         -Path $invalidEvidence.AcceptanceReportPath `
@@ -596,7 +600,7 @@ try {
         -Result (Invoke-Script `
             -ScriptPath $invalidEvidence.SealScript `
             -Root $invalidEvidence.Root) `
-        -OutputPattern 'not a passing v1\.18'
+        -OutputPattern 'not a passing v1\.19'
 
     Set-AcceptanceFixtureText `
         -Path $invalidEvidence.AcceptanceReportPath `

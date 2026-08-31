@@ -33,6 +33,16 @@ namespace FilePromptAIWin7
         private const float MinimumOutputAreaHeight = 128F;
         private const float CompactComposerHeight = 154F;
         private const float ExpandedComposerHeight = 246F;
+        private const float CodeWorkspaceStatusHeight = 36F;
+        private const string CodeWorkspaceSystemInstruction =
+            "当前会话已启用受限代码工作区。你只能通过 workspace_list_files、" +
+            "workspace_search、workspace_read_file 和 workspace_propose_edit " +
+            "访问用户授权的目录。所有路径必须是工具返回或用户指定的相对路径，" +
+            "不得猜测、索取或输出本机绝对路径。修改前必须先搜索或读取目标文件，" +
+            "并把 workspace_read_file 返回的 sha256 原样作为 base_sha256。" +
+            "只能修改最大 256 KiB 的已有文本文件，不能创建、删除、重命名文件，不能执行命令，" +
+            "也不能调用 MCP。只有 workspace_propose_edit 返回 status=applied 后，" +
+            "才能告诉用户文件已修改；工具被拒绝、失败或未调用时必须明确说明没有修改。";
         private const int EmGetScrollPosition = 0x04DD;
         private const int EmSetScrollPosition = 0x04DE;
 
@@ -44,6 +54,7 @@ namespace FilePromptAIWin7
         private readonly ExtensionStore extensionStore;
         private readonly ModelProfileStore modelProfileStore;
         private readonly object streamOutputSync;
+        private CodeWorkspace codeWorkspace;
         private IList<ModelProfile> modelProfiles;
         private ExtensionSettings extensionSettings;
         private AppSettings loadedAppSettings;
@@ -53,6 +64,7 @@ namespace FilePromptAIWin7
         private TableLayoutPanel conversationArea;
         private RowStyle composerAreaRowStyle;
         private RowStyle attachmentTrayRowStyle;
+        private RowStyle codeWorkspaceRowStyle;
         private Control composerPanel;
         private Panel fileDropTargetPanel;
         private TextBox endpointTextBox;
@@ -97,6 +109,10 @@ namespace FilePromptAIWin7
         private Button testConnectionButton;
         private Button extensionsButton;
         private Button promptActionsButton;
+        private Panel codeWorkspacePanel;
+        private Label codeWorkspaceLabel;
+        private Button clearWorkspaceButton;
+        private Button undoWorkspaceButton;
         private ToolStripStatusLabel statusLabel;
         private ToolStripProgressBar progressBar;
         private System.Windows.Forms.Timer sessionSearchTimer;
@@ -131,6 +147,8 @@ namespace FilePromptAIWin7
         private readonly Queue<string> exportPathsForTests =
             new Queue<string>();
         private bool settingsDialogTransactionActive;
+        private bool workspaceEditAppliedThisGeneration;
+        private string codeWorkspaceSessionId;
         private int settingsDialogTransactionSequence;
         private int activeSettingsDialogTransactionId;
         private SettingsDialogTransactionSnapshot activeSettingsDialogSnapshot;
@@ -725,9 +743,13 @@ namespace FilePromptAIWin7
                 int height = conversationArea.ClientSize.Height;
                 bool hasInputItems = inputItems != null &&
                     inputItems.Count > 0;
+                float workspaceHeight = codeWorkspace != null
+                    ? CodeWorkspaceStatusHeight
+                    : 0F;
                 float desiredComposerHeight = hasInputItems
                     ? ExpandedComposerHeight
                     : CompactComposerHeight;
+                desiredComposerHeight += workspaceHeight;
                 desiredComposerHeight = Math.Min(
                     desiredComposerHeight,
                     Math.Max(118F, height - MinimumOutputAreaHeight));
@@ -739,7 +761,9 @@ namespace FilePromptAIWin7
                 }
 
                 attachmentTrayRowStyle.Height = hasInputItems
-                    ? Math.Max(58F, desiredComposerHeight - 154F)
+                    ? Math.Max(
+                        58F,
+                        desiredComposerHeight - 154F - workspaceHeight)
                     : 0F;
                 if (inputListView != null)
                 {
@@ -852,9 +876,11 @@ namespace FilePromptAIWin7
             TableLayoutPanel layout = new TableLayoutPanel();
             layout.Dock = DockStyle.Fill;
             layout.ColumnCount = 1;
-            layout.RowCount = 3;
+            layout.RowCount = 4;
             attachmentTrayRowStyle = new RowStyle(SizeType.Absolute, 0F);
             layout.RowStyles.Add(attachmentTrayRowStyle);
+            codeWorkspaceRowStyle = new RowStyle(SizeType.Absolute, 0F);
+            layout.RowStyles.Add(codeWorkspaceRowStyle);
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 37F));
 
@@ -906,15 +932,21 @@ namespace FilePromptAIWin7
             ToolStripMenuItem pathItem =
                 new ToolStripMenuItem("从路径添加...");
             pathItem.Click += delegate { ShowPathInputDialog(); };
+            ToolStripMenuItem workspaceItem =
+                new ToolStripMenuItem("选择代码工作区...");
+            workspaceItem.Click += OnSelectCodeWorkspaceClick;
             addMenu.Items.Add(chooseFileItem);
             addMenu.Items.Add(pasteItem);
             addMenu.Items.Add(pathItem);
+            addMenu.Items.Add(new ToolStripSeparator());
+            addMenu.Items.Add(workspaceItem);
             addMenu.Opening += delegate
             {
                 bool enabled = !IsBusy;
                 chooseFileItem.Enabled = enabled;
                 pasteItem.Enabled = enabled;
                 pathItem.Enabled = enabled;
+                workspaceItem.Enabled = enabled;
             };
 
             addFileButton = CreateButton("+ 添加", 72);
@@ -1018,10 +1050,277 @@ namespace FilePromptAIWin7
             actions.Controls.Add(composerActions, 0, 0);
             actions.Controls.Add(sendActions, 1, 0);
             layout.Controls.Add(CreateInputsPanel(), 0, 0);
-            layout.Controls.Add(promptTextBox, 0, 1);
-            layout.Controls.Add(actions, 0, 2);
+            layout.Controls.Add(CreateCodeWorkspacePanel(), 0, 1);
+            layout.Controls.Add(promptTextBox, 0, 2);
+            layout.Controls.Add(actions, 0, 3);
             promptGroup.Controls.Add(layout);
             return promptGroup;
+        }
+
+        private Control CreateCodeWorkspacePanel()
+        {
+            codeWorkspacePanel = new Panel();
+            codeWorkspacePanel.Dock = DockStyle.Fill;
+            codeWorkspacePanel.BackColor = UiTheme.PanelAltBackground;
+            codeWorkspacePanel.BorderStyle = BorderStyle.FixedSingle;
+            codeWorkspacePanel.Margin = new Padding(0, 3, 0, 3);
+            codeWorkspacePanel.Visible = false;
+            codeWorkspacePanel.AccessibleName = "当前代码工作区";
+
+            codeWorkspaceLabel = new Label();
+            codeWorkspaceLabel.AutoSize = false;
+            codeWorkspaceLabel.Location = new Point(8, 3);
+            codeWorkspaceLabel.Height = 26;
+            codeWorkspaceLabel.TextAlign = ContentAlignment.MiddleLeft;
+            codeWorkspaceLabel.ForeColor = UiTheme.TextPrimary;
+            codeWorkspaceLabel.AutoEllipsis = true;
+            codeWorkspaceLabel.Anchor = AnchorStyles.Left | AnchorStyles.Top |
+                AnchorStyles.Right;
+
+            undoWorkspaceButton = CreateButton("撤销修改", 82);
+            undoWorkspaceButton.Height = 25;
+            undoWorkspaceButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            undoWorkspaceButton.Enabled = false;
+            undoWorkspaceButton.AccessibleName = "撤销最近一次代码修改";
+            undoWorkspaceButton.Click += OnUndoWorkspaceEditClick;
+
+            clearWorkspaceButton = CreateButton("关闭工作区", 88);
+            clearWorkspaceButton.Height = 25;
+            clearWorkspaceButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            clearWorkspaceButton.AccessibleName = "关闭当前代码工作区授权";
+            clearWorkspaceButton.Click += delegate { ClearCodeWorkspace(true); };
+
+            codeWorkspacePanel.Resize += delegate
+            {
+                clearWorkspaceButton.Location = new Point(
+                    Math.Max(0, codeWorkspacePanel.ClientSize.Width -
+                        clearWorkspaceButton.Width - 5),
+                    3);
+                undoWorkspaceButton.Location = new Point(
+                    Math.Max(0, clearWorkspaceButton.Left -
+                        undoWorkspaceButton.Width - 5),
+                    3);
+                codeWorkspaceLabel.Width = Math.Max(
+                    40,
+                    undoWorkspaceButton.Left - codeWorkspaceLabel.Left - 6);
+            };
+            codeWorkspacePanel.Controls.Add(codeWorkspaceLabel);
+            codeWorkspacePanel.Controls.Add(undoWorkspaceButton);
+            codeWorkspacePanel.Controls.Add(clearWorkspaceButton);
+            return codeWorkspacePanel;
+        }
+
+        private void OnSelectCodeWorkspaceClick(
+            object sender,
+            EventArgs args)
+        {
+            if (IsBusy || isClosing)
+            {
+                return;
+            }
+
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = "选择代码文件（授权范围为其所在文件夹）";
+                dialog.Filter =
+                    "代码和文本文件|*.cs;*.vb;*.fs;*.cpp;*.c;*.h;*.hpp;*.java;" +
+                    "*.py;*.js;*.jsx;*.ts;*.tsx;*.vue;*.html;*.htm;*.css;*.scss;" +
+                    "*.json;*.xml;*.yaml;*.yml;*.toml;*.ini;*.config;*.md;*.txt;" +
+                    "*.ps1;*.bat;*.cmd;*.sql;*.go;*.rs;*.php;*.rb;*.sh|" +
+                    "所有文件|*.*";
+                dialog.Multiselect = false;
+                dialog.CheckFileExists = true;
+                dialog.CheckPathExists = true;
+                dialog.DereferenceLinks = false;
+                dialog.RestoreDirectory = true;
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                CodeWorkspace selected = null;
+                try
+                {
+                    selected = CodeWorkspace.OpenFromSelectedFile(
+                        dialog.FileName);
+                    if (inputItems.Count > 0)
+                    {
+                        DialogResult clearAttachments = MessageBox.Show(
+                            this,
+                            "启用代码工作区后，只能通过受限工具读取所选文件夹。" +
+                                "\r\n\r\n当前已添加的资料将被移除，是否继续？",
+                            "启用代码工作区",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Information,
+                            MessageBoxDefaultButton.Button2);
+                        if (clearAttachments != DialogResult.Yes)
+                        {
+                            return;
+                        }
+
+                        inputItems.Clear();
+                        inputListView.Items.Clear();
+                    }
+                    ClearCodeWorkspace(false);
+                    codeWorkspace = selected;
+                    selected = null;
+                    ConversationSession session =
+                        conversationStore.CurrentSession;
+                    codeWorkspaceSessionId = session == null
+                        ? string.Empty
+                        : session.Id;
+                    UpdateCodeWorkspaceState();
+                    ClearRetryState();
+                    SetStatus(
+                        "代码工作区已启用；只授权所选文件所在文件夹，" +
+                        "代码模式不会启动 MCP");
+                    promptTextBox.Focus();
+                }
+                catch (Exception exception)
+                {
+                    MessageBox.Show(
+                        this,
+                        "无法启用代码工作区：\r\n\r\n" +
+                            exception.Message,
+                        "选择代码工作区",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    SetStatus("代码工作区未启用，文件夹权限没有改变");
+                }
+                finally
+                {
+                    if (selected != null)
+                    {
+                        selected.Dispose();
+                    }
+                }
+            }
+        }
+
+        private void OnUndoWorkspaceEditClick(
+            object sender,
+            EventArgs args)
+        {
+            if (IsBusy || codeWorkspace == null ||
+                !codeWorkspace.CanUndo)
+            {
+                return;
+            }
+
+            string relativePath = codeWorkspace.LastEditedRelativePath;
+            DialogResult confirmation = MessageBox.Show(
+                this,
+                "撤销最近一次代码修改？\r\n\r\n" + relativePath +
+                    "\r\n\r\n如果文件后来又被其他程序修改，程序会拒绝覆盖。",
+                "撤销代码修改",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (confirmation != DialogResult.Yes)
+            {
+                return;
+            }
+
+            try
+            {
+                codeWorkspace.Undo(relativePath);
+                workspaceEditAppliedThisGeneration = false;
+                UpdateCodeWorkspaceState();
+                SetStatus("已撤销最近一次代码修改 · " + relativePath);
+            }
+            catch (Exception exception)
+            {
+                MessageBox.Show(
+                    this,
+                    "撤销失败：\r\n\r\n" + exception.Message,
+                    "撤销代码修改",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                UpdateCodeWorkspaceState();
+                SetStatus("撤销失败，现有文件没有被覆盖");
+            }
+        }
+
+        private void ClearCodeWorkspace(bool notifyUser)
+        {
+            CodeWorkspace current = codeWorkspace;
+            if (current != null)
+            {
+                current.Dispose();
+            }
+            codeWorkspace = null;
+            codeWorkspaceSessionId = string.Empty;
+            workspaceEditAppliedThisGeneration = false;
+
+            UpdateCodeWorkspaceState();
+            if (notifyUser)
+            {
+                ClearRetryState();
+                SetStatus("代码工作区已关闭，文件夹访问授权已释放");
+                if (promptTextBox != null)
+                {
+                    promptTextBox.Focus();
+                }
+            }
+        }
+
+        private void UpdateCodeWorkspaceState()
+        {
+            bool enabled = codeWorkspace != null;
+            if (codeWorkspaceRowStyle != null)
+            {
+                codeWorkspaceRowStyle.Height = enabled
+                    ? CodeWorkspaceStatusHeight
+                    : 0F;
+            }
+            if (codeWorkspacePanel != null)
+            {
+                codeWorkspacePanel.Visible = enabled;
+            }
+            if (codeWorkspaceLabel != null)
+            {
+                codeWorkspaceLabel.Text = enabled
+                    ? "代码工作区 · " +
+                        new DirectoryInfo(codeWorkspace.RootPath).Name +
+                        " · 已选 " + codeWorkspace.SelectedRelativePath
+                    : string.Empty;
+                codeWorkspaceLabel.AccessibleDescription = enabled
+                    ? "只允许访问所选文件所在的本机文件夹；模型只看到相对路径"
+                    : string.Empty;
+            }
+            if (undoWorkspaceButton != null)
+            {
+                undoWorkspaceButton.Enabled =
+                    enabled && codeWorkspace.CanUndo && !IsBusy;
+            }
+            if (clearWorkspaceButton != null)
+            {
+                clearWorkspaceButton.Enabled = enabled && !IsBusy;
+            }
+            SetInputButtonsEnabled(!IsBusy);
+            UpdateConversationAreaRows();
+            UpdateContextSummary();
+        }
+
+        private void ReleaseWorkspaceOnSessionChange()
+        {
+            if (codeWorkspace != null)
+            {
+                ClearCodeWorkspace(false);
+                SetStatus("会话已改变，代码工作区授权已自动释放");
+            }
+        }
+
+        private bool RejectAttachmentInCodeMode()
+        {
+            if (codeWorkspace == null)
+            {
+                return false;
+            }
+
+            SetStatus(
+                "代码模式只允许受限工具读取当前工作区；请先关闭工作区再添加资料。");
+            return true;
         }
 
         private Control CreateOutputPanel()
@@ -1949,6 +2248,15 @@ namespace FilePromptAIWin7
                 return;
             }
 
+            if (codeWorkspace != null && !string.Equals(
+                codeWorkspaceSessionId,
+                session.Id,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                ClearCodeWorkspace(false);
+                SetStatus("会话已改变，代码工作区授权已自动释放");
+            }
+
             sessionTitleLabel.Text = session.Title;
             connectionStatusLabel.Text = BuildConnectionStatus();
             RenderConversation(session);
@@ -2436,7 +2744,9 @@ namespace FilePromptAIWin7
                 return "尚未配置完整 · 请填写 URL / 模型";
             }
 
-            return "配置就绪 · " + model;
+            return codeWorkspace == null
+                ? "配置就绪 · " + model
+                : "代码模式 · " + model + " · MCP 已隔离";
         }
 
         private string BuildContextSummary()
@@ -2616,11 +2926,26 @@ namespace FilePromptAIWin7
                 extensionPromptCharacterEstimate > 0L
                     ? 4L
                     : 0L;
-            return AddSaturated(
+            long combined = AddSaturated(
                 customCharacters,
                 AddSaturated(
                     separatorCharacters,
                     extensionPromptCharacterEstimate));
+            if (codeWorkspace == null)
+            {
+                return combined;
+            }
+
+            long workspaceCharacters =
+                ConversationContextBudget.CountCharacters(
+                    CodeWorkspaceSystemInstruction);
+            if (combined > 0L && workspaceCharacters > 0L)
+            {
+                workspaceCharacters = AddSaturated(
+                    workspaceCharacters,
+                    4L);
+            }
+            return AddSaturated(combined, workspaceCharacters);
         }
 
         private string BuildCombinedSystemPrompt()
@@ -2631,17 +2956,28 @@ namespace FilePromptAIWin7
             string skills = extensionSettings == null
                 ? string.Empty
                 : extensionSettings.BuildSystemPrompt();
+            string combined;
             if (string.IsNullOrEmpty(custom))
             {
-                return skills;
+                combined = skills;
             }
-
-            if (string.IsNullOrEmpty(skills))
+            else if (string.IsNullOrEmpty(skills))
             {
-                return custom;
+                combined = custom;
+            }
+            else
+            {
+                combined = custom + "\r\n\r\n" + skills;
             }
 
-            return custom + "\r\n\r\n" + skills;
+            if (codeWorkspace == null)
+            {
+                return combined;
+            }
+
+            return string.IsNullOrEmpty(combined)
+                ? CodeWorkspaceSystemInstruction
+                : combined + "\r\n\r\n" + CodeWorkspaceSystemInstruction;
         }
 
         private void OnGenerationSettingChanged(object sender, EventArgs args)
@@ -3950,6 +4286,7 @@ namespace FilePromptAIWin7
             }
 
             SaveCurrentDraft();
+            ReleaseWorkspaceOnSessionChange();
             ClearRetryState();
             showArchivedSessions = false;
             UpdateSessionViewButtons();
@@ -3994,6 +4331,7 @@ namespace FilePromptAIWin7
             }
 
             SaveCurrentDraft();
+            ReleaseWorkspaceOnSessionChange();
             ConversationSession session = conversationStore.CurrentSession;
             bool archived = !session.IsArchived;
             try
@@ -4041,6 +4379,7 @@ namespace FilePromptAIWin7
             }
 
             SaveCurrentDraft();
+            ReleaseWorkspaceOnSessionChange();
             try
             {
                 ConversationSession branch =
@@ -4210,6 +4549,7 @@ namespace FilePromptAIWin7
             {
                 if (conversationStore.SelectSession(session.Id))
                 {
+                    ReleaseWorkspaceOnSessionChange();
                     ClearRetryState();
                     LoadCurrentSession();
                     RestoreCurrentDraft();
@@ -4409,6 +4749,7 @@ namespace FilePromptAIWin7
 
         private void RestoreSessionsFromPath(string path)
         {
+            ReleaseWorkspaceOnSessionChange();
             int count = conversationStore.ImportBackup(path);
             if (count > 0)
             {
@@ -4506,6 +4847,7 @@ namespace FilePromptAIWin7
             try
             {
                 args.Effect = !IsBusy &&
+                    codeWorkspace == null &&
                     args.Data != null &&
                     args.Data.GetDataPresent(DataFormats.FileDrop)
                     ? DragDropEffects.Copy
@@ -4520,7 +4862,7 @@ namespace FilePromptAIWin7
 
         private async void OnDragDrop(object sender, DragEventArgs args)
         {
-            if (args == null || IsBusy)
+            if (args == null || IsBusy || RejectAttachmentInCodeMode())
             {
                 return;
             }
@@ -4561,7 +4903,7 @@ namespace FilePromptAIWin7
 
         private async void OnAddFileClick(object sender, EventArgs args)
         {
-            if (IsBusy)
+            if (IsBusy || RejectAttachmentInCodeMode())
             {
                 return;
             }
@@ -4583,7 +4925,7 @@ namespace FilePromptAIWin7
 
         private async void OnReadPathClick(object sender, EventArgs args)
         {
-            if (IsBusy)
+            if (IsBusy || RejectAttachmentInCodeMode())
             {
                 return;
             }
@@ -4645,9 +4987,14 @@ namespace FilePromptAIWin7
             IEnumerable<string> paths)
         {
             FileAddResult outcome = new FileAddResult();
-            if (IsBusy || isClosing)
+            if (IsBusy || isClosing || codeWorkspace != null)
             {
-                if (!isClosing)
+                if (!isClosing && codeWorkspace != null)
+                {
+                    SetStatus(
+                        "代码模式只允许受限工具读取当前工作区；请先关闭工作区再添加资料。");
+                }
+                else if (!isClosing)
                 {
                     SetStatus("当前任务尚未完成，请稍候。");
                 }
@@ -5056,7 +5403,7 @@ namespace FilePromptAIWin7
 
         private async void OnPasteClick(object sender, EventArgs args)
         {
-            if (IsBusy)
+            if (IsBusy || RejectAttachmentInCodeMode())
             {
                 return;
             }
@@ -5529,6 +5876,9 @@ namespace FilePromptAIWin7
             connectionStatusLabel.Text = "正在请求 · " + model;
             UpdateContextSummary();
             McpRuntime mcpRuntime = null;
+            CodeWorkspace activeCodeWorkspace = codeWorkspace;
+            CodeWorkspaceToolProvider workspaceTools = null;
+            workspaceEditAppliedThisGeneration = false;
             bool stdioStartupRejected = false;
             bool turnSaved = false;
 
@@ -5543,7 +5893,27 @@ namespace FilePromptAIWin7
                         .Select(server => server.Clone())
                         .ToList();
                 string result;
-                if (enabledServers.Count > 0)
+                if (activeCodeWorkspace != null)
+                {
+                    workspaceTools = new CodeWorkspaceToolProvider(
+                        activeCodeWorkspace,
+                        ConfirmWorkspaceEditAsync);
+                    ModelToolRegistry registry = new ModelToolRegistry();
+                    registry.AddSource(
+                        "受限代码工作区",
+                        workspaceTools.Tools,
+                        workspaceTools.ExecuteAsync);
+                    result = await modelClient.GenerateWithToolsAsync(
+                        request,
+                        registry.Tools,
+                        registry.ExecuteAsync,
+                        AppendOutput,
+                        SetStatus,
+                        generationCancellation.Token);
+                    workspaceEditAppliedThisGeneration =
+                        workspaceTools.EditApplied;
+                }
+                else if (enabledServers.Count > 0)
                 {
                     generationCancellation.Token.ThrowIfCancellationRequested();
                     if (!ShowStdioMcpStartupApproval(enabledServers))
@@ -5692,12 +6062,17 @@ namespace FilePromptAIWin7
                         : string.Empty) +
                     (fileTextWasTrimmed
                         ? "；文件正文超出本轮预算，已截断"
+                        : string.Empty) +
+                    (workspaceEditAppliedThisGeneration
+                        ? "；代码修改已应用，可在工作区栏撤销"
                         : string.Empty));
                 promptTextBox.Focus();
             }
             catch (OperationCanceledException)
             {
                 DeactivateStreamingOutput();
+                workspaceEditAppliedThisGeneration =
+                    workspaceTools != null && workspaceTools.EditApplied;
                 if (regenerate)
                 {
                     RenderConversation(session);
@@ -5708,11 +6083,15 @@ namespace FilePromptAIWin7
                 }
                 SetStatus(stdioStartupRejected
                     ? "已拒绝启动本地 MCP，本次生成已取消。"
-                    : "已停止，本次内容未写入会话。");
+                    : (workspaceEditAppliedThisGeneration
+                        ? "已停止；代码修改已经应用但回复未写入会话，可在工作区栏撤销。"
+                        : "已停止，本次内容未写入会话。"));
             }
             catch (ModelCallException exception)
             {
                 DeactivateStreamingOutput();
+                workspaceEditAppliedThisGeneration =
+                    workspaceTools != null && workspaceTools.EditApplied;
                 if (regenerate)
                 {
                     RenderConversation(session);
@@ -5721,7 +6100,7 @@ namespace FilePromptAIWin7
                 {
                     RemoveStreamingTurnPreview(session);
                 }
-                if (!turnSaved)
+                if (!turnSaved && !workspaceEditAppliedThisGeneration)
                 {
                     RememberFailedGeneration(
                         session,
@@ -5730,9 +6109,15 @@ namespace FilePromptAIWin7
                 }
                 SetStatus(turnSaved
                     ? "回复已保存，但界面更新失败；请切换会话后查看"
-                    : "生成失败，可点击“重试”再次请求");
+                    : (workspaceEditAppliedThisGeneration
+                        ? "代码修改已应用，但模型回复失败；可在工作区栏撤销"
+                        : "生成失败，可点击“重试”再次请求"));
                 MessageBox.Show(
-                    exception.Message,
+                    exception.Message +
+                        (workspaceEditAppliedThisGeneration
+                            ? "\r\n\r\n注意：代码修改已经应用，" +
+                                "但最终模型回复失败。请检查文件或点击“撤销修改”。"
+                            : string.Empty),
                     "模型调用失败",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
@@ -5740,6 +6125,8 @@ namespace FilePromptAIWin7
             catch (McpException exception)
             {
                 DeactivateStreamingOutput();
+                workspaceEditAppliedThisGeneration =
+                    workspaceTools != null && workspaceTools.EditApplied;
                 if (regenerate)
                 {
                     RenderConversation(session);
@@ -5748,7 +6135,7 @@ namespace FilePromptAIWin7
                 {
                     RemoveStreamingTurnPreview(session);
                 }
-                if (!turnSaved)
+                if (!turnSaved && !workspaceEditAppliedThisGeneration)
                 {
                     RememberFailedGeneration(
                         session,
@@ -5757,17 +6144,27 @@ namespace FilePromptAIWin7
                 }
                 SetStatus(turnSaved
                     ? "回复已保存，但界面更新失败；请切换会话后查看"
-                    : "MCP 调用失败，可点击“重试”再次请求");
+                    : (workspaceEditAppliedThisGeneration
+                        ? "代码修改已应用，但后续工具调用失败；可在工作区栏撤销"
+                        : "MCP 调用失败，可点击“重试”再次请求"));
                 MessageBox.Show(
                     this,
-                    exception.Message,
-                    "MCP 调用失败",
+                    exception.Message +
+                        (workspaceEditAppliedThisGeneration
+                            ? "\r\n\r\n注意：代码修改已经应用，" +
+                                "但后续工具调用失败。请检查文件或点击“撤销修改”。"
+                            : string.Empty),
+                    codeWorkspace == null
+                        ? "MCP 调用失败"
+                        : "代码工具调用失败",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
             catch (Exception exception)
             {
                 DeactivateStreamingOutput();
+                workspaceEditAppliedThisGeneration =
+                    workspaceTools != null && workspaceTools.EditApplied;
                 if (regenerate)
                 {
                     RenderConversation(session);
@@ -5776,7 +6173,7 @@ namespace FilePromptAIWin7
                 {
                     RemoveStreamingTurnPreview(session);
                 }
-                if (!turnSaved)
+                if (!turnSaved && !workspaceEditAppliedThisGeneration)
                 {
                     RememberFailedGeneration(
                         session,
@@ -5785,9 +6182,15 @@ namespace FilePromptAIWin7
                 }
                 SetStatus(turnSaved
                     ? "回复已保存，但界面更新失败；请切换会话后查看"
-                    : "生成失败，可点击“重试”再次请求");
+                    : (workspaceEditAppliedThisGeneration
+                        ? "代码修改已应用，但后续处理失败；可在工作区栏撤销"
+                        : "生成失败，可点击“重试”再次请求"));
                 MessageBox.Show(
-                    "发生错误：" + exception.Message,
+                    "发生错误：" + exception.Message +
+                        (workspaceEditAppliedThisGeneration
+                            ? "\r\n\r\n注意：代码修改已经应用，" +
+                                "但后续处理失败。请检查文件或点击“撤销修改”。"
+                            : string.Empty),
                     "生成失败",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
@@ -5814,6 +6217,7 @@ namespace FilePromptAIWin7
                 streamedContentStart = -1;
                 SetGeneratingState(false);
                 connectionStatusLabel.Text = BuildConnectionStatus();
+                UpdateCodeWorkspaceState();
                 UpdateContextSummary();
             }
         }
@@ -6225,6 +6629,72 @@ namespace FilePromptAIWin7
             return DisposeRegistrationAfterAsync(
                 completion.Task,
                 registration);
+        }
+
+        private Task<bool> ConfirmWorkspaceEditAsync(
+            WorkspaceEditProposal proposal,
+            CancellationToken cancellationToken)
+        {
+            if (proposal == null)
+            {
+                throw new ArgumentNullException("proposal");
+            }
+
+            if (!InvokeRequired)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Task.FromResult(
+                    ShowWorkspaceEditApproval(proposal));
+            }
+
+            TaskCompletionSource<bool> completion =
+                new TaskCompletionSource<bool>();
+            CancellationTokenRegistration registration =
+                cancellationToken.Register(delegate
+                {
+                    completion.TrySetCanceled();
+                });
+            try
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    if (cancellationToken.IsCancellationRequested ||
+                        IsDisposed || codeWorkspace == null)
+                    {
+                        completion.TrySetCanceled();
+                        return;
+                    }
+
+                    try
+                    {
+                        completion.TrySetResult(
+                            ShowWorkspaceEditApproval(proposal));
+                    }
+                    catch (Exception exception)
+                    {
+                        completion.TrySetException(exception);
+                    }
+                });
+            }
+            catch (Exception exception)
+            {
+                completion.TrySetException(exception);
+            }
+
+            return DisposeRegistrationAfterAsync(
+                completion.Task,
+                registration);
+        }
+
+        private bool ShowWorkspaceEditApproval(
+            WorkspaceEditProposal proposal)
+        {
+            return WorkspaceDiffDialog.Confirm(
+                this,
+                Font,
+                proposal.RelativePath,
+                proposal.ExpectedSha256,
+                proposal.UnifiedDiff);
         }
 
         private static async Task<bool> DisposeRegistrationAfterAsync(
@@ -6704,6 +7174,7 @@ namespace FilePromptAIWin7
             }
             progressBar.Visible = generating || isAddingFiles;
             UpdateOutputButtons(generating);
+            UpdateCodeWorkspaceState();
         }
 
         private void SetGenerationControlsEnabled(bool enabled)
@@ -6782,7 +7253,8 @@ namespace FilePromptAIWin7
             bool actual = enabled &&
                 generationCancellation == null &&
                 connectionTestCancellation == null &&
-                !isAddingFiles;
+                !isAddingFiles &&
+                codeWorkspace == null;
             if (addFileButton != null)
             {
                 addFileButton.Enabled = actual;
@@ -7474,6 +7946,7 @@ namespace FilePromptAIWin7
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
             }
+            ClearCodeWorkspace(false);
             modelClient.Dispose();
             if (settingsDialog != null)
             {

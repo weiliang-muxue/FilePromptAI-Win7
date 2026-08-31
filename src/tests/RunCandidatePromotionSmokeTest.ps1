@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.18'
+    [string]$Version = '1.19'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -186,7 +186,7 @@ function New-PromotionFixture {
     $fixtureInstalledJourney = Join-Path $fixtureTests (
         'RunInstalledUserJourneySmokeTest.ps1')
     $journeyText =
-        "param([string]`$Version = '1.18', [string]`$ArchivePath = '')`r`n" +
+        "param([string]`$Version = '1.19', [string]`$ArchivePath = '')`r`n" +
         "`$resolved = [IO.Path]::GetFullPath(`$ArchivePath)`r`n"
     if ($FailInstalledJourney) {
         $journeyText +=

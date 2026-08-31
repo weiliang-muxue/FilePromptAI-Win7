@@ -2530,7 +2530,425 @@ internal static class UiStateSmokeTest
         TestSessionManagement(formType, form);
         TestDeleteSessionDraftTransaction(formType, form);
         TestExitConfirmationState(formType, form);
+        TestCodeWorkspaceUiAndSessionLifetime(
+            application,
+            formType,
+            form,
+            dataRoot);
+        TestWorkspaceDiffDefaults(application, form);
         ThrowIfUiThreadException();
+        TestCodeWorkspaceCloseCleanupLast(
+            application,
+            formType,
+            dataRoot);
+    }
+
+    private static void TestCodeWorkspaceUiAndSessionLifetime(
+        Assembly application,
+        Type formType,
+        object form,
+        string dataRoot)
+    {
+        Type workspaceType = application.GetType(
+            "FilePromptAIWin7.CodeWorkspace",
+            true);
+        MethodInfo openWorkspace = workspaceType.GetMethod(
+            "OpenFromSelectedFile",
+            BindingFlags.Static | BindingFlags.Public);
+        AssertTrue(
+            openWorkspace != null,
+            "Code workspace opens only from an explicitly selected file");
+
+        object store = GetField(formType, form, "conversationStore");
+        Type storeType = store.GetType();
+        IList sessions = (IList)storeType.GetProperty(
+            "Sessions").GetValue(store, null);
+        HashSet<string> originalIds = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (object session in sessions)
+        {
+            originalIds.Add(GetSessionId(session));
+        }
+        string originalCurrentId = Convert.ToString(
+            storeType.GetProperty("CurrentSessionId").GetValue(store, null));
+
+        string workspaceRoot = Path.Combine(
+            dataRoot,
+            "workspace-ui-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspaceRoot);
+        string selectedPath = Path.Combine(workspaceRoot, "Program.cs");
+        File.WriteAllText(selectedPath, "class Program { }\r\n");
+
+        object firstWorkspace = null;
+        object secondWorkspace = null;
+        try
+        {
+            firstWorkspace = openWorkspace.Invoke(
+                null,
+                new object[] { selectedPath });
+            SetField(formType, form, "codeWorkspace", firstWorkspace);
+            object currentSession = storeType.GetProperty(
+                "CurrentSession").GetValue(store, null);
+            SetField(
+                formType,
+                form,
+                "codeWorkspaceSessionId",
+                GetSessionId(currentSession));
+            InvokePrivate(formType, form, "UpdateCodeWorkspaceState");
+            Application.DoEvents();
+
+            Panel statusPanel = GetField(
+                formType,
+                form,
+                "codeWorkspacePanel") as Panel;
+            RowStyle statusRow = GetField(
+                formType,
+                form,
+                "codeWorkspaceRowStyle") as RowStyle;
+            Label statusLabel = GetField(
+                formType,
+                form,
+                "codeWorkspaceLabel") as Label;
+            Button addFile = GetField(
+                formType,
+                form,
+                "addFileButton") as Button;
+            Panel dropTarget = GetField(
+                formType,
+                form,
+                "fileDropTargetPanel") as Panel;
+            string rootName = new DirectoryInfo(workspaceRoot).Name;
+            AssertTrue(
+                statusPanel != null && statusPanel.Visible &&
+                    statusRow != null && statusRow.Height > 0F,
+                "Selected code workspace has a visible authorization status row");
+            AssertTrue(
+                statusLabel != null &&
+                    statusLabel.Text.IndexOf(
+                        rootName,
+                        StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    statusLabel.Text.IndexOf(
+                        "Program.cs",
+                        StringComparison.OrdinalIgnoreCase) >= 0,
+                "Workspace status identifies the authorized directory and selected relative file");
+            AssertTrue(
+                addFile != null && !addFile.Enabled &&
+                    dropTarget != null && !dropTarget.Enabled,
+                "Code mode disables unrestricted attachment and drop inputs");
+
+            string combinedPrompt = Convert.ToString(InvokePrivate(
+                formType,
+                form,
+                "BuildCombinedSystemPrompt"));
+            AssertTrue(
+                combinedPrompt.IndexOf(
+                    "相对路径",
+                    StringComparison.Ordinal) >= 0 &&
+                combinedPrompt.IndexOf(
+                    "修改前必须先搜索或读取",
+                    StringComparison.Ordinal) >= 0 &&
+                combinedPrompt.IndexOf(
+                    "不能创建、删除、重命名文件",
+                    StringComparison.Ordinal) >= 0 &&
+                combinedPrompt.IndexOf(
+                    "不能调用 MCP",
+                    StringComparison.Ordinal) >= 0,
+                "Workspace prompt enforces relative paths, read-before-edit, no file creation and no MCP");
+
+            InvokePrivate(
+                formType,
+                form,
+                "OnNewSessionClick",
+                form,
+                EventArgs.Empty);
+            AssertTrue(
+                GetField(formType, form, "codeWorkspace") == null &&
+                    CaptureInvocationFailure(delegate
+                    {
+                        InvokePublic(firstWorkspace, "ReadFile", "Program.cs");
+                    }) is ObjectDisposedException,
+                "Creating a new session releases and disposes workspace authorization");
+            firstWorkspace = null;
+
+            object sourceSession = storeType.GetProperty(
+                "CurrentSession").GetValue(store, null);
+            object targetSession = InvokePublic(
+                store,
+                "CreateSession",
+                "Workspace lifetime target");
+            InvokePublic(store, "SelectSession", GetSessionId(sourceSession));
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+
+            secondWorkspace = openWorkspace.Invoke(
+                null,
+                new object[] { selectedPath });
+            SetField(formType, form, "codeWorkspace", secondWorkspace);
+            SetField(
+                formType,
+                form,
+                "codeWorkspaceSessionId",
+                GetSessionId(sourceSession));
+            InvokePrivate(formType, form, "UpdateCodeWorkspaceState");
+
+            ListBox sessionList = GetField(
+                formType,
+                form,
+                "sessionListBox") as ListBox;
+            int targetIndex = FindSessionIndex(
+                sessionList.Items,
+                GetSessionId(targetSession));
+            AssertTrue(
+                targetIndex >= 0,
+                "Workspace lifetime target session is visible");
+            SetField(formType, form, "isLoadingSession", true);
+            try
+            {
+                sessionList.SelectedIndex = targetIndex;
+            }
+            finally
+            {
+                SetField(formType, form, "isLoadingSession", false);
+            }
+            InvokePrivate(
+                formType,
+                form,
+                "OnSessionSelected",
+                sessionList,
+                EventArgs.Empty);
+            AssertTrue(
+                GetField(formType, form, "codeWorkspace") == null &&
+                    CaptureInvocationFailure(delegate
+                    {
+                        InvokePublic(secondWorkspace, "ReadFile", "Program.cs");
+                    }) is ObjectDisposedException,
+                "Selecting another session releases and disposes workspace authorization");
+            secondWorkspace = null;
+        }
+        finally
+        {
+            IDisposable firstDisposable = firstWorkspace as IDisposable;
+            if (firstDisposable != null)
+            {
+                firstDisposable.Dispose();
+            }
+            IDisposable secondDisposable = secondWorkspace as IDisposable;
+            if (secondDisposable != null)
+            {
+                secondDisposable.Dispose();
+            }
+            if (GetField(formType, form, "codeWorkspace") != null)
+            {
+                InvokePrivate(formType, form, "ClearCodeWorkspace", false);
+            }
+
+            sessions = (IList)storeType.GetProperty(
+                "Sessions").GetValue(store, null);
+            List<string> temporaryIds = new List<string>();
+            foreach (object session in sessions)
+            {
+                string id = GetSessionId(session);
+                if (!originalIds.Contains(id))
+                {
+                    temporaryIds.Add(id);
+                }
+            }
+            foreach (string id in temporaryIds)
+            {
+                InvokePublic(store, "DeleteSession", id);
+            }
+            if (!string.IsNullOrEmpty(originalCurrentId))
+            {
+                InvokePublic(store, "SelectSession", originalCurrentId);
+            }
+            InvokePrivate(formType, form, "RefreshSessionList");
+            InvokePrivate(formType, form, "LoadCurrentSession");
+            InvokePrivate(formType, form, "RestoreCurrentDraft");
+        }
+    }
+
+    private static void TestWorkspaceDiffDefaults(
+        Assembly application,
+        object owner)
+    {
+        Type dialogType = application.GetType(
+            "FilePromptAIWin7.WorkspaceDiffDialog",
+            true);
+        MethodInfo confirm = dialogType.GetMethod(
+            "Confirm",
+            BindingFlags.Static | BindingFlags.Public);
+        bool dialogSeen = false;
+        bool noAcceptButton = false;
+        bool rejectIsCancel = false;
+        bool rejectFocused = false;
+        System.Windows.Forms.Timer closeTimer =
+            new System.Windows.Forms.Timer();
+        closeTimer.Interval = 100;
+        closeTimer.Tick += delegate
+        {
+            foreach (Form open in Application.OpenForms)
+            {
+                if (!string.Equals(
+                    open.Text,
+                    "确认代码修改",
+                    StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                dialogSeen = true;
+                noAcceptButton = open.AcceptButton == null;
+                Button reject = open.CancelButton as Button;
+                rejectIsCancel = reject != null &&
+                    string.Equals(reject.Text, "拒绝", StringComparison.Ordinal);
+                rejectFocused = reject != null &&
+                    (reject.Focused || ReferenceEquals(open.ActiveControl, reject));
+                open.DialogResult = DialogResult.No;
+                open.Close();
+                closeTimer.Stop();
+                break;
+            }
+        };
+
+        try
+        {
+            closeTimer.Start();
+            bool approved = (bool)confirm.Invoke(
+                null,
+                new object[]
+                {
+                    owner as IWin32Window,
+                    ((Form)owner).Font,
+                    "Program.cs",
+                    new string('a', 64),
+                    "--- a/Program.cs\r\n+++ b/Program.cs\r\n"
+                });
+            AssertTrue(
+                dialogSeen && !approved,
+                "Workspace diff dialog can be closed automatically and defaults to rejection");
+            AssertTrue(
+                noAcceptButton,
+                "Workspace diff dialog has no Enter-to-apply AcceptButton");
+            AssertTrue(
+                rejectIsCancel && rejectFocused,
+                "Workspace diff dialog maps Cancel to reject and focuses it initially");
+        }
+        finally
+        {
+            closeTimer.Stop();
+            closeTimer.Dispose();
+        }
+    }
+
+    private static void TestCodeWorkspaceCloseCleanupLast(
+        Assembly application,
+        Type formType,
+        string dataRoot)
+    {
+        string workspaceRoot = Path.Combine(
+            dataRoot,
+            "workspace-close-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspaceRoot);
+        string selectedPath = Path.Combine(workspaceRoot, "CloseTest.cs");
+        File.WriteAllText(selectedPath, "class Before { }\r\n");
+        string backupDirectory = Path.Combine(dataRoot, "WorkspaceBackups");
+        int backupCountBefore = CountWorkspaceBackups(backupDirectory);
+
+        Type workspaceType = application.GetType(
+            "FilePromptAIWin7.CodeWorkspace",
+            true);
+        Type editType = application.GetType(
+            "FilePromptAIWin7.WorkspaceEdit",
+            true);
+        object workspace = workspaceType.GetMethod(
+            "OpenFromSelectedFile",
+            BindingFlags.Static | BindingFlags.Public).Invoke(
+                null,
+                new object[] { selectedPath });
+        Form secondary = null;
+        bool closingInvoked = false;
+        try
+        {
+            object read = InvokePublic(workspace, "ReadFile", "CloseTest.cs");
+            string sha256 = Convert.ToString(GetProperty(read, "Sha256"));
+            object edit = Activator.CreateInstance(
+                editType,
+                new object[]
+                {
+                    "CloseTest.cs",
+                    sha256,
+                    "class After { }\r\n"
+                });
+            InvokePublic(workspace, "ApplyEdit", edit);
+            AssertTrue(
+                CountWorkspaceBackups(backupDirectory) ==
+                    backupCountBefore + 1,
+                "Applied workspace edit creates one encrypted undo backup");
+
+            secondary = Activator.CreateInstance(formType, true) as Form;
+            AssertTrue(
+                secondary != null,
+                "Close cleanup uses a secondary production MainForm");
+            SetField(formType, secondary, "codeWorkspace", workspace);
+            object store = GetField(formType, secondary, "conversationStore");
+            object current = store.GetType().GetProperty(
+                "CurrentSession").GetValue(store, null);
+            SetField(
+                formType,
+                secondary,
+                "codeWorkspaceSessionId",
+                GetSessionId(current));
+            InvokePrivate(formType, secondary, "UpdateCodeWorkspaceState");
+            SetField(formType, secondary, "exitConfirmationGranted", true);
+            FormClosingEventArgs closing = new FormClosingEventArgs(
+                CloseReason.ApplicationExitCall,
+                false);
+            InvokePrivate(
+                formType,
+                secondary,
+                "OnFormClosing",
+                secondary,
+                closing);
+            closingInvoked = true;
+
+            Exception disposedFailure = CaptureInvocationFailure(delegate
+            {
+                InvokePublic(workspace, "ReadFile", "CloseTest.cs");
+            });
+            AssertTrue(
+                !closing.Cancel && disposedFailure is ObjectDisposedException,
+                "Closing MainForm disposes the active workspace capability");
+            AssertTrue(
+                CountWorkspaceBackups(backupDirectory) == backupCountBefore,
+                "Closing MainForm removes its temporary workspace undo backup");
+            workspace = null;
+        }
+        finally
+        {
+            if (workspace != null)
+            {
+                ((IDisposable)workspace).Dispose();
+            }
+            if (secondary != null)
+            {
+                if (!closingInvoked && !secondary.IsDisposed)
+                {
+                    SetField(
+                        formType,
+                        secondary,
+                        "exitConfirmationGranted",
+                        true);
+                }
+                secondary.Dispose();
+            }
+        }
+    }
+
+    private static int CountWorkspaceBackups(string directory)
+    {
+        return Directory.Exists(directory)
+            ? Directory.GetFiles(directory, "*.fpwbak").Length
+            : 0;
     }
 
     private static void TestDefaultSettingsPersistence(
